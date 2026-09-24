@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Thu, 24 Sep 2026 12:00:00 +0500
+Subject: [PATCH] Keep the bezel a nib gives a text field
+
+The theme swizzles -[NSTextField initWithFrame:] and -initWithCoder: to
+make unbezeled the default, on the grounds that labels are the common
+case. For a field made in code that is a default; for one loaded from a
+nib it overrides what the nib says. Every input field in a nib therefore
+draws flat, and - without the bezel's inset - with its text about two
+points above its label.
+
+Leave nib-loaded fields as the nib has them, and keep the unbezeled
+default for fields made in code.
+---
+diff --git a/NSTextFieldCell+Eau.m b/NSTextFieldCell+Eau.m
+index 0b66cd1..1e37ee1 100644
+--- a/NSTextFieldCell+Eau.m
++++ b/NSTextFieldCell+Eau.m
+@@ -262,12 +262,12 @@ titleRect.size.height += 2;
+ 
+ - (id)initEauWithCoder:(NSCoder *)aDecoder
+ {
+-  self = [self initEauWithCoder:aDecoder];
+-  if (self != nil)
+-    {
+-      [self setBezeled: NO];
+-    }
+-  return self;
++  /* A field from a nib already says whether it is bezeled -- an input
++     field in Interface Builder is -- so leave it as the nib has it.  The
++     unbezeled default is for fields made in code, where a label is the
++     common case; overriding the nib turned every input field in it into
++     a flat one, with its text drawn higher than its label. */
++  return [self initEauWithCoder:aDecoder];
+ }
+ 
+ @end

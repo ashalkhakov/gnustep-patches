@@ -1,0 +1,101 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Thu, 24 Sep 2026 12:00:00 +0500
+Subject: [PATCH] Keep the row expression alive across -removeRowForVariable:
+
+-[GSCSTableau removeRowForVariable:] reads the expression for a row out
+of the _rows dictionary, removes the entry -- which releases the
+expression, since the dictionary is its only owner -- and then walks
+the freed expression's term variables. Its caller,
+-pivotWithEntryVariable:exitVariable:, fetched the same expression a
+line earlier and goes on to rewrite it and put it back into the tableau
+under the entry variable, all on a freed object.
+
+Every content-view resize of a window that has a GSAutoLayoutEngine
+goes through -[GSAutoLayoutEngine updateContentViewSize], which removes
+and re-adds the size constraints, and removing a constraint pivots. So
+any resize of such a window is a use-after-free whose outcome depends
+on what the allocator has since put in the chunk: a segfault in fast
+enumeration over the freed term array, a silently corrupted tableau, or
+nothing at all. The crash surfaces as a memcpy fault in
+-[GSMutableArray countByEnumeratingWithState:objects:count:] below
+-removeRowForVariable:, under -[NSView setFrame:] on the window
+decoration view.
+
+A window gets an engine without ever asking for Auto Layout. On GNUstep
+-layoutSubtreeIfNeeded is not a no-op for a constraint-free window: it
+runs -updateConstraints over the subtree,
+translatesAutoresizingMaskIntoConstraints is YES by default, so every
+view's autoresizing mask becomes a set of
+NSAutoresizingMaskLayoutConstraints, the first of which creates the
+window's GSAutoLayoutEngine. An application that calls
+-layoutSubtreeIfNeeded once after building its view hierarchy -- a
+common Cocoa idiom for "lay out now" -- is therefore on the Cassowary
+solver from then on, and dies when the window is maximized, or when a
+window manager resizes the window as it maps it.
+
+Retain the expression for the current autorelease scope before the row
+is removed -- the pattern that -[GSCassowarySolver
+removeConstraintFromTableau:] already uses for its marker variable.
+
+gnustep-gui's NSLayoutConstraint, NSLayoutAnchor, NSLayoutGuide and
+NSCollectionViewFlowLayout suites pass with the change, as does the
+rest of Tests/gui, 4,675 tests.
+
+A reproduction program, gscstableau-removerow-use-after-free.m,
+accompanies this patch: a window of plain autoresizing views, one
+-layoutSubtreeIfNeeded and a resize. Valgrind names the freed object on
+the first resize and MALLOC_PERTURB_ turns it into a segfault every
+time; with the change it is clean.
+---
+Keep the row expression alive across -[GSCSTableau removeRowForVariable:]
+
+-[GSCSTableau removeRowForVariable:] reads the expression for a row out of
+the _rows dictionary, removes the entry -- which releases the expression,
+since the dictionary is its only owner -- and then walks the freed
+expression's term variables. Its caller, -pivotWithEntryVariable:exitVariable:,
+fetched the same expression a line earlier and goes on to rewrite it and
+put it back into the tableau under the entry variable, all on a freed
+object.
+
+Every content-view resize of a window that has a GSAutoLayoutEngine goes
+through -[GSAutoLayoutEngine updateContentViewSize], which removes and
+re-adds the size constraints, and removing a constraint pivots. So any
+resize of such a window is a use-after-free whose outcome depends on what
+the allocator has since put in the chunk: a segfault in fast enumeration
+over the freed term array, a silently corrupted tableau, or nothing.
+
+A window gets an engine without ever asking for Auto Layout: on GNUstep
+-layoutSubtreeIfNeeded runs -updateConstraints over the subtree, which
+translates every autoresizing mask into NSAutoresizingMaskLayoutConstraints
+and creates the engine. XFormsViewer's document window does exactly that,
+and dies on maximize.
+
+Retain the expression for the current autorelease scope before the row is
+removed -- the pattern -[GSCassowarySolver removeConstraintFromTableau:]
+already uses for its marker variable.
+
+A standalone reproduction is in gscstableau-removerow-use-after-free.m:
+under valgrind, "Invalid read ... removeRowForVariable: ... free'd by
+removeObjectForKey:" on the first resize; with MALLOC_PERTURB_ set, a
+segfault. With this patch it is clean, and gnustep-gui's NSLayoutConstraint,
+NSLayoutAnchor, NSLayoutGuide and NSCollectionViewFlowLayout suites pass.
+
+diff --git a/Source/GSCSTableau.m b/Source/GSCSTableau.m
+index a4167466e..4f97dcb9e 100644
+--- a/Source/GSCSTableau.m
++++ b/Source/GSCSTableau.m
+@@ -214,6 +214,13 @@
+                  userInfo: nil];
+       [missingExpressionException raise];
+     }
++  /* The row dictionary is the expression's only owner.  Removing the entry
++   * releases it, but its term variables are still needed below, and
++   * -pivotWithEntryVariable:exitVariable: goes on to rewrite the very same
++   * expression after this method returns.  Keep it alive for the rest of
++   * the current autorelease scope.
++   */
++  expression = AUTORELEASE(RETAIN(expression));
+   [_rows removeObjectForKey: variable];
+   if ([variable isExternal])
+     {

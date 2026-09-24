@@ -1,0 +1,75 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Thu, 24 Sep 2026 12:00:00 +0500
+Subject: [PATCH] Move the attribute subtree when node adoption fails
+
+-[NSXMLElement addAttribute:] moves the attribute into the element with
+xmlDOMWrapAdoptNode(), ignores the result, and then frees the private
+document the attribute came from. When the adoption fails, the
+attribute's value nodes are left pointing at that freed document, and
+the next thing to walk the attribute -- a later -detach, or the
+parent's dealloc -- reads freed memory. The symptom is a segfault
+inside xmlDictOwns(), reached through adoptString -> setTreeDoc ->
+-[NSXMLNode detach].
+
+The adoption fails for an attribute whose namespace has no href.
+-[NSXMLNode setName:] with a prefix it cannot resolve -- an attribute
+built before its element is in a document, so the prefix is not
+declared yet -- makes a placeholder xmlNs with no href and a private
+xmlDoc to hold it. libxml2 refuses to adopt a namespace without an
+href, after it has set attr->doc and before it walks the value nodes,
+and returns -1.
+
+Every libxml2 from 2.9 to 2.13 fails the adoption the same way. The
+dangling pointer is created deterministically; only whether reading it
+crashes depends on what the allocator has since put in the freed chunk,
+and on how the library was built. A gnustep-base compiled against
+libxml2 2.12 or newer uses its own updateTreeDocManually() when the
+element is later inserted, which rewrites every pointer under the
+element and so repairs the attribute by accident; against 2.9.x it
+calls xmlDOMWrapAdoptNode() again, whose source-document sanity check
+skips exactly the node that needs fixing. That is why the crash looks
+like a platform difference rather than a bug.
+
+Check the result of xmlDOMWrapAdoptNode() and, when it fails, move the
+attribute subtree with xmlSetTreeDoc() before the private document is
+freed. The private document has no dictionary, so it owns none of the
+strings and a plain pointer update is enough.
+
+gnustep-base's own NSXML suites, 524 tests, pass with the change on
+libxml2 2.9.14 and 2.13.8.
+
+A reproduction program accompanies this patch; it exits 1 on an
+unpatched library and 0 with the change, and shows the invalid read
+under valgrind.
+---
+diff --git a/Source/NSXMLElement.m b/Source/NSXMLElement.m
+index 7484209..c1833aa 100644
+--- a/Source/NSXMLElement.m
++++ b/Source/NSXMLElement.m
+@@ -324,8 +324,23 @@ GS_PRIVATE_INTERNAL(NSXMLElement)
+         }
+ 
+ #if LIBXML_VERSION >= 20620
+-      xmlDOMWrapAdoptNode(NULL, attr->doc, (xmlNodePtr)attr, 
+-                          theNode->doc, theNode, 0);
++      if (xmlDOMWrapAdoptNode(NULL, attr->doc, (xmlNodePtr)attr,
++        theNode->doc, theNode, 0) != 0)
++        {
++          /* libxml2 refuses to adopt an attribute whose namespace has no
++           * href (the placeholder -setName: makes for a prefix that is not
++           * declared yet, to be resolved once the element is placed), and
++           * xmlDOMWrapAdoptAttr fails only after it has moved the attribute
++           * itself and before it walks the value nodes.  Those are left
++           * pointing at the private document freed below, so the next
++           * thing to walk the attribute (a later -detach, or the parent's
++           * dealloc) reads freed memory.  Move the whole subtree ourselves
++           * instead.  The private document has no dictionary, so it owns
++           * none of the strings and a plain pointer update is enough.
++           */
++          attr->doc = tmp;
++          xmlSetTreeDoc((xmlNodePtr)attr, theNode->doc);
++        }
+ #else
+       xmlSetTreeDoc((xmlNodePtr)attr, theNode->doc);
+ #endif

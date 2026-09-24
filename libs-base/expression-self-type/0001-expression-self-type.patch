@@ -1,0 +1,35 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Thu, 24 Sep 2026 12:00:00 +0500
+Subject: [PATCH] Give the shared SELF expression its own expression type
+
+Every kind of NSExpression is built through -initWithExpressionType:,
+which is what -expressionType answers with - every kind but one. The
+shared expression behind +expressionForEvaluatedObject is built with
++new, so its type stays zero, and zero is NSConstantValueExpressionType:
+SELF reports itself as a constant value.
+
+Anything that switches on -expressionType is then wrong about SELF. A
+persistent store translating a predicate either mistakes it for a
+constant and asks for a -constantValue it has not got, or quietly
+declines to translate something it understands.
+
+Build the shared expression with its own type, like all the others.
+
+A reproduction program accompanies this patch; it exits 1 on an
+unpatched library and 0 with the change.
+---
+diff --git a/Source/NSPredicate.m b/Source/NSPredicate.m
+index dabf91d1c..572b628e0 100644
+--- a/Source/NSPredicate.m
++++ b/Source/NSPredicate.m
+@@ -1800,7 +1827,8 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
+ {
+   if (self == [NSExpression class] && nil == evaluatedObjectExpression)
+     {
+-      evaluatedObjectExpression = [GSEvaluatedObjectExpression new];
++      evaluatedObjectExpression = [[GSEvaluatedObjectExpression alloc]
++	initWithExpressionType: NSEvaluatedObjectExpressionType];
+ 
+       /* An archive names the kinds of expression the way OS X does, so that
+        * one written here can be read there and the other way about.

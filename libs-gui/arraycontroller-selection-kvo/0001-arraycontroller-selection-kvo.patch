@@ -1,0 +1,97 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Thu, 24 Sep 2026 12:00:00 +0500
+Subject: [PATCH] Notify observers of the keys an array controller selection affects
+
+-[NSArrayController setSelectionIndexes:] changes the selection without
+a word to key-value observers. Automatic KVO fires for selectionIndexes
+itself, since it is the setter, but nothing is declared to depend on it,
+so selection, selectedObjects, canRemove and canSelectNext/Previous stay
+silent. Every binding that follows the selection freezes at its initial
+state: a Remove button bound to canRemove stays grey forever, and a
+control bound through selection.<key> keeps the first row's value.
+
+-selection also answered with the raw content array, so selection.<key>
+collected over every row and could not be observed at all, since
+observing a key on an array raises.
+
+Declare the dependent keys with +keyPathsForValuesAffecting..., and
+answer -selection with the selected object when exactly one row is
+selected and nil otherwise. Full Cocoa fidelity wants a multi-selection
+proxy answering NSMultipleValuesMarker; that is noted in the code for
+the day a binding needs it.
+
+A reproduction program accompanies this patch; it registers observers
+for the seven selection-dependent key paths, changes the selection and
+reports which of them heard about it - exit 0 with the change, 1
+without.
+---
+diff --git a/Source/NSArrayController.m b/Source/NSArrayController.m
+index 471dee4..fbb8ad9 100644
+--- a/Source/NSArrayController.m
++++ b/Source/NSArrayController.m
+@@ -397,6 +397,64 @@
+   return [[self arrangedObjects] objectsAtIndexes: _selection_indexes];
+ }
+ 
++/* Everything a selection-dependent binding observes is derived from
++ * selectionIndexes (and, for the derived values below, the content),
++ * and setSelectionIndexes: already emits automatic KVO for its own
++ * key: declaring the dependencies makes selection, selectedObjects,
++ * canRemove and canSelectNext/Previous notify too, which is what keeps
++ * an enabled binding on canRemove or a value binding through
++ * selection.<key> alive when the user clicks another row. */
+++ (NSSet*) keyPathsForValuesAffectingSelection
++{
++  return [NSSet setWithObjects: @"selectionIndexes", @"content", nil];
++}
++
+++ (NSSet*) keyPathsForValuesAffectingSelectedObjects
++{
++  return [NSSet setWithObjects: @"selectionIndexes", @"content", nil];
++}
++
+++ (NSSet*) keyPathsForValuesAffectingSelectionIndex
++{
++  return [NSSet setWithObject: @"selectionIndexes"];
++}
++
+++ (NSSet*) keyPathsForValuesAffectingCanRemove
++{
++  return [NSSet setWithObject: @"selectionIndexes"];
++}
++
+++ (NSSet*) keyPathsForValuesAffectingCanSelectNext
++{
++  return [NSSet setWithObjects: @"selectionIndexes", @"content", nil];
++}
++
+++ (NSSet*) keyPathsForValuesAffectingCanSelectPrevious
++{
++  return [NSSet setWithObjects: @"selectionIndexes", @"content", nil];
++}
++
++/* The object selection.<key> paths read and write through.  The
++ * inherited implementation answers with the content ARRAY, so
++ * selection.name collected over every row (and observing it raised,
++ * because a key cannot be observed on an array).  One selected object
++ * is the overwhelmingly common binding case and is returned as
++ * itself; no selection, and - for now - multiple selection, answer
++ * nil, which key-value coding and the binding placeholders both
++ * handle.  (Full Cocoa fidelity wants a proxy that answers
++ * NSMultipleValuesMarker per key for multiple selection; that is left
++ * for the day a binding here needs it.) */
++- (id) selection
++{
++  NSArray *selected = [self selectedObjects];
++
++  if ([selected count] == 1)
++    {
++      return [selected objectAtIndex: 0];
++    }
++  return nil;
++}
++
+ - (NSUInteger) selectionIndex
+ {
+   return [_selection_indexes firstIndex];

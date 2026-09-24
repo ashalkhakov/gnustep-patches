@@ -1,0 +1,119 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Thu, 24 Sep 2026 12:00:00 +0500
+Subject: [PATCH] Encode when the caller requires secure coding
+
++[NSKeyedArchiver
+archivedDataWithRootObject:requiringSecureCoding:error:] - the modern
+(10.13) archiving entry point, and the only non-deprecated one on OS X -
+answers nil whenever secure coding is requested, without setting the
+error, even for objects that fully adopt NSSecureCoding. The class
+method skips the whole encode when requiresSecureCoding is YES, although
+the archiver instance has carried a requiresSecureCoding flag for years.
+
+Encode with the archiver's flag set, check that the root object's class
+supports secure coding and report a violation through the error as
+NSCoderInvalidValueError rather than silently answering nil for
+everything, and clear the error on success.
+
+A reproduction program accompanies this patch; it exits 1 on an
+unpatched library and 0 with the change.
+---
+diff --git a/Source/NSKeyedArchiver.m b/Source/NSKeyedArchiver.m
+index d359f4d..72cf690 100644
+--- a/Source/NSKeyedArchiver.m
++++ b/Source/NSKeyedArchiver.m
+@@ -26,9 +26,11 @@
+ #define	EXPOSE_NSKeyedArchiver_IVARS	1
+ #import "Foundation/NSAutoreleasePool.h"
+ #import "Foundation/NSData.h"
++#import "Foundation/NSError.h"
+ #import "Foundation/NSException.h"
+ #import "Foundation/NSScanner.h"
+ #import "Foundation/NSValue.h"
++#import "Foundation/FoundationErrors.h"
+ 
+ #import "GSPrivate.h"
+ 
+@@ -445,32 +447,58 @@ static NSDictionary *makeReference(unsigned ref)
+                   requiringSecureCoding: (BOOL)requiresSecureCoding
+                                   error: (NSError **)error
+ {
+-  NSData *d = nil;
+-
+-  if (requiresSecureCoding == NO)
++  NSData	*d = nil;
++  NSMutableData	*m = nil;
++  NSKeyedArchiver	*a = nil;
++
++  /* Requesting secure coding used to be refused outright: the method
++   * answered nil without setting the error, breaking every caller of
++   * the modern (10.13) archiving API for objects which do adopt
++   * NSSecureCoding.  The archiver instance has carried a
++   * requiresSecureCoding flag for years, so encode with the flag set
++   * instead, checking (as Apple's encoder does) that the root object's
++   * class supports secure coding.  */
++  if (requiresSecureCoding == YES
++    && ([anObject respondsToSelector: @selector(class)] == NO
++      || [[anObject class] supportsSecureCoding] == NO))
+     {
+-      NSMutableData	*m = nil;
+-      NSKeyedArchiver	*a = nil;
++      if (error != NULL)
++	{
++	  NSDictionary	*info = [NSDictionary dictionaryWithObject:
++	    [NSString stringWithFormat:
++	    @"The class '%@' does not support secure coding",
++	    NSStringFromClass([anObject class])]
++	    forKey: NSLocalizedDescriptionKey];
++
++	  *error = [NSError errorWithDomain: NSCocoaErrorDomain
++				       code: NSCoderInvalidValueError
++				   userInfo: info];
++	}
++      return nil;
++    }
+ 
+-      error = NULL;
+-      NS_DURING
+-        {
+-          m = [[NSMutableData alloc] initWithCapacity: 10240];
+-          a = [[NSKeyedArchiver alloc] initForWritingWithMutableData: m];
+-          [a encodeObject: anObject forKey: @"root"];
+-          [a finishEncoding];
+-          d = [m copy];
+-          DESTROY(m);
+-          DESTROY(a);
+-        }
+-      NS_HANDLER
+-        {
+-          DESTROY(m);
+-          DESTROY(a);
+-          [localException raise];
+-        }
+-      NS_ENDHANDLER;
++  if (error != NULL)
++    {
++      *error = nil;
++    }
++  NS_DURING
++    {
++      m = [[NSMutableData alloc] initWithCapacity: 10240];
++      a = [[NSKeyedArchiver alloc] initForWritingWithMutableData: m];
++      [a setRequiresSecureCoding: requiresSecureCoding];
++      [a encodeObject: anObject forKey: @"root"];
++      [a finishEncoding];
++      d = [m copy];
++      DESTROY(m);
++      DESTROY(a);
++    }
++  NS_HANDLER
++    {
++      DESTROY(m);
++      DESTROY(a);
++      [localException raise];
+     }
++  NS_ENDHANDLER;
+ 
+   return AUTORELEASE(d);
+ }
