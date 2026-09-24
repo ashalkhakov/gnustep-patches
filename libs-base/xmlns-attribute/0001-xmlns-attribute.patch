@@ -1,4 +1,4 @@
-From 3652672821acbdcbd980a75bb977eca316e67388 Mon Sep 17 00:00:00 2001
+From 1113ba564459f36610bc0bf9c2fcdeb03b512e20 Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Thu, 24 Sep 2026 12:00:00 +0500
 Subject: [PATCH] Treat an xmlns:prefix attribute as a namespace declaration
@@ -49,12 +49,16 @@ The NSXMLNode, NSXMLDocument and NSXMLElement test suites pass
 unchanged (251 / 37 / 132).
 
 The test added here aborts on an unpatched library, in a later
-innocent allocation, within a few hundred rounds.
+innocent allocation, within a few hundred rounds. Only the prefixed
+spelling took the faulty path, so the test puts it beside three cases
+that did not: a default xmlns, which carries no prefix; a namespace
+added as a namespace; and the same documents built but never released,
+which is what used to hide the fault and made it look intermittent.
 ---
- Source/NSXMLElement.m                    | 12 +++++
- Source/NSXMLNode.m                       | 10 +++-
- Tests/base/NSXMLElement/xmlnsAttribute.m | 62 ++++++++++++++++++++++++
- 3 files changed, 83 insertions(+), 1 deletion(-)
+ Source/NSXMLElement.m                    |  12 +++
+ Source/NSXMLNode.m                       |  10 +-
+ Tests/base/NSXMLElement/xmlnsAttribute.m | 116 +++++++++++++++++++++++
+ 3 files changed, 137 insertions(+), 1 deletion(-)
  create mode 100644 Tests/base/NSXMLElement/xmlnsAttribute.m
 
 diff --git a/Source/NSXMLElement.m b/Source/NSXMLElement.m
@@ -103,10 +107,10 @@ index e8300f8c5..c42cf5ac8 100644
  	    || (theNode->type == XML_ELEMENT_NODE))
 diff --git a/Tests/base/NSXMLElement/xmlnsAttribute.m b/Tests/base/NSXMLElement/xmlnsAttribute.m
 new file mode 100644
-index 000000000..f1997ffce
+index 000000000..fd0f74959
 --- /dev/null
 +++ b/Tests/base/NSXMLElement/xmlnsAttribute.m
-@@ -0,0 +1,62 @@
+@@ -0,0 +1,116 @@
 +#import "ObjectTesting.h"
 +#import "Foundation/NSAutoreleasePool.h"
 +#import "Foundation/NSArray.h"
@@ -121,12 +125,19 @@ index 000000000..f1997ffce
 + * then freed twice - so the damage landed in whatever allocation came
 + * next, several rounds later.  Enough rounds here to reach it.
 + */
-+int main(void)
++
++typedef enum {
++  PrefixedAttribute,	/* xmlns:rd="urn:b" as an attribute - the fault */
++  DefaultAttribute,	/* xmlns="urn:a" as an attribute                 */
++  RealNamespace		/* the same thing said properly                  */
++} Declaration;
++
++static BOOL
++buildAndRelease(Declaration how, NSUInteger rounds, BOOL release)
 +{
-+  NSAutoreleasePool	*arp = [NSAutoreleasePool new];
-+  NSUInteger		round;
-+  NSUInteger		rounds = 400;
-+  BOOL			wroteEveryRound = YES;
++  NSMutableArray	*kept = (release ? nil : [NSMutableArray array]);
++  NSUInteger		 round;
++  BOOL			 wroteEveryRound = YES;
 +
 +  for (round = 0; round < rounds; round++)
 +    {
@@ -134,11 +145,24 @@ index 000000000..f1997ffce
 +      NSXMLElement	*root;
 +      NSXMLDocument	*document;
 +      NSString		*xml;
-+      NSUInteger	child;
++      NSUInteger	 child;
 +
 +      root = [NSXMLElement elementWithName: @"Report"];
-+      [root addAttribute: [NSXMLNode attributeWithName: @"xmlns:rd"
-+					   stringValue: @"urn:b"]];
++      switch (how)
++	{
++	  case PrefixedAttribute:
++	    [root addAttribute: [NSXMLNode attributeWithName: @"xmlns:rd"
++						 stringValue: @"urn:b"]];
++	    break;
++	  case DefaultAttribute:
++	    [root addAttribute: [NSXMLNode attributeWithName: @"xmlns"
++						 stringValue: @"urn:a"]];
++	    break;
++	  case RealNamespace:
++	    [root addNamespace: [NSXMLNode namespaceWithName: @"rd"
++					     stringValue: @"urn:b"]];
++	    break;
++	}
 +
 +      for (child = 0; child < 40; child++)
 +	{
@@ -156,15 +180,49 @@ index 000000000..f1997ffce
 +	  wroteEveryRound = NO;
 +	}
 +
-+      [document release];
++      if (release)
++	{
++	  [document release];
++	}
++      else
++	{
++	  [kept addObject: AUTORELEASE(document)];
++	}
 +      [inner release];
 +    }
 +
-+  PASS(wroteEveryRound,
++  return wroteEveryRound;
++}
++
++int main(void)
++{
++  NSAutoreleasePool	*arp = [NSAutoreleasePool new];
++  NSUInteger const	 rounds = 400;
++
++  /* The fault: the document that carried the attribute is released, and
++   * the damage shows up in a later, innocent allocation.
++   */
++  PASS(buildAndRelease(PrefixedAttribute, rounds, YES),
 +    "a document with an xmlns: attribute writes itself out");
 +  PASS(YES,
 +    "%u rounds of building and releasing such a document leave the heap intact",
 +    (unsigned)rounds);
++
++  /* A control: a default namespace carries no prefix, so it never took
++   * the faulty path.
++   */
++  PASS(buildAndRelease(DefaultAttribute, rounds, YES),
++    "a document with an xmlns attribute writes itself out");
++
++  /* And another: said the way it ought to be said. */
++  PASS(buildAndRelease(RealNamespace, rounds, YES),
++    "a document with a namespace added as a namespace writes itself out");
++
++  /* Keeping the documents alive hides the fault entirely - which is what
++   * made it look intermittent.  A smaller count: this one holds them all.
++   */
++  PASS(buildAndRelease(PrefixedAttribute, 50, NO),
++    "the same documents, never released, write themselves out");
 +
 +  [arp release];
 +  return 0;
