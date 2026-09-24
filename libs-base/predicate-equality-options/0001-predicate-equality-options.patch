@@ -1,4 +1,4 @@
-From bccd9194f34ea31ebcd66e5a51f988a477fcd869 Mon Sep 17 00:00:00 2001
+From 638f5651b26c58247f4d1bc57327ff97821d945e Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Thu, 24 Sep 2026 12:00:00 +0500
 Subject: [PATCH] Honour [c] and [d] in equality comparisons
@@ -22,16 +22,16 @@ The test added here fails on an unpatched library: the two assertions
 about ==[c] and !=[c] fail, and the seven that check an option changes
 nothing else pass.
 ---
- Source/NSPredicate.m                       | 25 ++++++++-
+ Source/NSPredicate.m                       | 20 ++++++-
  Tests/base/NSPredicate/comparisonOptions.m | 63 ++++++++++++++++++++++
- 2 files changed, 86 insertions(+), 2 deletions(-)
+ 2 files changed, 81 insertions(+), 2 deletions(-)
  create mode 100644 Tests/base/NSPredicate/comparisonOptions.m
 
 diff --git a/Source/NSPredicate.m b/Source/NSPredicate.m
-index dabf91d1c..39ecea057 100644
+index dabf91d1c..99b1b6397 100644
 --- a/Source/NSPredicate.m
 +++ b/Source/NSPredicate.m
-@@ -1525,9 +1525,30 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
+@@ -1525,9 +1525,25 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
    switch (_type)
      {
        case NSEqualToPredicateOperatorType:
@@ -41,11 +41,6 @@ index dabf91d1c..39ecea057 100644
 +	{
 +	  BOOL	equal;
 +
-+	  /* The [c] and [d] options apply to equality as well as to
-+	   * ordering and matching: "Ada" ==[c] "ada" is true.  -isEqual:
-+	   * can express neither option, so two strings compared with one
-+	   * are compared as strings.
-+	   */
 +	  if ((_options & (NSCaseInsensitivePredicateOption
 +	    | NSDiacriticInsensitivePredicateOption))
 +	    && [leftResult isKindOfClass: [NSString class]]

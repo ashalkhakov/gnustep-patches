@@ -1,4 +1,4 @@
-From c56cf9bcaa3c815a96a14a45a52f102d5de899c5 Mon Sep 17 00:00:00 2001
+From 0c7b6dc419cb664b4f7f1fb57b729acd2d9b2ac2 Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Thu, 24 Sep 2026 12:00:00 +0500
 Subject: [PATCH] Keep the views and tracking rects the tracking walk visits
@@ -39,23 +39,19 @@ mouseEntered: handler outlives the walk that is holding it: the
 superview is the view's only owner, so -removeSubview: deallocates it
 before the handler returns, and the walk then reads it.
 ---
- Source/NSWindow.m                       |  25 ++
+ Source/NSWindow.m                       |  16 ++
  Tests/gui/NSWindow/trackingRectangles.m | 293 ++++++++++++++++++++++++
- 2 files changed, 318 insertions(+)
+ 2 files changed, 309 insertions(+)
  create mode 100644 Tests/gui/NSWindow/trackingRectangles.m
 
 diff --git a/Source/NSWindow.m b/Source/NSWindow.m
-index de8ae71e2..930973524 100644
+index de8ae71e2..51bcc9a69 100644
 --- a/Source/NSWindow.m
 +++ b/Source/NSWindow.m
-@@ -3961,6 +3961,14 @@ checkCursorRectanglesExited(NSView *theView,  NSEvent *theEvent, NSPoint lastPoi
+@@ -3961,6 +3961,10 @@ checkCursorRectanglesExited(NSView *theView,  NSEvent *theEvent, NSPoint lastPoi
  	  lastPoint = [theView convertPoint: lastPoint fromView: nil];
  	  loc = [theView convertPoint: loc fromView: nil];
            [tr getObjects: rects];
-+          /* The owners' mouseEntered: / mouseExited: run inside this loop
-+           * and may remove tracking rects (their own included); the
-+           * snapshot holds no references, so keep the entries alive for
-+           * the loop. */
 +          for (i = 0; i < count; ++i)
 +            {
 +              RETAIN(rects[i]);
@@ -63,7 +59,7 @@ index de8ae71e2..930973524 100644
  
            for (i = 0; i < count; ++i)
              {
-@@ -4044,6 +4052,10 @@ checkCursorRectanglesExited(NSView *theView,  NSEvent *theEvent, NSPoint lastPoi
+@@ -4044,6 +4048,10 @@ checkCursorRectanglesExited(NSView *theView,  NSEvent *theEvent, NSPoint lastPoi
                      }
                  }
              }
@@ -74,15 +70,10 @@ index de8ae71e2..930973524 100644
          }
      }
  
-@@ -4061,6 +4073,15 @@ checkCursorRectanglesExited(NSView *theView,  NSEvent *theEvent, NSPoint lastPoi
+@@ -4061,6 +4069,10 @@ checkCursorRectanglesExited(NSView *theView,  NSEvent *theEvent, NSPoint lastPoi
            NSUInteger i;
  
            [sb getObjects: subs];
-+          /* A mouseEntered: / mouseExited: sent while walking one subview
-+           * may remove another from theView -- a hover box a badge takes
-+           * down -- and theView may have been its only owner. The snapshot
-+           * holds no references, so keep the subviews alive for the walk:
-+           * a removed one is harmless to visit, a freed one is not. */
 +          for (i = 0; i < count; ++i)
 +            {
 +              RETAIN(subs[i]);
@@ -90,7 +81,7 @@ index de8ae71e2..930973524 100644
            for (i = 0; i < count; ++i)
              {
                if (![subs[i] isHidden])
-@@ -4068,6 +4089,10 @@ checkCursorRectanglesExited(NSView *theView,  NSEvent *theEvent, NSPoint lastPoi
+@@ -4068,6 +4080,10 @@ checkCursorRectanglesExited(NSView *theView,  NSEvent *theEvent, NSPoint lastPoi
                    (*ctImp)(self, ctSel, subs[i], theEvent);
                  }
              }

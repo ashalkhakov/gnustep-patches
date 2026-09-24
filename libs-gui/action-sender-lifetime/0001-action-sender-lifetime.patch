@@ -1,4 +1,4 @@
-From ca215ba95a528e95084b03b55e2c38b4df9ec8ce Mon Sep 17 00:00:00 2001
+From 8f1d99d1c757cfed58ae75a0b1e05018e239e3b2 Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Thu, 24 Sep 2026 12:00:00 +0500
 Subject: [PATCH] Retain the sender of an action until its caller is done with
@@ -39,44 +39,35 @@ It drains the autorelease pool holding the menu before the send: the
 notification -addItem... posts would otherwise keep the sender alive
 and hide the fault.
 ---
- Source/NSMenu.m                         |   7 ++
- Source/NSTextField.m                    |   8 ++
+ Source/NSMenu.m                         |   3 +
+ Source/NSTextField.m                    |   3 +
  Tests/gui/NSMenu/actionSenderLifetime.m | 149 ++++++++++++++++++++++++
- 3 files changed, 164 insertions(+)
+ 3 files changed, 155 insertions(+)
  create mode 100644 Tests/gui/NSMenu/actionSenderLifetime.m
 
 diff --git a/Source/NSMenu.m b/Source/NSMenu.m
-index d0a594934..3672ed665 100644
+index d0a594934..d598ecec0 100644
 --- a/Source/NSMenu.m
 +++ b/Source/NSMenu.m
-@@ -1190,6 +1190,13 @@ static BOOL menuBarVisible = YES;
+@@ -1190,6 +1190,9 @@ static BOOL menuBarVisible = YES;
    if (![item isEnabled])
      return;
  
-+  /* The action may release its sender -- a form that regenerates its
-+   * widgets when a value changes drops the popup, and the popup owns this
-+   * menu -- and the notification below still names the receiver.  Keep it
-+   * for the current autorelease scope, as Cocoa does for any sender.
-+   */
++  /* The action may release the sender; hold it across the send.  */
 +  IF_NO_ARC(AUTORELEASE(RETAIN(self));)
 +
    // Send the actual action and the stipulated notifications.
    d = [NSDictionary dictionaryWithObject: item forKey: @"MenuItem"];
    [nc postNotificationName: NSMenuWillSendActionNotification
 diff --git a/Source/NSTextField.m b/Source/NSTextField.m
-index 2ebd2772b..0adbd13b5 100644
+index 2ebd2772b..8ad7c84ec 100644
 --- a/Source/NSTextField.m
 +++ b/Source/NSTextField.m
-@@ -679,6 +679,14 @@ static Class textFieldCellClass;
+@@ -679,6 +679,9 @@ static Class textFieldCellClass;
    id textMovement;
    int movement;
  
-+  /* The action sent below may release its sender -- a form that
-+   * regenerates its widgets when a value is committed drops this field --
-+   * and the code after it still asks _window for the first responder and
-+   * may select the text again.  Keep the receiver for the current
-+   * autorelease scope, as Cocoa does for any sender.
-+   */
++  /* The action may release the sender; hold it across the send.  */
 +  IF_NO_ARC(AUTORELEASE(RETAIN(self));)
 +
    [super textDidEndEditing: aNotification];

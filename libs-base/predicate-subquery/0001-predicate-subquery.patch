@@ -1,4 +1,4 @@
-From b6936475d38615d95b64ef9a2a5fe6abd754c38e Mon Sep 17 00:00:00 2001
+From 2623f69bacdf02e82e9935bf9851cc7b4c89fc2d Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Thu, 24 Sep 2026 12:00:00 +0500
 Subject: [PATCH] Implement SUBQUERY in expressions and in the predicate parser
@@ -24,7 +24,8 @@ The iterator variable is bound by substituting it into the subpredicate
 for each member in turn, since -evaluateWithObject: passes no context
 for a variable to be looked up in. The member is also the object the
 subpredicate is evaluated against, so a key path inside it may be
-written either way round.
+written either way round. The iterator variable belongs to the
+subquery, so a substitution of variables from outside leaves it alone.
 
 The NSPredicate test suite (214 tests) passes with the change.
 
@@ -32,9 +33,9 @@ The test added here cannot run on an unpatched library: parsing
 "$f.age > 40" raises before the subquery is reached.
 ---
  Headers/Foundation/NSExpression.h |   6 +
- Source/NSPredicate.m              | 272 +++++++++++++++++++++++++++++-
- Tests/base/NSPredicate/subquery.m |  88 ++++++++++
- 3 files changed, 363 insertions(+), 3 deletions(-)
+ Source/NSPredicate.m              | 253 +++++++++++++++++++++++++++++-
+ Tests/base/NSPredicate/subquery.m |  88 +++++++++++
+ 3 files changed, 344 insertions(+), 3 deletions(-)
  create mode 100644 Tests/base/NSPredicate/subquery.m
 
 diff --git a/Headers/Foundation/NSExpression.h b/Headers/Foundation/NSExpression.h
@@ -69,7 +70,7 @@ index f39304723..087c9e76f 100644
  #endif
  @end
 diff --git a/Source/NSPredicate.m b/Source/NSPredicate.m
-index dabf91d1c..71178cc87 100644
+index dabf91d1c..14f53c7a3 100644
 --- a/Source/NSPredicate.m
 +++ b/Source/NSPredicate.m
 @@ -212,6 +212,12 @@ extern void     GSPropertyListMake(id,NSDictionary*,BOOL,BOOL,unsigned,id*);
@@ -132,7 +133,7 @@ index dabf91d1c..71178cc87 100644
  - (NSExpression *) leftExpression
  {
    [self subclassResponsibility: _cmd];
-@@ -2838,6 +2869,174 @@ do { \
+@@ -2838,6 +2869,162 @@ do { \
  @end
  
  @implementation GSSubqueryExpression
@@ -238,15 +239,6 @@ index dabf91d1c..71178cc87 100644
 +  return _subpredicate;
 +}
 +
-+/* Answers the members of the collection the subpredicate accepts.
-+ *
-+ * The iterator variable is bound by substituting it into the subpredicate
-+ * for each member in turn, which is how a variable reaches an evaluation
-+ * here: -evaluateWithObject: passes no context for the members to be put
-+ * in.  The member is also the object the subpredicate is evaluated
-+ * against, so a key path inside it may be written either way round -
-+ * "$x.age > 40" as OS X documents it, or "age > 40".
-+ */
 +- (id) expressionValueWithObject: (id)object
 +			 context: (NSMutableDictionary *)context
 +{
@@ -291,9 +283,6 @@ index dabf91d1c..71178cc87 100644
 +  NSMutableDictionary	*outer;
 +  NSExpression		*collection;
 +
-+  /* The iterator variable belongs to the subquery, so a substitution
-+   * from outside must not replace it.
-+   */
 +  outer = AUTORELEASE([variables mutableCopy]);
 +  [outer removeObjectForKey: _variable];
 +
@@ -307,17 +296,10 @@ index dabf91d1c..71178cc87 100644
  @end
  
  @implementation GSAggregateExpression
-@@ -3787,6 +3986,24 @@ do { \
+@@ -3787,6 +3974,17 @@ do { \
    return [self parseBinaryExpression];
  }
  
-+/* The parser asks an expression for its key path to decide what it is
-+ * looking at - whether a.b can be folded into one key path, whether what
-+ * precedes "(" names a function.  -keyPath raises for a kind that has
-+ * none (a variable, an aggregate, a subquery), so the question is asked
-+ * of the type first: "$x.age" and "SUBQUERY(...).@count" are both written
-+ * with a dot after something that is not a key path.
-+ */
 +static NSString *
 +GSKeyPathIfKeyPath(NSExpression *expression)
 +{
@@ -332,7 +314,7 @@ index dabf91d1c..71178cc87 100644
  - (NSExpression *) parseIdentifierExpression
  {
    static NSCharacterSet *_identifier;
-@@ -3886,6 +4103,51 @@ do { \
+@@ -3886,6 +4084,51 @@ do { \
      {
        return [NSExpression expressionForEvaluatedObject];
      }
@@ -384,7 +366,7 @@ index dabf91d1c..71178cc87 100644
    if ([self scanString: @"$" intoString: NULL])
      {
        // variable
-@@ -4048,7 +4310,7 @@ do { \
+@@ -4048,7 +4291,7 @@ do { \
            // The name may take its trailing colon as OS X writes it, as in
            // uppercase:(name); the colon becomes part of the function name.
            NSMutableArray *args = [NSMutableArray arrayWithCapacity: 5];
@@ -393,7 +375,7 @@ index dabf91d1c..71178cc87 100644
  
            if (!name)
              {
-@@ -4123,7 +4385,7 @@ do { \
+@@ -4123,7 +4366,7 @@ do { \
            if (evaluatedObjectExpression != left)
              {
  	      // if both are simple key expressions (identifiers)
@@ -402,7 +384,7 @@ index dabf91d1c..71178cc87 100644
  	        {
                    // concatenate
                    left = [NSExpression expressionForKeyPath:
-@@ -4139,7 +4401,11 @@ do { \
+@@ -4139,7 +4382,11 @@ do { \
              }
            else
              {

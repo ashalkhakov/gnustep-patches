@@ -1,4 +1,4 @@
-From 8e34560741227d461ee7cd829c5c1d7b0d550d41 Mon Sep 17 00:00:00 2001
+From 3652672821acbdcbd980a75bb977eca316e67388 Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Thu, 24 Sep 2026 12:00:00 +0500
 Subject: [PATCH] Treat an xmlns:prefix attribute as a namespace declaration
@@ -31,7 +31,8 @@ This changes two things:
      namespace for the reserved "xmlns"/"xml" prefixes; it keeps the
      qualified name literal. libxml prints an unnamespaced attribute by
      its full name, so a bare "xmlns:rd" attribute still serialises as
-     xmlns:rd="...".
+     xmlns:rd="...". "xml" is reserved in the same way: it names the
+     built-in XML namespace, which is never declared.
 
   2. -[NSXMLElement addAttribute:] registers an "xmlns:prefix"
      attribute as a real namespace (the -addNamespace: path, which
@@ -50,32 +51,20 @@ unchanged (251 / 37 / 132).
 The test added here aborts on an unpatched library, in a later
 innocent allocation, within a few hundred rounds.
 ---
- Source/NSXMLElement.m                    | 24 +++++++++
- Source/NSXMLNode.m                       | 20 +++++++-
+ Source/NSXMLElement.m                    | 12 +++++
+ Source/NSXMLNode.m                       | 10 +++-
  Tests/base/NSXMLElement/xmlnsAttribute.m | 62 ++++++++++++++++++++++++
- 3 files changed, 105 insertions(+), 1 deletion(-)
+ 3 files changed, 83 insertions(+), 1 deletion(-)
  create mode 100644 Tests/base/NSXMLElement/xmlnsAttribute.m
 
 diff --git a/Source/NSXMLElement.m b/Source/NSXMLElement.m
-index 74842090a..6797862cd 100644
+index 74842090a..473d65088 100644
 --- a/Source/NSXMLElement.m
 +++ b/Source/NSXMLElement.m
-@@ -253,6 +253,30 @@ GS_PRIVATE_INTERNAL(NSXMLElement)
+@@ -253,6 +253,18 @@ GS_PRIVATE_INTERNAL(NSXMLElement)
  		  format: @"Tried to add attribute to multiple parents."];
      }
  
-+  /* A prefixed namespace declaration supplied as an attribute --
-+   * "xmlns:prefix" -- is not an ordinary attribute: it declares a namespace
-+   * on this element.  Register it as a real namespace rather than storing it
-+   * as an attribute.  Doing otherwise builds a namespace node with the
-+   * reserved prefix "xmlns" and a NULL href (see -[NSXMLNode setName:]) whose
-+   * teardown corrupts the heap when the enclosing document is released, and
-+   * leaves prefixed descendants unable to resolve against a proper
-+   * declaration.  The serialisation is unchanged: a real namespace prints as
-+   * xmlns:prefix="href" just as the attribute did, and prefixed elements
-+   * bound to it now print with their prefix.  The default declaration
-+   * ("xmlns", no prefix) is left as an attribute: it does not take the
-+   * reserved-prefix path in -setName: and does not provoke the fault. */
 +  {
 +    NSString *aname = [attribute name];
 +
@@ -92,10 +81,10 @@ index 74842090a..6797862cd 100644
      {
        xmlNsPtr ns = attr->ns;
 diff --git a/Source/NSXMLNode.m b/Source/NSXMLNode.m
-index e8300f8c5..14ddce9c5 100644
+index e8300f8c5..c42cf5ac8 100644
 --- a/Source/NSXMLNode.m
 +++ b/Source/NSXMLNode.m
-@@ -2132,7 +2132,25 @@ execute_xpath(xmlNodePtr node, NSString *xpath_exp, NSDictionary *constants,
+@@ -2132,7 +2132,15 @@ execute_xpath(xmlNodePtr node, NSString *xpath_exp, NSDictionary *constants,
          }
        
        localName = xmlSplitQName2(xmlName, &prefix);
@@ -104,16 +93,6 @@ index e8300f8c5..14ddce9c5 100644
 +        && (xmlStrEqual(prefix, (const xmlChar *)"xmlns")
 +            || xmlStrEqual(prefix, (const xmlChar *)"xml")))
 +        {
-+          /* "xmlns" and "xml" are reserved prefixes: "xmlns:foo" is a
-+           * namespace declaration, not an attribute in a namespace named
-+           * "xmlns", and "xml:foo" uses the built-in XML namespace.  They
-+           * must not be resolved or manufactured as ordinary prefixes --
-+           * doing so builds a namespace node with the reserved prefix and a
-+           * NULL href whose teardown corrupts the heap when the document is
-+           * released (a namespace supplied through -addAttribute: as e.g.
-+           * xmlns:rd="...").  Keep the qualified name literal; libxml prints
-+           * an unnamespaced attribute by its full name, so the serialisation
-+           * is unchanged. */
 +          xmlNodeSetName(theNode, xmlName);
 +          xmlFree(localName);
 +          xmlFree(prefix);

@@ -1,4 +1,4 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 3e009d2abbc69fe29bf5e782f337073f3d05553a Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Thu, 24 Sep 2026 12:00:00 +0500
 Subject: [PATCH] Inherit NSPrintOperation's -_print in GSPDFPrintOperation
@@ -34,11 +34,14 @@ reports one page per page of the view with the change and a single sheet
 without it, on a system whose printing produces PDF page objects at
 all.
 ---
+ Source/GSPDFPrintOperation.m | 21 ---------------------
+ 1 file changed, 21 deletions(-)
+
 diff --git a/Source/GSPDFPrintOperation.m b/Source/GSPDFPrintOperation.m
-index df9ab2e28..06e60921b 100644
+index df9ab2e28..e3b0003e0 100644
 --- a/Source/GSPDFPrintOperation.m
 +++ b/Source/GSPDFPrintOperation.m
-@@ -115,26 +115,27 @@ - (NSGraphicsContext*)createContext
+@@ -115,27 +115,6 @@
    return _context;
  }
  
@@ -62,27 +65,10 @@ index df9ab2e28..06e60921b 100644
 -
 -  // FIXME: Output comes out up-side-down
 -}
-+/* There is deliberately no -_print here. This class used to override it with
-+   a copy of GSEPSPrintOperation's, which draws the whole rect as a single
-+   sheet:
-+
-+     [_view beginPageInRect: _rect atPlacement: NSMakePoint(0,0)];
-+     [_view displayRectIgnoringOpacity: _rect inContext: [self context]];
-+     // FIXME: Output comes out up-side-down
-+
-+   That is right for EPS, which is single-sheet by definition, and wrong for
-+   PDF, which is not. It never asked the view for -knowsPageRange: or
-+   -rectForPage:, so a view that paginates itself came out as one sheet; and
-+   because it applied no transform, it also never reached the flip that
-+   -_displayPageInRect:withInfo:knowsPageRange: applies for a flipped view --
-+   the cause of the upside-down output its own comment recorded. Locking focus
-+   still calls GSWSetViewIsFlipped(ctxt, YES), so the backend compensated for a
-+   flip that was not in the CTM, mirroring the glyphs as well as the layout.
-+
-+   NSPrintOperation's own -_print does all of this correctly and needs nothing
-+   from this subclass: -_runOperation has already made -createContext's context
-+   current, and -_printPaginateWithInfo:knowsRange: sets NSPrintSheetBounds
-+   itself. Inheriting it fixes both the orientation and the pagination. */
- 
+-
  - (BOOL)deliverResult
  {
+   if (_data != nil && _path != nil)
+-- 
+2.43.0
+

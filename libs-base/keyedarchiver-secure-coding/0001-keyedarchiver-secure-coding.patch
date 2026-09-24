@@ -1,4 +1,4 @@
-From b1c67a239098a783246187d338712b6490b7ce58 Mon Sep 17 00:00:00 2001
+From ccb65b691d63ac59e2cbaba9fc31a7c267b60e56 Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Thu, 24 Sep 2026 12:00:00 +0500
 Subject: [PATCH] Encode when the caller requires secure coding
@@ -19,13 +19,13 @@ everything, and clear the error on success.
 The test added here fails on an unpatched library, where the archive
 answers nil for an object that does adopt NSSecureCoding.
 ---
- Source/NSKeyedArchiver.m                  | 76 ++++++++++++++++-------
- Tests/base/NSKeyedArchiver/secureCoding.m | 56 +++++++++++++++++
- 2 files changed, 109 insertions(+), 23 deletions(-)
+ Source/NSKeyedArchiver.m                  | 69 +++++++++++++++--------
+ Tests/base/NSKeyedArchiver/secureCoding.m | 56 ++++++++++++++++++
+ 2 files changed, 102 insertions(+), 23 deletions(-)
  create mode 100644 Tests/base/NSKeyedArchiver/secureCoding.m
 
 diff --git a/Source/NSKeyedArchiver.m b/Source/NSKeyedArchiver.m
-index d359f4d90..cc7d6fb59 100644
+index d359f4d90..5918dc16a 100644
 --- a/Source/NSKeyedArchiver.m
 +++ b/Source/NSKeyedArchiver.m
 @@ -26,9 +26,11 @@
@@ -40,7 +40,7 @@ index d359f4d90..cc7d6fb59 100644
  
  #import "GSPrivate.h"
  
-@@ -445,32 +447,60 @@ static NSDictionary *makeReference(unsigned ref)
+@@ -445,32 +447,53 @@ static NSDictionary *makeReference(unsigned ref)
                    requiringSecureCoding: (BOOL)requiresSecureCoding
                                    error: (NSError **)error
  {
@@ -51,13 +51,6 @@ index d359f4d90..cc7d6fb59 100644
 +  NSMutableData	*m = nil;
 +  NSKeyedArchiver	*a = nil;
 +
-+  /* Requesting secure coding used to be refused outright: the method
-+   * answered nil without setting the error, breaking every caller of
-+   * the modern (10.13) archiving API for objects which do adopt
-+   * NSSecureCoding.  The archiver instance has carried a
-+   * requiresSecureCoding flag for years, so encode with the flag set
-+   * instead, checking (as Apple's encoder does) that the root object's
-+   * class supports secure coding.  */
 +  if (requiresSecureCoding == YES
 +    && ([anObject respondsToSelector: @selector(class)] == NO
 +      || [[anObject class] respondsToSelector:

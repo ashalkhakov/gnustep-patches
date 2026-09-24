@@ -1,4 +1,4 @@
-From 1e3ac91220c03d9ca898ae0b5a9bff71981ed78b Mon Sep 17 00:00:00 2001
+From 072345d0c019e0f7c75a0d831263f57fe83dab0a Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Thu, 24 Sep 2026 12:00:00 +0500
 Subject: [PATCH] Use the 10.4 behaviour in NSDateFormatter's NSFormatter
@@ -24,23 +24,19 @@ behaviour.
 The test added here fails on an unpatched library, where
 -stringForObjectValue: answers the pattern rather than the date.
 ---
- Source/NSDateFormatter.m                      | 36 +++++++++++++++
+ Source/NSDateFormatter.m                      | 25 ++++++++++
  .../base/NSDateFormatter/formatterBehavior.m  | 46 +++++++++++++++++++
- 2 files changed, 82 insertions(+)
+ 2 files changed, 71 insertions(+)
  create mode 100644 Tests/base/NSDateFormatter/formatterBehavior.m
 
 diff --git a/Source/NSDateFormatter.m b/Source/NSDateFormatter.m
-index 51fdd545e..e338aab47 100644
+index 51fdd545e..46705d4b4 100644
 --- a/Source/NSDateFormatter.m
 +++ b/Source/NSDateFormatter.m
-@@ -222,6 +222,29 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+@@ -222,6 +222,25 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
  {
    NSCalendarDate	*d;
  
-+  /* In the modern behavior the format string is an ICU pattern, which
-+   * only -dateFromString: understands; the 10.0 code below reads it as
-+   * a calendar format and mis-parses.  (The 10.0 path is untouched, so
-+   * existing users of %-escape formats keep what they have.) */
 +  if (internal->_behavior == NSDateFormatterBehavior10_4)
 +    {
 +      NSDate	*parsed = [self dateFromString: string];
@@ -63,18 +59,11 @@ index 51fdd545e..e338aab47 100644
    if ([string length] == 0)
      {
        d = nil;
-@@ -294,6 +317,19 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+@@ -294,6 +313,12 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
      {
        return nil;
      }
 +
-+  /* This is what an NSCell with a formatter calls, so it is how a date
-+   * reaches the screen from a text field or a table column.  The
-+   * modern (10.4, ICU) machinery lives in -stringFromDate:; without
-+   * this, a formatter explicitly set to the modern behavior still
-+   * formatted with the 10.0 calendar-format code, which treats an ICU
-+   * pattern like yyyy-MM-dd as literal text - every bound table column
-+   * showed the pattern itself instead of the date. */
 +  if (internal->_behavior == NSDateFormatterBehavior10_4)
 +    {
 +      return [self stringFromDate: anObject];

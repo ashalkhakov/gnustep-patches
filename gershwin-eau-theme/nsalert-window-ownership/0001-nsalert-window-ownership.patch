@@ -1,7 +1,8 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From d06848339064f2121676ceed464a55eed921ef3e Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Thu, 24 Sep 2026 12:00:00 +0500
-Subject: [PATCH] Own the alert panel through the _window ivar, not an association
+Subject: [PATCH] Own the alert panel through the _window ivar, not an
+ association
 
 Dismissing an alert can crash with a use-after-free at the next
 autorelease-pool drain.
@@ -29,24 +30,18 @@ the sheet paths _window is already nil, because GNUstep's own DESTROY
 consumed the +1 there, so that block is skipped and nothing is released
 twice.
 ---
+ NSAlert+Eau.m | 22 +++++++---------------
+ 1 file changed, 7 insertions(+), 15 deletions(-)
+
 diff --git a/NSAlert+Eau.m b/NSAlert+Eau.m
-index 279b338..c83ada4 100644
+index aed9e00..2b2d7b6 100644
 --- a/NSAlert+Eau.m
 +++ b/NSAlert+Eau.m
-@@ -1577,20 +1577,22 @@ static void setKeyEquivalent(NSButton *button)
+@@ -1702,20 +1702,12 @@ static void setKeyEquivalent(NSButton *button)
                  // NSLog(@"Eau: Exception during window cleanup: %@", e);
              }
  
 -            // NSLog(@"Eau: Clearing _window ivar on NSAlert (keeping associated object to prevent premature dealloc)");
-+            // Consume the +1 that eau_setupPanel stored in the ivar (the
-+            // same reference GNUstep's DESTROY(_window)/RELEASE(_window)
-+            // would consume on the paths that reach them). This runs from a
-+            // deferred perform (0.1s after the modal ended), so the window
-+            // system has no pending operations on the panel any more — the
-+            // panel is ordered out, delegate and default-button cell
-+            // cleared. On the sheet paths _window is already nil (GNUstep's
-+            // own DESTROY consumed the +1 there), so this block is skipped
-+            // and nothing is released twice.
              object_setIvar(self, windowIvar, nil);
 -            // IMPORTANT: Do NOT release the associated object here.  The _window ivar
 -            // in GNUstep's NSAlert is __weak, so the associated object with
@@ -61,34 +56,24 @@ index 279b338..c83ada4 100644
 -            // out) so keeping it alive until NSAlert deallocates is safe and prevents
 -            // the use-after-free crash.
 +            {
-+                // Balance the +1 without any CF dependency: transfer it into
-+                // an ARC temporary, which releases at end of scope.
++                // Releases the +1 the ivar held.
 +                id consumed = (__bridge_transfer id)(__bridge void *)currentWindow;
 +                (void)consumed;
 +            }
          }
      }
      else
-@@ -1739,8 +1741,20 @@ static void setKeyEquivalent(NSButton *button)
+@@ -1867,8 +1859,8 @@ static void setKeyEquivalent(NSButton *button)
          Ivar windowIvar = class_getInstanceVariable([self class], "_window");
          if (windowIvar)
          {
 -            object_setIvar(self, windowIvar, panel);
 -            objc_setAssociatedObject(self, kEAUAlertWindowRetainKey, panel, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-+            // OWNERSHIP CONTRACT: GNUstep's own -_setupPanel stores the
-+            // alloc'd panel into the MRC _window ivar at +1, and every
-+            // consumer balances exactly that one reference — -runModal and
-+            // both -beginSheetModalForWindow:… variants call
-+            // DESTROY(_window), and -dealloc calls RELEASE(_window).
-+            // This file is compiled with ARC, so hand the ivar a real +1
-+            // via CFBridgingRetain. Do NOT keep an associated strong
-+            // reference on top: the previous associated-object scheme left
-+            // _window unowned, so the (un-swizzled) sheet path's
-+            // DESTROY(_window) over-released the panel, and the association
-+            // cleanup at NSAlert dealloc then released the already-freed
-+            // panel — a use-after-free crash at the next autorelease-pool
-+            // drain.
++            // The ivar owns the panel at +1, as GNUstep's own -_setupPanel leaves it.
 +            object_setIvar(self, windowIvar, (__bridge id)(__bridge_retained void *)panel);
              // NSLog(@"Eau: Successfully set _window via ivar");
          }
          else
+-- 
+2.43.0
+

@@ -1,4 +1,4 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 666c4bbc27df65633b42d2954c2182efd348aa29 Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Thu, 24 Sep 2026 12:00:00 +0500
 Subject: [PATCH] Keep the bezel a nib gives a text field
@@ -13,11 +13,14 @@ points above its label.
 Leave nib-loaded fields as the nib has them, and keep the unbezeled
 default for fields made in code.
 ---
+ NSTextFieldCell+Eau.m | 8 ++------
+ 1 file changed, 2 insertions(+), 6 deletions(-)
+
 diff --git a/NSTextFieldCell+Eau.m b/NSTextFieldCell+Eau.m
-index 0b66cd1..1e37ee1 100644
+index 0b66cd1..56f62d8 100644
 --- a/NSTextFieldCell+Eau.m
 +++ b/NSTextFieldCell+Eau.m
-@@ -262,12 +262,12 @@ titleRect.size.height += 2;
+@@ -262,12 +262,8 @@ titleRect.size.height += 2;
  
  - (id)initEauWithCoder:(NSCoder *)aDecoder
  {
@@ -27,12 +30,11 @@ index 0b66cd1..1e37ee1 100644
 -      [self setBezeled: NO];
 -    }
 -  return self;
-+  /* A field from a nib already says whether it is bezeled -- an input
-+     field in Interface Builder is -- so leave it as the nib has it.  The
-+     unbezeled default is for fields made in code, where a label is the
-+     common case; overriding the nib turned every input field in it into
-+     a flat one, with its text drawn higher than its label. */
++  /* Leave the bezel as the nib has it. */
 +  return [self initEauWithCoder:aDecoder];
  }
  
  @end
+-- 
+2.43.0
+

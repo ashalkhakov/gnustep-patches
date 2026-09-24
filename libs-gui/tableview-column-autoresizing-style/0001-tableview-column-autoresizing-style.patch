@@ -1,4 +1,4 @@
-From b54273870104a9db2d142c630fc33c0c772226ea Mon Sep 17 00:00:00 2001
+From 2fb3372e74b86e0d1ffd06594459b80b113ab94d Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Thu, 24 Sep 2026 12:00:00 +0500
 Subject: [PATCH] Implement -setColumnAutoresizingStyle: and resize columns by
@@ -16,14 +16,16 @@ Give the style an ivar, decode and encode it
 (NSColumnAutoresizingStyle), and on a superview frame change size the
 columns to the visible width the way the style says - first column only,
 last column only, uniformly, sequentially from the last, or from the
-first - within each autoresizing column's minimum and maximum. Tables
-built in code default to no style, so they keep the resizing they have
-today.
+first - within each autoresizing column's minimum and maximum. Under the
+uniform style a column that reaches its minimum or maximum drops out and
+the remaining ones take its share on the next pass; what cannot be
+placed anywhere is left over. Tables built in code default to no style,
+so they keep the resizing they have today.
 ---
  Headers/AppKit/NSTableView.h               |   1 +
- Source/NSTableView.m                       | 128 ++++++++++++++++++++-
- Tests/gui/NSTableView/columnAutoresizing.m |  98 ++++++++++++++++
- 3 files changed, 223 insertions(+), 4 deletions(-)
+ Source/NSTableView.m                       | 117 ++++++++++++++++++++-
+ Tests/gui/NSTableView/columnAutoresizing.m |  98 +++++++++++++++++
+ 3 files changed, 212 insertions(+), 4 deletions(-)
  create mode 100644 Tests/gui/NSTableView/columnAutoresizing.m
 
 diff --git a/Headers/AppKit/NSTableView.h b/Headers/AppKit/NSTableView.h
@@ -39,7 +41,7 @@ index 71d0e74e0..aca8e60f4 100644
    BOOL               _usesAlternatingRowBackgroundColors;
    NSText            *_textObject;
 diff --git a/Source/NSTableView.m b/Source/NSTableView.m
-index 719bb4641..433f501ac 100644
+index 719bb4641..75a84b3cd 100644
 --- a/Source/NSTableView.m
 +++ b/Source/NSTableView.m
 @@ -2014,6 +2014,7 @@ static void computeNewSelection
@@ -50,17 +52,15 @@ index 719bb4641..433f501ac 100644
  - (void) _setSelectingColumns: (BOOL)flag;
  - (BOOL) _editNextEditableCellAfterRow: (NSInteger)row
  				column: (NSInteger)column;
-@@ -2059,6 +2060,9 @@ static void computeNewSelection
+@@ -2059,6 +2060,7 @@ static void computeNewSelection
    _allowsColumnResizing = YES;
    _allowsColumnReordering = YES;
    _autoresizesAllColumnsToFit = NO;
-+  /* Code-built tables keep the resizing they have always had here; nibs
-+     say what they want (see -initWithCoder:). */
 +  _columnAutoresizingStyle = NSTableViewNoColumnAutoresizing;
    _selectingColumns = NO;
    _verticalMotionDrag = NO;
    _editedColumn = -1;
-@@ -4624,13 +4628,111 @@ This method is deprecated, use -columnIndexesInRect:. */
+@@ -4624,13 +4626,104 @@ This method is deprecated, use -columnIndexesInRect:. */
  
  - (NSTableViewColumnAutoresizingStyle) columnAutoresizingStyle
  {
@@ -80,11 +80,6 @@ index 719bb4641..433f501ac 100644
 +    }
 +}
 +
-+/* Size the columns so the table is exactly `width` wide, as the column
-+   autoresizing style says: the whole difference to one column, spread
-+   over all of them, or taken column by column in order.  Only columns
-+   that autoresize take part, each held within its minimum and maximum
-+   width; what cannot be placed is left over. */
 +- (void) _resizeColumnsToFitWidth: (CGFloat)width
 +{
 +  NSTableViewColumnAutoresizingStyle style = [self columnAutoresizingStyle];
@@ -131,8 +126,6 @@ index 719bb4641..433f501ac 100644
 +  _tilingDisabled = YES;
 +  if (style == NSTableViewUniformColumnAutoresizingStyle)
 +    {
-+      /* Share the difference equally; a column that reaches its limit
-+         drops out and the others take its share on the next pass. */
 +      NSMutableArray *open = [NSMutableArray arrayWithArray: columns];
 +
 +      while ([open count] > 0 && (delta <= -0.5 || delta >= 0.5))
@@ -175,7 +168,7 @@ index 719bb4641..433f501ac 100644
  }
  
  - (void) sizeLastColumnToFit
-@@ -5712,6 +5814,8 @@ This method is deprecated, use -columnIndexesInRect:. */
+@@ -5712,6 +5805,8 @@ This method is deprecated, use -columnIndexesInRect:. */
  
        // Encode that the table is view based...
        [aCoder encodeBool: _viewBased forKey: @"NSViewBased"];
@@ -184,7 +177,7 @@ index 719bb4641..433f501ac 100644
      }
    else
      {
-@@ -5904,6 +6008,12 @@ This method is deprecated, use -columnIndexesInRect:. */
+@@ -5904,6 +5999,12 @@ This method is deprecated, use -columnIndexesInRect:. */
  	  _viewBased = [aDecoder decodeBoolForKey: @"NSViewBased"];
  	}
  
@@ -197,15 +190,13 @@ index 719bb4641..433f501ac 100644
        // get the table columns...
        columns = [aDecoder decodeObjectForKey: @"NSTableColumns"];
        e = [columns objectEnumerator];
-@@ -6329,7 +6439,17 @@ This method is deprecated, use -columnIndexesInRect:. */
+@@ -6329,7 +6430,15 @@ This method is deprecated, use -columnIndexesInRect:. */
  
  - (void) superviewFrameChanged: (NSNotification*)aNotification
  {
 -  if (_autoresizesAllColumnsToFit == YES)
 +  if (_columnAutoresizingStyle != NSTableViewNoColumnAutoresizing)
 +    {
-+      /* A table with a column autoresizing style is as wide as what it
-+         shows, as on Cocoa: its columns take up the change. */
 +      CGFloat visible_width = [self convertRect: [_super_view bounds]
 +                                       fromView: _super_view].size.width;
 +

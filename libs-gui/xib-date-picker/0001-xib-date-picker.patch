@@ -1,4 +1,4 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 2b3fdb402df58ea830745bcd77c05dedbbfd5db2 Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Thu, 24 Sep 2026 12:00:00 +0500
 Subject: [PATCH] Decode date pickers from a xib
@@ -20,8 +20,11 @@ Interface Builder produced, and a hand-written fixture does not
 instantiate through the same path. A xib saved from Interface Builder
 with a date picker in it would make this testable.
 ---
+ Source/GSXib5KeyedUnarchiver.m | 86 ++++++++++++++++++++++++++++++++++
+ 1 file changed, 86 insertions(+)
+
 diff --git a/Source/GSXib5KeyedUnarchiver.m b/Source/GSXib5KeyedUnarchiver.m
-index 0a3fc50da..5da227a11 100644
+index 0a3fc50da..0edf56fa6 100644
 --- a/Source/GSXib5KeyedUnarchiver.m
 +++ b/Source/GSXib5KeyedUnarchiver.m
 @@ -42,6 +42,7 @@
@@ -53,16 +56,10 @@ index 0a3fc50da..5da227a11 100644
                   nil];
            RETAIN(XmlKeyToDecoderSelectorMap);
  
-@@ -2566,6 +2574,92 @@ didStartElement: (NSString*)elementName
+@@ -2566,6 +2574,84 @@ didStartElement: (NSString*)elementName
    return object;
  }
  
-+/* Date pickers.  A xib describes one with attributes on its cell
-+   (datePickerStyle, datePickerMode, useCurrentDate), a <datePickerElements>
-+   element naming the fields shown, and <date> elements carrying
-+   timeIntervalSinceReferenceDate -- none of which match the archive keys
-+   NSDatePickerCell reads, so without these every date picker from a xib
-+   came up with no fields and a bogus date. */
 +- (NSDate *) _dateForElement: (GSXibElement*)element key: (NSString*)key
 +{
 +  GSXibElement *date = [element elementForKey: key];
@@ -126,8 +123,6 @@ index 0a3fc50da..5da227a11 100644
 +
 +- (id) decodeDatePickerDateValueForElement: (GSXibElement*)element
 +{
-+  /* "Use current date" in Interface Builder: the date recorded in the
-+     xib is only when it was saved. */
 +  if ([[element attributeForKey: @"useCurrentDate"] boolValue])
 +    return [NSDate date];
 +  return [self _dateForElement: element key: @"date"];
@@ -146,3 +141,6 @@ index 0a3fc50da..5da227a11 100644
  - (id) decodeButtonFlags1ForElement: (GSXibElement*)element
  {
    NSNumber *value = nil;
+-- 
+2.43.0
+

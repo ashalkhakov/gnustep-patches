@@ -1,4 +1,4 @@
-From 9a066e3d63094343475906aa92ee87a18526f3c1 Mon Sep 17 00:00:00 2001
+From b356b918e55af9d8383928fbc000fc47bc0b735c Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Thu, 24 Sep 2026 12:00:00 +0500
 Subject: [PATCH] Notify observers of the keys an array controller selection
@@ -18,35 +18,30 @@ observing a key on an array raises.
 
 Declare the dependent keys with +keyPathsForValuesAffecting..., and
 answer -selection with the selected object when exactly one row is
-selected and nil otherwise. Full Cocoa fidelity wants a multi-selection
-proxy answering NSMultipleValuesMarker; that is noted in the code for
-the day a binding needs it.
+selected and nil otherwise. Both no selection and, for now, multiple
+selection answer nil, which key-value coding and the binding
+placeholders handle. Full Cocoa fidelity wants a multi-selection proxy
+answering NSMultipleValuesMarker per key; that is left for the day a
+binding needs it.
 
 A reproduction program accompanies this patch; it registers observers
 for the seven selection-dependent key paths, changes the selection and
 reports which of them heard about it - exit 0 with the change, 1
 without.
 ---
- Source/NSArrayController.m                 |  58 ++++++++++
+ Source/NSArrayController.m                 |  41 +++++++
  Tests/gui/NSArrayController/selectionKVO.m | 127 +++++++++++++++++++++
- 2 files changed, 185 insertions(+)
+ 2 files changed, 168 insertions(+)
  create mode 100644 Tests/gui/NSArrayController/selectionKVO.m
 
 diff --git a/Source/NSArrayController.m b/Source/NSArrayController.m
-index 471dee42c..fbb8ad986 100644
+index 471dee42c..68a7c76f9 100644
 --- a/Source/NSArrayController.m
 +++ b/Source/NSArrayController.m
-@@ -397,6 +397,64 @@
+@@ -397,6 +397,47 @@
    return [[self arrangedObjects] objectsAtIndexes: _selection_indexes];
  }
  
-+/* Everything a selection-dependent binding observes is derived from
-+ * selectionIndexes (and, for the derived values below, the content),
-+ * and setSelectionIndexes: already emits automatic KVO for its own
-+ * key: declaring the dependencies makes selection, selectedObjects,
-+ * canRemove and canSelectNext/Previous notify too, which is what keeps
-+ * an enabled binding on canRemove or a value binding through
-+ * selection.<key> alive when the user clicks another row. */
 ++ (NSSet*) keyPathsForValuesAffectingSelection
 +{
 +  return [NSSet setWithObjects: @"selectionIndexes", @"content", nil];
@@ -77,16 +72,6 @@ index 471dee42c..fbb8ad986 100644
 +  return [NSSet setWithObjects: @"selectionIndexes", @"content", nil];
 +}
 +
-+/* The object selection.<key> paths read and write through.  The
-+ * inherited implementation answers with the content ARRAY, so
-+ * selection.name collected over every row (and observing it raised,
-+ * because a key cannot be observed on an array).  One selected object
-+ * is the overwhelmingly common binding case and is returned as
-+ * itself; no selection, and - for now - multiple selection, answer
-+ * nil, which key-value coding and the binding placeholders both
-+ * handle.  (Full Cocoa fidelity wants a proxy that answers
-+ * NSMultipleValuesMarker per key for multiple selection; that is left
-+ * for the day a binding here needs it.) */
 +- (id) selection
 +{
 +  NSArray *selected = [self selectedObjects];

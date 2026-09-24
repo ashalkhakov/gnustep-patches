@@ -1,4 +1,4 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 5d9a9ea1f04ea5cbae26b771f24c662b9f73ad93 Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Thu, 24 Sep 2026 12:00:00 +0500
 Subject: [PATCH] Zero the SAX handler before libxml2 is asked to initialise it
@@ -37,49 +37,22 @@ a parse, so there is nothing for a test to assert. Run the program under
 valgrind and it reports the uninitialised read on an unpatched library
 and is silent with the change.
 ---
-Zero the SAX handler before libxml2 is asked to initialise it
+ Source/Additions/GSXML.m | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
 
--[GSSAXHandler _initLibXML] allocates an xmlSAXHandler with malloc and hands
-it straight to xmlSAX2InitDefaultSAXHandler, whose first act is
-
-    if ((hdlr == NULL) || (hdlr->initialized != 0)) return;
-
-so whenever the uninitialised `initialized` field happens to be non-zero, the
-call does nothing at all and the handler keeps whatever the heap had in it.
-
-In practice _initLibXML then calls xmlSAXVersion(), which re-establishes the
-standard callbacks, so this is not usually visible as a parse failure -- the
-cost is a read of uninitialised memory on every parse, an initialisation that
-silently does nothing, and the remaining fields of the handler being whatever
-was in that memory before.
-
-Valgrind names it on every XIB load, since the xib unarchiver parses through
-NSXMLParser and this handler:
-
-    Conditional jump or move depends on uninitialised value(s)
-       at xmlSAX2InitDefaultSAXHandler (libxml2)
-       by -[GSSAXHandler _initLibXML]  (GSXML.m:3808)
-     Uninitialised value was created by a heap allocation
-       at malloc
-       by -[GSSAXHandler _initLibXML]  (GSXML.m:3801)
-
-calloc costs nothing here -- one structure per parser -- and makes the
-initialisation deterministic.
-
-A standalone reproduction is in gnustep-patch-repros/sax-handler-init.m: six
-frames under valgrind, and silent with this patch applied.
-
+diff --git a/Source/Additions/GSXML.m b/Source/Additions/GSXML.m
+index 00832d5c4..5c7f9728f 100644
 --- a/Source/Additions/GSXML.m
 +++ b/Source/Additions/GSXML.m
-@@ -3798,7 +3798,10 @@
+@@ -3798,7 +3798,7 @@ fatalErrorFunction(void *ctx, const unsigned char *msg, ...)
   */
  - (BOOL) _initLibXML
  {
 -  lib = (xmlSAXHandler*)malloc(sizeof(xmlSAXHandler));
-+  /* Zeroed, not merely allocated: xmlSAX2InitDefaultSAXHandler() returns
-+   * without doing anything when the handler's `initialized' field is not
-+   * zero, so an uninitialised one is silently left uninitialised. */
 +  lib = (xmlSAXHandler*)calloc(1, sizeof(xmlSAXHandler));
    if (lib == NULL)
      {
        return NO;
+-- 
+2.43.0
+

@@ -1,7 +1,8 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From e7aee45807767900a2a291ea8baf3ec20290cf89 Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Thu, 24 Sep 2026 12:00:00 +0500
-Subject: [PATCH] Do not release autoreleased results in CFString case functions
+Subject: [PATCH] Do not release autoreleased results in CFString case
+ functions
 
 CFStringCapitalize(), CFStringLowercase(), CFStringUppercase() and
 CFStringFold() over-release their intermediate result when the string
@@ -18,68 +19,50 @@ and the pool drain then releases freed memory -- a use-after-free, and
 heap corruption, in any application that calls one of these functions
 on a bridged NSMutableString.
 
-Drop the CFRelease calls, and record at each site why the result must
-not be released.
+Drop the CFRelease calls.
 ---
+ Source/CFString.c | 7 -------
+ 1 file changed, 7 deletions(-)
+
 diff --git a/Source/CFString.c b/Source/CFString.c
-index 6d012cd..9735860 100644
+index 3873f9e..ac1a403 100644
 --- a/Source/CFString.c
 +++ b/Source/CFString.c
-@@ -1576,8 +1576,13 @@ CFStringCapitalize (CFMutableStringRef str, CFLocaleRef locale)
+@@ -1648,8 +1648,6 @@ CFStringCapitalize (CFMutableStringRef str, CFLocaleRef locale)
        CFStringRef mod;
        CF_OBJC_CALLV (CFStringRef, mod, str, "capitalizedString");
        CF_OBJC_VOIDCALLV (str, "setString:", mod);
 -
 -      CFRelease (mod);
-+      /* mod comes from an ObjC convenience method and follows the Get
-+       * rule: it is autoreleased, we do not own a reference to it.
-+       * Releasing it here (as this code previously did) freed the string
-+       * while it was still registered in the autorelease pool, and the
-+       * pool drain then released freed memory: use-after-free / heap
-+       * corruption in any application calling this on a toll-free
-+       * bridged NSMutableString. Do NOT CFRelease it. */
      }
    else
      CFStringCaseMap (str, locale, 0, _kCFStringCapitalize);
-@@ -1591,8 +1596,13 @@ CFStringLowercase (CFMutableStringRef str, CFLocaleRef locale)
+@@ -1663,8 +1661,6 @@ CFStringLowercase (CFMutableStringRef str, CFLocaleRef locale)
        CFStringRef mod;
        CF_OBJC_CALLV (CFStringRef, mod, str, "lowercaseString");
        CF_OBJC_VOIDCALLV (str, "setString:", mod);
 -
 -      CFRelease (mod);
-+      /* mod comes from an ObjC convenience method and follows the Get
-+       * rule: it is autoreleased, we do not own a reference to it.
-+       * Releasing it here (as this code previously did) freed the string
-+       * while it was still registered in the autorelease pool, and the
-+       * pool drain then released freed memory: use-after-free / heap
-+       * corruption in any application calling this on a toll-free
-+       * bridged NSMutableString. Do NOT CFRelease it. */
      }
    else
      CFStringCaseMap (str, locale, 0, _kCFStringLowercase);
-@@ -1606,8 +1616,13 @@ CFStringUppercase (CFMutableStringRef str, CFLocaleRef locale)
+@@ -1678,8 +1674,6 @@ CFStringUppercase (CFMutableStringRef str, CFLocaleRef locale)
        CFStringRef mod;
        CF_OBJC_CALLV (CFStringRef, mod, str, "uppercaseString");
        CF_OBJC_VOIDCALLV (str, "setString:", mod);
 -
 -      CFRelease (mod);
-+      /* mod comes from an ObjC convenience method and follows the Get
-+       * rule: it is autoreleased, we do not own a reference to it.
-+       * Releasing it here (as this code previously did) freed the string
-+       * while it was still registered in the autorelease pool, and the
-+       * pool drain then released freed memory: use-after-free / heap
-+       * corruption in any application calling this on a toll-free
-+       * bridged NSMutableString. Do NOT CFRelease it. */
      }
    else
      CFStringCaseMap (str, locale, 0, _kCFStringUppercase);
-@@ -1627,7 +1642,8 @@ CFStringFold (CFMutableStringRef str, CFOptionFlags flags, CFLocaleRef locale)
+@@ -1699,7 +1693,6 @@ CFStringFold (CFMutableStringRef str, CFOptionFlags flags, CFLocaleRef locale)
                       "stringByFoldingWithOptions:locale:", flags, locale);
  
        CF_OBJC_VOIDCALLV (str, "setString:", mod);
 -      CFRelease (mod);
-+      /* mod is autoreleased (Get rule) — do not CFRelease it; see
-+       * CFStringLowercase above. */
      }
    else
      CFStringCaseMap (str, locale, flags, _kCFStringFold);
+-- 
+2.43.0
+

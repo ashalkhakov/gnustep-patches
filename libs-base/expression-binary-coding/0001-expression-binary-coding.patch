@@ -1,4 +1,4 @@
-From 94099fb5b3570d9359cae5c482a3660c4bce2c81 Mon Sep 17 00:00:00 2001
+From e502fa27458be241623f27c7155261d704e0cbb2 Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Thu, 24 Sep 2026 12:00:00 +0500
 Subject: [PATCH] Encode and decode the binary expressions
@@ -20,25 +20,19 @@ initialiser reads all four kinds back.
 The test added here cannot even run on an unpatched library: the first
 archive raises "should be overridden by subclass".
 ---
- Source/NSPredicate.m                          | 52 +++++++++++++++++
+ Source/NSPredicate.m                          | 46 +++++++++++++++
  .../base/NSPredicate/binaryExpressionCoding.m | 58 +++++++++++++++++++
- 2 files changed, 110 insertions(+)
+ 2 files changed, 104 insertions(+)
  create mode 100644 Tests/base/NSPredicate/binaryExpressionCoding.m
 
 diff --git a/Source/NSPredicate.m b/Source/NSPredicate.m
-index dabf91d1c..bd1c6640b 100644
+index dabf91d1c..20a64e26e 100644
 --- a/Source/NSPredicate.m
 +++ b/Source/NSPredicate.m
-@@ -2655,6 +2655,58 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
+@@ -2655,6 +2655,52 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
  
  @implementation GSBinaryExpression
  
-+/* Every other kind of expression writes itself; these four - a key path
-+ * composition ($x.y among them), a union, an intersection and a
-+ * difference - inherited NSExpression's -encodeWithCoder:, which raises.
-+ * The kind is written out and read back, so one initialiser serves all
-+ * four.
-+ */
 +- (void) encodeWithCoder: (NSCoder *)coder
 +{
 +  if ([coder allowsKeyedCoding])
