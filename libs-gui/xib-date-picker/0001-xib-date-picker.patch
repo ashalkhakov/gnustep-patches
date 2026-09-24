@@ -14,6 +14,11 @@ with no fields (elements 0) and a date two seconds into 2001.
 Add decoders for NSDatePickerElements, NSDatePickerType,
 NSDatePickerMode, NSDateValue (the current date when the xib says
 useCurrentDate), NSMinDate and NSMaxDate.
+
+There is no test here: the suite's xib tests read fixtures that
+Interface Builder produced, and a hand-written fixture does not
+instantiate through the same path. A xib saved from Interface Builder
+with a date picker in it would make this testable.
 ---
 diff --git a/Source/GSXib5KeyedUnarchiver.m b/Source/GSXib5KeyedUnarchiver.m
 index 0a3fc50da..5da227a11 100644

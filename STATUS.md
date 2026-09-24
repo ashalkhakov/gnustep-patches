@@ -23,11 +23,11 @@ regenerated in the process - the copy it came from no longer matched.
 | `nsxmlelement-addattribute-value-doc` | libs-base | program | — | GSXFormsKit |
 | `sax-handler-calloc` | libs-base | program | — | RDLKit |
 | `xmlns-attribute` | libs-base | test | — | RDLKit |
-| `arraycontroller-selection-kvo` | libs-gui | program | — | gnustep-coredata |
-| `tableview-column-autoresizing-style` | libs-gui | none | — | gnustep-coredata |
+| `arraycontroller-selection-kvo` | libs-gui | test | — | gnustep-coredata |
+| `tableview-column-autoresizing-style` | libs-gui | test | — | gnustep-coredata |
 | `xib-date-picker` | libs-gui | none | — | gnustep-coredata |
-| `gscstableau-removerow-use-after-free` | libs-gui | program | — | GSXFormsKit, HomeRow |
-| `action-sender-lifetime` | libs-gui | program | — | GSXFormsKit, HomeRow |
+| `action-sender-lifetime` | libs-gui | test | — | GSXFormsKit, HomeRow |
+| `tableau-expression-lifetime-test` | libs-gui | test only | — | (new: the fix is already upstream) |
 | `tracking-walk-retains-subviews` | libs-gui | program | — | GSXFormsKit, HomeRow |
 | `pdf-print-operation` | libs-gui | program | — | RDLKit |
 | `cgrectunion-size` | libs-opal | none | — | GSXFormsKit |
@@ -47,6 +47,15 @@ Where it says **program**, a standalone reproduction sits beside the patch
 instead, and the commit says why: one needs the libxml2 headers to see a
 dangling pointer, the other is only visible under valgrind.
 
+Two of the gui fixes keep their reproduction programs rather than gaining
+tests, and for a reason worth recording: a use-after-free is only a failure
+when the allocator makes it one.  The action-sender case does fail
+deterministically once the test drains the autorelease pool that would
+otherwise keep the sender alive - that took a second look.  The PDF one
+needs a system whose printing produces
+PDF page objects at all; this one produces none, patched or not.  Both want
+a sanitizer build or a desktop to be worth asserting on.
+
 Writing the tests found one bug in the patches themselves: the secure-coding
 patch called `+supportsSecureCoding` on a class that need not implement it,
 so refusing a non-secure object aborted instead of reporting an error.  It
@@ -61,12 +70,13 @@ along with the lines that apply them.
 | --- | --- | --- | --- |
 | `tableview-selection-push` | libs-gui | merged; the patch reverse-applies to master | `gnustep-build/Scripts/patches/`, and its apply line in `Scripts/build-gnustep.sh` |
 | `tableview-selection-push` (older draft) | libs-gui | superseded by the revision that merged; applies neither way now | `UDQuakeTools/Scripts/`, and the PENDING note in `Scripts/gnustep-patch-repros/README.md` |
+| `gscstableau-removerow-use-after-free` | libs-gui | upstream fixed it in 2db1f1802 (retain at entry, release at exit, and the caller keeps its own reference); our patch adds a redundant line on top | `GSXFormsKit/patches/gnustep/`, `HomeRow/patches/gnustep/`, and their apply lines |
 | `arraycontroller-selection-init` | libs-gui | master already initialises `_selection_indexes` in `-initWithCoder:`; only the explanatory comment differs | `gnustep-build/Scripts/patches/`, and its apply line |
 
 ## Duplicates to retire
 
-`gscstableau-removerow-use-after-free`, `action-sender-lifetime` and
-`tracking-walk-retains-subviews` exist byte-for-byte in both `GSXFormsKit`
-and `HomeRow`.  HomeRow's README says they were copied unchanged and that it
+`action-sender-lifetime` and `tracking-walk-retains-subviews` exist
+byte-for-byte in both `GSXFormsKit` and `HomeRow` (as did
+`gscstableau-removerow-use-after-free`, now superseded upstream).  HomeRow's README says they were copied unchanged and that it
 does not knowingly depend on them.  Both should consume this repository
 instead of holding copies.
