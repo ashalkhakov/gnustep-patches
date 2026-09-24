@@ -1,4 +1,4 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From bccd9194f34ea31ebcd66e5a51f988a477fcd869 Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Thu, 24 Sep 2026 12:00:00 +0500
 Subject: [PATCH] Honour [c] and [d] in equality comparisons
@@ -18,14 +18,20 @@ Compare two strings with the options when either is set, and leave
 everything else going through -isEqual:, so nothing that is not a pair
 of strings changes behaviour.
 
-A reproduction program accompanies this patch; it exits 1 on an
-unpatched library and 0 with the change.
+The test added here fails on an unpatched library: the two assertions
+about ==[c] and !=[c] fail, and the seven that check an option changes
+nothing else pass.
 ---
+ Source/NSPredicate.m                       | 25 ++++++++-
+ Tests/base/NSPredicate/comparisonOptions.m | 63 ++++++++++++++++++++++
+ 2 files changed, 86 insertions(+), 2 deletions(-)
+ create mode 100644 Tests/base/NSPredicate/comparisonOptions.m
+
 diff --git a/Source/NSPredicate.m b/Source/NSPredicate.m
-index dabf91d1c..572b628e0 100644
+index dabf91d1c..39ecea057 100644
 --- a/Source/NSPredicate.m
 +++ b/Source/NSPredicate.m
-@@ -1525,9 +1531,30 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
+@@ -1525,9 +1525,30 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
    switch (_type)
      {
        case NSEqualToPredicateOperatorType:
@@ -58,3 +64,75 @@ index dabf91d1c..572b628e0 100644
        case NSMatchesPredicateOperatorType:
  #if	GS_USE_ICU == 1
  	return GSICUStringMatchesRegex(leftResult, rightResult, compareOptions);
+diff --git a/Tests/base/NSPredicate/comparisonOptions.m b/Tests/base/NSPredicate/comparisonOptions.m
+new file mode 100644
+index 000000000..c968f9a9f
+--- /dev/null
++++ b/Tests/base/NSPredicate/comparisonOptions.m
+@@ -0,0 +1,63 @@
++#import "ObjectTesting.h"
++#import "Foundation/NSAutoreleasePool.h"
++#import "Foundation/NSDictionary.h"
++#import "Foundation/NSPredicate.h"
++#import "Foundation/NSString.h"
++#import "Foundation/NSValue.h"
++
++/* The [c] and [d] options apply to equality as well as to ordering and
++ * matching.
++ */
++int main(void)
++{
++  NSAutoreleasePool	*arp = [NSAutoreleasePool new];
++  NSDictionary		*ada;
++  NSDictionary		*aged;
++
++  ada = [NSDictionary dictionaryWithObject: @"Ada" forKey: @"name"];
++  aged = [NSDictionary dictionaryWithObject: [NSNumber numberWithInt: 41]
++				     forKey: @"age"];
++
++  PASS(([[NSPredicate predicateWithFormat: @"name ==[c] %@", @"ada"]
++    evaluateWithObject: ada]),
++    "== honours the [c] option");
++
++  PASS((![[NSPredicate predicateWithFormat: @"name !=[c] %@", @"ada"]
++    evaluateWithObject: ada]),
++    "!= honours the [c] option");
++
++  PASS((![[NSPredicate predicateWithFormat: @"name == %@", @"ada"]
++    evaluateWithObject: ada]),
++    "== without an option is still case sensitive");
++
++  PASS(([[NSPredicate predicateWithFormat: @"name == %@", @"Ada"]
++    evaluateWithObject: ada]),
++    "== matches a string that is the same");
++
++  PASS(([[NSPredicate predicateWithFormat: @"name !=[c] %@", @"grace"]
++    evaluateWithObject: ada]),
++    "!=[c] is true for a string that differs by more than case");
++
++  /* An option on a comparison of two things that are not strings changes
++   * nothing: they are still compared with -isEqual:.
++   */
++  PASS(([[NSPredicate predicateWithFormat: @"age ==[c] %d", 41]
++    evaluateWithObject: aged]),
++    "an option leaves a comparison of numbers alone");
++
++  PASS((![[NSPredicate predicateWithFormat: @"age ==[c] %d", 42]
++    evaluateWithObject: aged]),
++    "an option does not make unequal numbers equal");
++
++  /* The operators that already honoured the options still do. */
++  PASS(([[NSPredicate predicateWithFormat: @"name <[c] %@", @"b"]
++    evaluateWithObject: ada]),
++    "< honours the [c] option");
++
++  PASS(([[NSPredicate predicateWithFormat: @"name BEGINSWITH[c] %@", @"a"]
++    evaluateWithObject: ada]),
++    "BEGINSWITH honours the [c] option");
++
++  [arp release];
++  return 0;
++}
+-- 
+2.43.0
+

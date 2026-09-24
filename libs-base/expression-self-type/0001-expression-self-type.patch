@@ -1,4 +1,4 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 3bcbf1ffe6ebab35daf0bdbed479f232cc7f7e38 Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Thu, 24 Sep 2026 12:00:00 +0500
 Subject: [PATCH] Give the shared SELF expression its own expression type
@@ -16,14 +16,20 @@ declines to translate something it understands.
 
 Build the shared expression with its own type, like all the others.
 
-A reproduction program accompanies this patch; it exits 1 on an
-unpatched library and 0 with the change.
+The test added here fails on an unpatched library, where SELF answers
+with NSConstantValueExpressionType, both as the shared instance and as
+the parser builds it.
 ---
+ Source/NSPredicate.m                     |  3 +-
+ Tests/base/NSPredicate/expressionTypes.m | 52 ++++++++++++++++++++++++
+ 2 files changed, 54 insertions(+), 1 deletion(-)
+ create mode 100644 Tests/base/NSPredicate/expressionTypes.m
+
 diff --git a/Source/NSPredicate.m b/Source/NSPredicate.m
-index dabf91d1c..572b628e0 100644
+index dabf91d1c..e33ca00dd 100644
 --- a/Source/NSPredicate.m
 +++ b/Source/NSPredicate.m
-@@ -1800,7 +1827,8 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
+@@ -1800,7 +1800,8 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
  {
    if (self == [NSExpression class] && nil == evaluatedObjectExpression)
      {
@@ -33,3 +39,64 @@ index dabf91d1c..572b628e0 100644
  
        /* An archive names the kinds of expression the way OS X does, so that
         * one written here can be read there and the other way about.
+diff --git a/Tests/base/NSPredicate/expressionTypes.m b/Tests/base/NSPredicate/expressionTypes.m
+new file mode 100644
+index 000000000..6c2e33aae
+--- /dev/null
++++ b/Tests/base/NSPredicate/expressionTypes.m
+@@ -0,0 +1,52 @@
++#import "ObjectTesting.h"
++#import "Foundation/NSAutoreleasePool.h"
++#import "Foundation/NSArray.h"
++#import "Foundation/NSExpression.h"
++#import "Foundation/NSPredicate.h"
++#import "Foundation/NSString.h"
++#import "Foundation/NSValue.h"
++
++/* Every kind of expression answers -expressionType with its own kind.  The
++ * shared expression behind +expressionForEvaluatedObject used to answer
++ * with the kind whose value is zero, NSConstantValueExpressionType.
++ */
++int main(void)
++{
++  NSAutoreleasePool	*arp = [NSAutoreleasePool new];
++  NSExpression		*evaluated;
++  NSExpression		*constant;
++  NSExpression		*keyPath;
++  NSExpression		*variable;
++  NSExpression		*function;
++  NSPredicate		*predicate;
++
++  evaluated = [NSExpression expressionForEvaluatedObject];
++  constant = [NSExpression expressionForConstantValue: @"x"];
++  keyPath = [NSExpression expressionForKeyPath: @"name"];
++  variable = [NSExpression expressionForVariable: @"v"];
++  function = [NSExpression expressionForFunction: @"count:"
++    arguments: [NSArray arrayWithObject: keyPath]];
++
++  PASS([evaluated expressionType] == NSEvaluatedObjectExpressionType,
++    "+expressionForEvaluatedObject answers NSEvaluatedObjectExpressionType");
++  PASS([constant expressionType] == NSConstantValueExpressionType,
++    "a constant answers NSConstantValueExpressionType");
++  PASS([keyPath expressionType] == NSKeyPathExpressionType,
++    "a key path answers NSKeyPathExpressionType");
++  PASS([variable expressionType] == NSVariableExpressionType,
++    "a variable answers NSVariableExpressionType");
++  PASS([function expressionType] == NSFunctionExpressionType,
++    "a function answers NSFunctionExpressionType");
++
++  /* The same expression as the parser builds it. */
++  predicate = [NSPredicate predicateWithFormat: @"SELF == %@", @"x"];
++  PASS([[(NSComparisonPredicate *)predicate leftExpression] expressionType]
++    == NSEvaluatedObjectExpressionType,
++    "SELF parsed from a format answers NSEvaluatedObjectExpressionType");
++
++  PASS_EQUAL([evaluated expressionValueWithObject: @"hello" context: nil],
++    @"hello", "SELF evaluates to the object it is given");
++
++  [arp release];
++  return 0;
++}
+-- 
+2.43.0
+

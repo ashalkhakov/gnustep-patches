@@ -1,4 +1,4 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From b6936475d38615d95b64ef9a2a5fe6abd754c38e Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Thu, 24 Sep 2026 12:00:00 +0500
 Subject: [PATCH] Implement SUBQUERY in expressions and in the predicate parser
@@ -28,9 +28,15 @@ written either way round.
 
 The NSPredicate test suite (214 tests) passes with the change.
 
-A reproduction program accompanies this patch; it exits 1 on an
-unpatched library and 0 with the change.
+The test added here cannot run on an unpatched library: parsing
+"$f.age > 40" raises before the subquery is reached.
 ---
+ Headers/Foundation/NSExpression.h |   6 +
+ Source/NSPredicate.m              | 272 +++++++++++++++++++++++++++++-
+ Tests/base/NSPredicate/subquery.m |  88 ++++++++++
+ 3 files changed, 363 insertions(+), 3 deletions(-)
+ create mode 100644 Tests/base/NSPredicate/subquery.m
+
 diff --git a/Headers/Foundation/NSExpression.h b/Headers/Foundation/NSExpression.h
 index f39304723..087c9e76f 100644
 --- a/Headers/Foundation/NSExpression.h
@@ -62,9 +68,8 @@ index f39304723..087c9e76f 100644
  - (NSExpression *) rightExpression;
  #endif
  @end
-
 diff --git a/Source/NSPredicate.m b/Source/NSPredicate.m
-index dabf91d1c..572b628e0 100644
+index dabf91d1c..71178cc87 100644
 --- a/Source/NSPredicate.m
 +++ b/Source/NSPredicate.m
 @@ -212,6 +212,12 @@ extern void     GSPropertyListMake(id,NSDictionary*,BOOL,BOOL,unsigned,id*);
@@ -80,7 +85,7 @@ index dabf91d1c..572b628e0 100644
  @end
  
  @interface GSAggregateExpression : NSExpression
-@@ -1819,7 +1847,11 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
+@@ -1819,7 +1825,11 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
  			   forClass: [GSFunctionExpression class]];
        [NSKeyedArchiver setClassName: @"NSAggregateExpression"
  			   forClass: [GSAggregateExpression class]];
@@ -92,7 +97,7 @@ index dabf91d1c..572b628e0 100644
        [NSKeyedUnarchiver setClass: [GSConstantValueExpression class]
  		     forClassName: @"NSConstantValueExpression"];
        [NSKeyedUnarchiver setClass: [GSEvaluatedObjectExpression class]
-@@ -2012,6 +2044,21 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
+@@ -2012,6 +2022,21 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
    
    return e;
  }
@@ -114,7 +119,7 @@ index dabf91d1c..572b628e0 100644
  // end 10.5 methods
  
  // 10.6 methods...
-@@ -2128,6 +2175,12 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
+@@ -2128,6 +2153,12 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
    return nil;
  }
  
@@ -127,7 +132,7 @@ index dabf91d1c..572b628e0 100644
  - (NSExpression *) leftExpression
  {
    [self subclassResponsibility: _cmd];
-@@ -2838,6 +2943,174 @@ do { \
+@@ -2838,6 +2869,174 @@ do { \
  @end
  
  @implementation GSSubqueryExpression
@@ -302,7 +307,7 @@ index dabf91d1c..572b628e0 100644
  @end
  
  @implementation GSAggregateExpression
-@@ -3787,6 +4060,24 @@ do { \
+@@ -3787,6 +3986,24 @@ do { \
    return [self parseBinaryExpression];
  }
  
@@ -327,7 +332,7 @@ index dabf91d1c..572b628e0 100644
  - (NSExpression *) parseIdentifierExpression
  {
    static NSCharacterSet *_identifier;
-@@ -3886,6 +4177,51 @@ do { \
+@@ -3886,6 +4103,51 @@ do { \
      {
        return [NSExpression expressionForEvaluatedObject];
      }
@@ -379,7 +384,7 @@ index dabf91d1c..572b628e0 100644
    if ([self scanString: @"$" intoString: NULL])
      {
        // variable
-@@ -4048,7 +4384,7 @@ do { \
+@@ -4048,7 +4310,7 @@ do { \
            // The name may take its trailing colon as OS X writes it, as in
            // uppercase:(name); the colon becomes part of the function name.
            NSMutableArray *args = [NSMutableArray arrayWithCapacity: 5];
@@ -388,7 +393,7 @@ index dabf91d1c..572b628e0 100644
  
            if (!name)
              {
-@@ -4123,7 +4459,7 @@ do { \
+@@ -4123,7 +4385,7 @@ do { \
            if (evaluatedObjectExpression != left)
              {
  	      // if both are simple key expressions (identifiers)
@@ -397,7 +402,7 @@ index dabf91d1c..572b628e0 100644
  	        {
                    // concatenate
                    left = [NSExpression expressionForKeyPath:
-@@ -4139,7 +4475,11 @@ do { \
+@@ -4139,7 +4401,11 @@ do { \
              }
            else
              {
@@ -410,3 +415,100 @@ index dabf91d1c..572b628e0 100644
              }
          }
        else
+diff --git a/Tests/base/NSPredicate/subquery.m b/Tests/base/NSPredicate/subquery.m
+new file mode 100644
+index 000000000..60fa6bf60
+--- /dev/null
++++ b/Tests/base/NSPredicate/subquery.m
+@@ -0,0 +1,88 @@
++#import "ObjectTesting.h"
++#import "Foundation/NSAutoreleasePool.h"
++#import "Foundation/NSArray.h"
++#import "Foundation/NSDictionary.h"
++#import "Foundation/NSExpression.h"
++#import "Foundation/NSKeyedArchiver.h"
++#import "Foundation/NSPredicate.h"
++#import "Foundation/NSString.h"
++#import "Foundation/NSValue.h"
++
++/* SUBQUERY(collection, $x, predicate) answers the members of the collection
++ * its predicate accepts.
++ */
++static NSDictionary *
++person(NSString *name, int age, NSArray *friends)
++{
++  return [NSDictionary dictionaryWithObjectsAndKeys:
++    name, @"name",
++    [NSNumber numberWithInt: age], @"age",
++    (friends != nil) ? friends : [NSArray array], @"friends",
++    nil];
++}
++
++int main(void)
++{
++  NSAutoreleasePool	*arp = [NSAutoreleasePool new];
++  NSDictionary		*alan;
++  NSDictionary		*grace;
++  NSDictionary		*ada;
++  NSDictionary		*loner;
++  NSExpression		*subquery;
++  NSPredicate		*sociable;
++  NSArray		*older;
++
++  alan = person(@"Alan", 41, nil);
++  grace = person(@"Grace", 45, nil);
++  ada = person(@"Ada", 36, [NSArray arrayWithObjects: alan, grace, nil]);
++  loner = person(@"Edsger", 50, nil);
++
++  subquery = [NSExpression expressionForSubquery:
++      [NSExpression expressionForKeyPath: @"friends"]
++			  usingIteratorVariable: @"f"
++				      predicate:
++      [NSPredicate predicateWithFormat: @"$f.age > %d", 40]];
++
++  PASS([subquery expressionType] == NSSubqueryExpressionType,
++    "a subquery answers NSSubqueryExpressionType");
++  PASS_EQUAL([subquery variable], @"f",
++    "a subquery answers with its iterator variable");
++  PASS_EQUAL([[subquery collection] keyPath], @"friends",
++    "a subquery answers with its collection");
++  PASS([subquery predicate] != nil,
++    "a subquery answers with its predicate");
++
++  older = [subquery expressionValueWithObject: ada context: nil];
++  PASS([older count] == 2,
++    "a subquery answers the members its predicate accepts");
++  PASS([[subquery expressionValueWithObject: loner context: nil] count] == 0,
++    "a subquery over an empty collection answers nothing");
++
++  /* The same thing, written the way a format string writes it.  A key path
++   * on the iterator variable ($f.age) is a composition, which the parser
++   * could not read at all while it asked every expression for a key path.
++   */
++  PASS(([NSPredicate predicateWithFormat: @"$x.age > %d", 40] != nil),
++    "a key path on a variable parses");
++
++  sociable = [NSPredicate predicateWithFormat:
++    @"SUBQUERY(friends, $f, $f.age > %d).@count > %d", 40, 1];
++
++  PASS(sociable != nil, "SUBQUERY(...).@count parses");
++  PASS([sociable evaluateWithObject: ada],
++    "SUBQUERY counts the members its predicate accepts");
++  PASS(![sociable evaluateWithObject: alan],
++    "SUBQUERY answers nothing for a member with no such friends");
++  PASS([[sociable predicateFormat] hasPrefix: @"SUBQUERY(friends, $f,"],
++    "a subquery prints back the way it was written");
++
++  /* And it survives an archive, which a subquery whose predicate holds a
++   * key path composition could not do before either.
++   */
++  PASS_EQUAL([NSKeyedUnarchiver unarchiveObjectWithData:
++    [NSKeyedArchiver archivedDataWithRootObject: subquery]], subquery,
++    "a subquery survives an archive");
++
++  [arp release];
++  return 0;
++}
+-- 
+2.43.0
+

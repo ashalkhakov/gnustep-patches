@@ -12,31 +12,45 @@ regenerated in the process - the copy it came from no longer matched.
 
 ## Pending
 
-| Fix | Upstream | Repro | PR | Carried by |
+| Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
-| `predicate-equality-options` | libs-base | yes | — | gnustep-coredata |
-| `expression-self-type` | libs-base | yes | — | gnustep-coredata |
-| `expression-binary-coding` | libs-base | yes | — | gnustep-coredata |
-| `predicate-subquery` | libs-base | yes | — | gnustep-coredata |
-| `dateformatter-cell-behavior` | libs-base | yes | — | gnustep-coredata |
-| `keyedarchiver-secure-coding` | libs-base | yes | — | gnustep-coredata |
-| `nsxmlelement-addattribute-value-doc` | libs-base | yes | — | GSXFormsKit |
-| `sax-handler-calloc` | libs-base | valgrind | — | RDLKit |
-| `xmlns-attribute` | libs-base | yes | — | RDLKit |
-| `arraycontroller-selection-kvo` | libs-gui | yes | — | gnustep-coredata |
-| `tableview-column-autoresizing-style` | libs-gui | no | — | gnustep-coredata |
-| `xib-date-picker` | libs-gui | no | — | gnustep-coredata |
-| `gscstableau-removerow-use-after-free` | libs-gui | yes | — | GSXFormsKit, HomeRow |
-| `action-sender-lifetime` | libs-gui | yes | — | GSXFormsKit, HomeRow |
-| `tracking-walk-retains-subviews` | libs-gui | yes | — | GSXFormsKit, HomeRow |
-| `pdf-print-operation` | libs-gui | yes | — | RDLKit |
-| `cgrectunion-size` | libs-opal | no | — | GSXFormsKit |
-| `cfstring-overrelease` | libs-corebase | no | — | gnustep-build |
-| `keep-nib-textfield-bezel` | gershwin-eau-theme | no | — | gnustep-coredata |
-| `nsalert-window-ownership` | gershwin-eau-theme | no | — | gnustep-build |
+| `predicate-equality-options` | libs-base | test | — | gnustep-coredata |
+| `expression-self-type` | libs-base | test | — | gnustep-coredata |
+| `expression-binary-coding` | libs-base | test | — | gnustep-coredata |
+| `predicate-subquery` | libs-base | test | — | gnustep-coredata |
+| `dateformatter-cell-behavior` | libs-base | test | — | gnustep-coredata |
+| `keyedarchiver-secure-coding` | libs-base | test | — | gnustep-coredata |
+| `nsxmlelement-addattribute-value-doc` | libs-base | program | — | GSXFormsKit |
+| `sax-handler-calloc` | libs-base | program | — | RDLKit |
+| `xmlns-attribute` | libs-base | test | — | RDLKit |
+| `arraycontroller-selection-kvo` | libs-gui | program | — | gnustep-coredata |
+| `tableview-column-autoresizing-style` | libs-gui | none | — | gnustep-coredata |
+| `xib-date-picker` | libs-gui | none | — | gnustep-coredata |
+| `gscstableau-removerow-use-after-free` | libs-gui | program | — | GSXFormsKit, HomeRow |
+| `action-sender-lifetime` | libs-gui | program | — | GSXFormsKit, HomeRow |
+| `tracking-walk-retains-subviews` | libs-gui | program | — | GSXFormsKit, HomeRow |
+| `pdf-print-operation` | libs-gui | program | — | RDLKit |
+| `cgrectunion-size` | libs-opal | none | — | GSXFormsKit |
+| `cfstring-overrelease` | libs-corebase | none | — | gnustep-build |
+| `keep-nib-textfield-bezel` | gershwin-eau-theme | none | — | gnustep-coredata |
+| `nsalert-window-ownership` | gershwin-eau-theme | none | — | gnustep-build |
 
 Re-run that check before sending anything: `Scripts/apply-patches.sh` on a
 fresh checkout is the quickest form of it.
+
+Where the column says **test**, the patch adds a test to the project's own
+suite (`Tests/base/...`, run by `gnustep-tests`), so the fix and the thing
+that proves it travel in one commit.  Each of those tests was checked both
+ways: it passes with the patch and fails, or aborts, without it.
+
+Where it says **program**, a standalone reproduction sits beside the patch
+instead, and the commit says why: one needs the libxml2 headers to see a
+dangling pointer, the other is only visible under valgrind.
+
+Writing the tests found one bug in the patches themselves: the secure-coding
+patch called `+supportsSecureCoding` on a class that need not implement it,
+so refusing a non-secure object aborted instead of reporting an error.  It
+now asks whether the class responds first.
 
 ## Done, and still carried somewhere
 

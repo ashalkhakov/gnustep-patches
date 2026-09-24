@@ -1,4 +1,4 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 8e34560741227d461ee7cd829c5c1d7b0d550d41 Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Thu, 24 Sep 2026 12:00:00 +0500
 Subject: [PATCH] Treat an xmlns:prefix attribute as a namespace declaration
@@ -47,55 +47,17 @@ attribute rather than after it; declaration order is not significant.
 The NSXMLNode, NSXMLDocument and NSXMLElement test suites pass
 unchanged (251 / 37 / 132).
 
-A reproduction program accompanies this patch; it aborts on an
-unpatched library and exits 0 with the change.
+The test added here aborts on an unpatched library, in a later
+innocent allocation, within a few hundred rounds.
 ---
-NSXML: a namespace declaration supplied via -addAttribute: corrupts the heap
-
-A prefixed namespace declaration added to an element as an attribute --
-[el addAttribute:[NSXMLNode attributeWithName:@"xmlns:rd" stringValue:...]] --
-corrupts the heap on release of the enclosing NSXMLDocument, aborting the
-process in glibc's allocator within a few build/serialise/release cycles
-("malloc_consolidate(): unaligned fastbin chunk detected", in whatever later
-allocation looks next). A self-contained Foundation-only reproduction is in
-nsxml-xmlns-attribute-teardown.m beside this patch.
-
-Root cause: -[NSXMLNode setName:] on an attribute whose qualified name is
-"xmlns:rd" calls xmlSplitQName2, gets prefix "xmlns" + local "rd", and then --
-because it treats "xmlns" as an ordinary prefix -- manufactures a namespace
-node with the reserved prefix "xmlns" and a NULL href. "xmlns" and "xml" are
-reserved: "xmlns:rd" declares the prefix rd, it is not an attribute in a
-namespace named "xmlns". The manufactured node is malformed, and its teardown
-across the private detached documents -detach creates (one per element wrapper
-as the autorelease pool drains after the document is released) writes through
-freed chunks. Declaring the same namespace through -addNamespace: never
-crashes; keeping the documents alive never crashes; only a *prefixed*
-declaration added as an attribute, on a released document, reaches the fault.
-
-This changes two things:
-
-  1. -[NSXMLNode setName:] no longer resolves or manufactures a namespace for
-     the reserved "xmlns"/"xml" prefixes; it keeps the qualified name literal.
-     libxml prints an unnamespaced attribute by its full name, so a bare
-     "xmlns:rd" attribute still serialises as xmlns:rd="...".
-
-  2. -[NSXMLElement addAttribute:] registers a "xmlns:prefix" attribute as a
-     real namespace (the -addNamespace: path, which never crashed) rather than
-     as an attribute, so prefixed descendants resolve against a proper
-     declaration and print with their prefix. The default declaration
-     ("xmlns", no prefix) is left as an attribute -- it never took the
-     reserved-prefix path and never provoked the fault.
-
-Serialisation is unchanged except that a prefixed xmlns declaration, now a
-real namespace, prints before a co-located default-xmlns attribute rather than
-after it (declaration order is not significant). Verified against libs-base
-master (3d7013e): the reproduction's prefixed-attribute mode crashes without
-this patch and survives with it, the NSXMLNode / NSXMLDocument / NSXMLElement
-test suites pass unchanged (251 / 37 / 132), and the patch applies cleanly with
-`git apply` on a fresh master checkout.
+ Source/NSXMLElement.m                    | 24 +++++++++
+ Source/NSXMLNode.m                       | 20 +++++++-
+ Tests/base/NSXMLElement/xmlnsAttribute.m | 62 ++++++++++++++++++++++++
+ 3 files changed, 105 insertions(+), 1 deletion(-)
+ create mode 100644 Tests/base/NSXMLElement/xmlnsAttribute.m
 
 diff --git a/Source/NSXMLElement.m b/Source/NSXMLElement.m
-index 7484209..6797862 100644
+index 74842090a..6797862cd 100644
 --- a/Source/NSXMLElement.m
 +++ b/Source/NSXMLElement.m
 @@ -253,6 +253,30 @@ GS_PRIVATE_INTERNAL(NSXMLElement)
@@ -130,7 +92,7 @@ index 7484209..6797862 100644
      {
        xmlNsPtr ns = attr->ns;
 diff --git a/Source/NSXMLNode.m b/Source/NSXMLNode.m
-index e8300f8..14ddce9 100644
+index e8300f8c5..14ddce9c5 100644
 --- a/Source/NSXMLNode.m
 +++ b/Source/NSXMLNode.m
 @@ -2132,7 +2132,25 @@ execute_xpath(xmlNodePtr node, NSString *xpath_exp, NSDictionary *constants,
@@ -160,3 +122,74 @@ index e8300f8..14ddce9 100644
          {
            if ((theNode->type == XML_ATTRIBUTE_NODE)
  	    || (theNode->type == XML_ELEMENT_NODE))
+diff --git a/Tests/base/NSXMLElement/xmlnsAttribute.m b/Tests/base/NSXMLElement/xmlnsAttribute.m
+new file mode 100644
+index 000000000..f1997ffce
+--- /dev/null
++++ b/Tests/base/NSXMLElement/xmlnsAttribute.m
+@@ -0,0 +1,62 @@
++#import "ObjectTesting.h"
++#import "Foundation/NSAutoreleasePool.h"
++#import "Foundation/NSArray.h"
++#import "Foundation/NSString.h"
++#import "Foundation/NSXMLDocument.h"
++#import "Foundation/NSXMLElement.h"
++#import "Foundation/NSXMLNode.h"
++
++/* An xmlns:prefix attribute is a namespace declaration.  Adding it as a
++ * plain attribute used to manufacture a namespace node carrying the
++ * reserved "xmlns" prefix and a NULL href, which the document's teardown
++ * then freed twice - so the damage landed in whatever allocation came
++ * next, several rounds later.  Enough rounds here to reach it.
++ */
++int main(void)
++{
++  NSAutoreleasePool	*arp = [NSAutoreleasePool new];
++  NSUInteger		round;
++  NSUInteger		rounds = 400;
++  BOOL			wroteEveryRound = YES;
++
++  for (round = 0; round < rounds; round++)
++    {
++      NSAutoreleasePool	*inner = [NSAutoreleasePool new];
++      NSXMLElement	*root;
++      NSXMLDocument	*document;
++      NSString		*xml;
++      NSUInteger	child;
++
++      root = [NSXMLElement elementWithName: @"Report"];
++      [root addAttribute: [NSXMLNode attributeWithName: @"xmlns:rd"
++					   stringValue: @"urn:b"]];
++
++      for (child = 0; child < 40; child++)
++	{
++	  [root addChild: [NSXMLElement elementWithName: @"C"
++					    stringValue: @"x"]];
++	}
++
++      document = [[NSXMLDocument alloc] initWithRootElement: root];
++      [document setVersion: @"1.0"];
++      [document setCharacterEncoding: @"utf-8"];
++      xml = [document XMLStringWithOptions: NSXMLNodePrettyPrint];
++
++      if ([xml length] == 0)
++	{
++	  wroteEveryRound = NO;
++	}
++
++      [document release];
++      [inner release];
++    }
++
++  PASS(wroteEveryRound,
++    "a document with an xmlns: attribute writes itself out");
++  PASS(YES,
++    "%u rounds of building and releasing such a document leave the heap intact",
++    (unsigned)rounds);
++
++  [arp release];
++  return 0;
++}
+-- 
+2.43.0
+

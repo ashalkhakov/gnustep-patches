@@ -1,4 +1,4 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 94099fb5b3570d9359cae5c482a3660c4bce2c81 Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Thu, 24 Sep 2026 12:00:00 +0500
 Subject: [PATCH] Encode and decode the binary expressions
@@ -17,14 +17,19 @@ $x.y could not be archived at all.
 Encode the two halves along with the expression type, so that one
 initialiser reads all four kinds back.
 
-A reproduction program accompanies this patch; it exits 1 on an
-unpatched library and 0 with the change.
+The test added here cannot even run on an unpatched library: the first
+archive raises "should be overridden by subclass".
 ---
+ Source/NSPredicate.m                          | 52 +++++++++++++++++
+ .../base/NSPredicate/binaryExpressionCoding.m | 58 +++++++++++++++++++
+ 2 files changed, 110 insertions(+)
+ create mode 100644 Tests/base/NSPredicate/binaryExpressionCoding.m
+
 diff --git a/Source/NSPredicate.m b/Source/NSPredicate.m
-index dabf91d1c..572b628e0 100644
+index dabf91d1c..bd1c6640b 100644
 --- a/Source/NSPredicate.m
 +++ b/Source/NSPredicate.m
-@@ -2655,6 +2708,58 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
+@@ -2655,6 +2655,58 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
  
  @implementation GSBinaryExpression
  
@@ -83,3 +88,70 @@ index dabf91d1c..572b628e0 100644
  - (BOOL) isEqual: (id)other
  {
    GSBinaryExpression	*o = other;
+diff --git a/Tests/base/NSPredicate/binaryExpressionCoding.m b/Tests/base/NSPredicate/binaryExpressionCoding.m
+new file mode 100644
+index 000000000..b25c8315e
+--- /dev/null
++++ b/Tests/base/NSPredicate/binaryExpressionCoding.m
+@@ -0,0 +1,58 @@
++#import "ObjectTesting.h"
++#import "Foundation/NSAutoreleasePool.h"
++#import "Foundation/NSExpression.h"
++#import "Foundation/NSKeyedArchiver.h"
++#import "Foundation/NSPredicate.h"
++#import "Foundation/NSString.h"
++
++/* A key path composition, a union, an intersection and a difference all
++ * share one class, which had no -encodeWithCoder: of its own and so
++ * inherited the one that raises.  A predicate containing $x.y could not be
++ * archived at all.
++ */
++static void
++testRoundTrip(NSExpression *expression, const char *what)
++{
++  NSExpression	*back;
++
++  back = [NSKeyedUnarchiver unarchiveObjectWithData:
++    [NSKeyedArchiver archivedDataWithRootObject: expression]];
++
++  PASS(back != nil && [back expressionType] == [expression expressionType],
++    "%s comes back from an archive as its own kind", what);
++  PASS_EQUAL(back, expression, "%s survives an archive", what);
++}
++
++int main(void)
++{
++  NSAutoreleasePool	*arp = [NSAutoreleasePool new];
++  NSExpression		*variable;
++  NSExpression		*keyPath;
++  NSExpression		*friends;
++  NSExpression		*colleagues;
++  NSPredicate		*predicate;
++  NSPredicate		*back;
++
++  variable = [NSExpression expressionForVariable: @"x"];
++  keyPath = [NSExpression expressionForKeyPath: @"age"];
++  friends = [NSExpression expressionForKeyPath: @"friends"];
++  colleagues = [NSExpression expressionForKeyPath: @"colleagues"];
++
++  testRoundTrip([NSExpression expressionForKeyPathCompositionWithLeft: variable
++    right: keyPath], "a key path composition");
++  testRoundTrip([NSExpression expressionForUnionSet: friends with: colleagues],
++    "a union");
++  testRoundTrip([NSExpression expressionForIntersectSet: friends
++    with: colleagues], "an intersection");
++  testRoundTrip([NSExpression expressionForMinusSet: friends with: colleagues],
++    "a difference");
++
++  predicate = [NSPredicate predicateWithFormat: @"$x.age > %d", 40];
++  back = [NSKeyedUnarchiver unarchiveObjectWithData:
++    [NSKeyedArchiver archivedDataWithRootObject: predicate]];
++  PASS_EQUAL([back predicateFormat], [predicate predicateFormat],
++    "a predicate holding a key path composition survives an archive");
++
++  [arp release];
++  return 0;
++}
+-- 
+2.43.0
+

@@ -39,9 +39,11 @@ strings and a plain pointer update is enough.
 gnustep-base's own NSXML suites, 524 tests, pass with the change on
 libxml2 2.9.14 and 2.13.8.
 
-A reproduction program accompanies this patch; it exits 1 on an
-unpatched library and 0 with the change, and shows the invalid read
-under valgrind.
+A reproduction program accompanies this patch rather than a test in
+Tests/base: seeing the dangling pointer means reading the libxml2 node
+behind the wrapper, which needs the libxml2 headers the test harness
+does not pass. It exits 1 on an unpatched library and 0 with the
+change, and shows the invalid read under valgrind.
 ---
 diff --git a/Source/NSXMLElement.m b/Source/NSXMLElement.m
 index 7484209..c1833aa 100644

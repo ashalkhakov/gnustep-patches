@@ -1,7 +1,8 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 1e3ac91220c03d9ca898ae0b5a9bff71981ed78b Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Thu, 24 Sep 2026 12:00:00 +0500
-Subject: [PATCH] Use the 10.4 behaviour in NSDateFormatter's NSFormatter methods
+Subject: [PATCH] Use the 10.4 behaviour in NSDateFormatter's NSFormatter
+ methods
 
 -[NSDateFormatter stringForObjectValue:] - the NSFormatter entry point
 every NSCell calls, and so the way a date reaches the screen from a text
@@ -20,11 +21,16 @@ the instance's behaviour is NSDateFormatterBehavior10_4, and leave the
 10.0 path untouched for everyone who has not asked for the modern
 behaviour.
 
-A reproduction program accompanies this patch; it exits 1 on an
-unpatched library and 0 with the change.
+The test added here fails on an unpatched library, where
+-stringForObjectValue: answers the pattern rather than the date.
 ---
+ Source/NSDateFormatter.m                      | 36 +++++++++++++++
+ .../base/NSDateFormatter/formatterBehavior.m  | 46 +++++++++++++++++++
+ 2 files changed, 82 insertions(+)
+ create mode 100644 Tests/base/NSDateFormatter/formatterBehavior.m
+
 diff --git a/Source/NSDateFormatter.m b/Source/NSDateFormatter.m
-index 51fdd54..e338aab 100644
+index 51fdd545e..e338aab47 100644
 --- a/Source/NSDateFormatter.m
 +++ b/Source/NSDateFormatter.m
 @@ -222,6 +222,29 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
@@ -77,3 +83,58 @@ index 51fdd54..e338aab 100644
    return [anObject descriptionWithCalendarFormat: _dateFormat
  					timeZone: [NSTimeZone defaultTimeZone]
  					  locale: nil];
+diff --git a/Tests/base/NSDateFormatter/formatterBehavior.m b/Tests/base/NSDateFormatter/formatterBehavior.m
+new file mode 100644
+index 000000000..0ef8b320c
+--- /dev/null
++++ b/Tests/base/NSDateFormatter/formatterBehavior.m
+@@ -0,0 +1,46 @@
++#import "ObjectTesting.h"
++#import "Foundation/NSAutoreleasePool.h"
++#import "Foundation/NSDate.h"
++#import "Foundation/NSDateFormatter.h"
++#import "Foundation/NSString.h"
++#import "Foundation/NSTimeZone.h"
++
++/* -stringForObjectValue: and -getObjectValue:forString:errorDescription:
++ * are the NSFormatter entry points every cell goes through.  With the 10.4
++ * behaviour they must use the ICU pattern, as -stringFromDate: does; they
++ * used to format with the 10.0 calendar-format code whatever the behaviour
++ * was, so a cell showed the pattern itself instead of a date.
++ */
++int main(void)
++{
++  NSAutoreleasePool	*arp = [NSAutoreleasePool new];
++  NSDateFormatter	*formatter;
++  NSDate		*date;
++  NSString		*formatted;
++  id			parsed = nil;
++  NSString		*error = nil;
++
++  formatter = [[NSDateFormatter alloc] init];
++  [formatter setFormatterBehavior: NSDateFormatterBehavior10_4];
++  [formatter setDateFormat: @"yyyy-MM-dd"];
++  [formatter setTimeZone: [NSTimeZone timeZoneWithName: @"UTC"]];
++
++  date = [NSDate dateWithTimeIntervalSinceReferenceDate: 0.0];
++
++  formatted = [formatter stringForObjectValue: date];
++  PASS_EQUAL(formatted, [formatter stringFromDate: date],
++    "-stringForObjectValue: agrees with -stringFromDate: in the 10.4 behaviour");
++  PASS_EQUAL(formatted, @"2001-01-01",
++    "-stringForObjectValue: formats with the pattern, not with it as text");
++
++  PASS([formatter getObjectValue: &parsed
++		       forString: @"2001-01-01"
++		errorDescription: &error],
++    "-getObjectValue:forString:errorDescription: reads the pattern back");
++  PASS_EQUAL([formatter stringFromDate: parsed], @"2001-01-01",
++    "the date it read back is the date that was written");
++
++  [formatter release];
++  [arp release];
++  return 0;
++}
+-- 
+2.43.0
+

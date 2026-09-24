@@ -31,9 +31,11 @@ that builds one of these handlers:
 Allocate the handler with calloc instead. It costs nothing here -- one
 structure per parser -- and makes the initialisation deterministic.
 
-A reproduction program accompanies this patch; run under valgrind it
-reports the uninitialised read on an unpatched library and is silent
-with the change.
+A reproduction program accompanies this patch rather than a test in
+Tests/base: an uninitialised handler struct has no observable effect on
+a parse, so there is nothing for a test to assert. Run the program under
+valgrind and it reports the uninitialised read on an unpatched library
+and is silent with the change.
 ---
 Zero the SAX handler before libxml2 is asked to initialise it
 

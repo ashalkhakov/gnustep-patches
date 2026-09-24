@@ -1,4 +1,4 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From b1c67a239098a783246187d338712b6490b7ce58 Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Thu, 24 Sep 2026 12:00:00 +0500
 Subject: [PATCH] Encode when the caller requires secure coding
@@ -16,11 +16,16 @@ supports secure coding and report a violation through the error as
 NSCoderInvalidValueError rather than silently answering nil for
 everything, and clear the error on success.
 
-A reproduction program accompanies this patch; it exits 1 on an
-unpatched library and 0 with the change.
+The test added here fails on an unpatched library, where the archive
+answers nil for an object that does adopt NSSecureCoding.
 ---
+ Source/NSKeyedArchiver.m                  | 76 ++++++++++++++++-------
+ Tests/base/NSKeyedArchiver/secureCoding.m | 56 +++++++++++++++++
+ 2 files changed, 109 insertions(+), 23 deletions(-)
+ create mode 100644 Tests/base/NSKeyedArchiver/secureCoding.m
+
 diff --git a/Source/NSKeyedArchiver.m b/Source/NSKeyedArchiver.m
-index d359f4d..72cf690 100644
+index d359f4d90..cc7d6fb59 100644
 --- a/Source/NSKeyedArchiver.m
 +++ b/Source/NSKeyedArchiver.m
 @@ -26,9 +26,11 @@
@@ -35,7 +40,7 @@ index d359f4d..72cf690 100644
  
  #import "GSPrivate.h"
  
-@@ -445,32 +447,58 @@ static NSDictionary *makeReference(unsigned ref)
+@@ -445,32 +447,60 @@ static NSDictionary *makeReference(unsigned ref)
                    requiringSecureCoding: (BOOL)requiresSecureCoding
                                    error: (NSError **)error
  {
@@ -55,6 +60,8 @@ index d359f4d..72cf690 100644
 +   * class supports secure coding.  */
 +  if (requiresSecureCoding == YES
 +    && ([anObject respondsToSelector: @selector(class)] == NO
++      || [[anObject class] respondsToSelector:
++	@selector(supportsSecureCoding)] == NO
 +      || [[anObject class] supportsSecureCoding] == NO))
      {
 -      NSMutableData	*m = nil;
@@ -117,3 +124,68 @@ index d359f4d..72cf690 100644
  
    return AUTORELEASE(d);
  }
+diff --git a/Tests/base/NSKeyedArchiver/secureCoding.m b/Tests/base/NSKeyedArchiver/secureCoding.m
+new file mode 100644
+index 000000000..b0c08d999
+--- /dev/null
++++ b/Tests/base/NSKeyedArchiver/secureCoding.m
+@@ -0,0 +1,56 @@
++#import "ObjectTesting.h"
++#import "Foundation/NSArray.h"
++#import "Foundation/NSAutoreleasePool.h"
++#import "Foundation/NSError.h"
++#import "Foundation/NSKeyedArchiver.h"
++#import "Foundation/NSString.h"
++
++/* +archivedDataWithRootObject:requiringSecureCoding:error: is the modern
++ * archiving entry point.  It used to answer nil whenever secure coding was
++ * asked for - without setting the error - even for objects that adopt
++ * NSSecureCoding.
++ */
++@interface NotSoSecure : NSObject <NSCoding>
++@end
++
++@implementation NotSoSecure
++- (void) encodeWithCoder: (NSCoder *)coder { }
++- (id) initWithCoder: (NSCoder *)coder { return self; }
++@end
++
++int main(void)
++{
++  NSAutoreleasePool	*arp = [NSAutoreleasePool new];
++  NSArray		*root;
++  NSData		*data;
++  NSError		*error = nil;
++  id			back;
++
++  root = [NSArray arrayWithObjects: @"one", @"two", nil];
++
++  data = [NSKeyedArchiver archivedDataWithRootObject: root
++			       requiringSecureCoding: YES
++					       error: &error];
++  PASS(data != nil, "an object that adopts NSSecureCoding can be archived");
++  PASS(error == nil, "no error is reported when the archive succeeded");
++
++  if (data != nil)
++    {
++      back = [NSKeyedUnarchiver unarchiveObjectWithData: data];
++      PASS_EQUAL(back, root, "the archive reads back as what went in");
++    }
++
++  /* And a class that does not adopt it is refused through the error rather
++   * than by silently answering nil.
++   */
++  error = nil;
++  data = [NSKeyedArchiver archivedDataWithRootObject:
++      [[[NotSoSecure alloc] init] autorelease]
++			       requiringSecureCoding: YES
++					       error: &error];
++  PASS(data == nil, "a class that does not adopt NSSecureCoding is refused");
++  PASS(error != nil, "the refusal is reported through the error");
++
++  [arp release];
++  return 0;
++}
+-- 
+2.43.0
+
