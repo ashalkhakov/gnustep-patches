@@ -89,7 +89,8 @@ Copy this repository in before using it, since the container's copy goes
 stale the moment you edit a patch:
 
 ```sh
-cd /Volumes/ExtraSSD/Projects/gnustep-patches && tar cf - --exclude .git . \
+cd /Volumes/ExtraSSD/Projects/gnustep-patches \
+  && COPYFILE_DISABLE=1 tar cf - --exclude .git . \
   | docker exec -i cdci bash -lc 'rm -rf /w/am/gnustep-patches \
       && mkdir -p /w/am/gnustep-patches && tar xf - -C /w/am/gnustep-patches'
 ```
@@ -135,3 +136,12 @@ the suite's own guard — `[NSApplication sharedApplication]` inside
 - The container is a pet, not a recipe: it was built by hand on `ubuntu:24.04`
   and the stack inside it is not in any image. `docker commit cdci` before
   doing anything drastic, or rebuild it with `Scripts/build-gnustep.sh`.
+- macOS `tar` writes an AppleDouble `._name` beside every file it carries
+  metadata for, so a tree piped into the container arrives with a twin of
+  each file — and the twins keep the extension, which means anything that
+  works by one picks them up. A test that reads every `*.rdl` in a directory
+  read 171 bytes of resource fork as a report and failed on the far side of
+  the copy, in code that was innocent; the same suite passed from a git
+  checkout, where no such file exists. Copy with `COPYFILE_DISABLE=1 tar`
+  (or `--no-xattrs`), and when something fails only in the container, check
+  `find . -name "._*"` before suspecting the platform.
