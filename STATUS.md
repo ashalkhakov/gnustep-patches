@@ -51,15 +51,46 @@ Two of the gui fixes keep their reproduction programs rather than gaining
 tests, and for a reason worth recording: a use-after-free is only a failure
 when the allocator makes it one.  The action-sender case does fail
 deterministically once the test drains the autorelease pool that would
-otherwise keep the sender alive - that took a second look.  The PDF one
-needs a system whose printing produces
-PDF page objects at all; this one produces none, patched or not.  Both want
-a sanitizer build or a desktop to be worth asserting on.
+otherwise keep the sender alive - that took a second look.  It still wants a
+sanitizer build or a desktop to be worth asserting on.
+
+The PDF one no longer does.  It was recorded here as unassertable because the
+reproduction counted `/Type /Page` in the raw bytes and found none on this
+system, patched or not - but the cairo backend writes its page objects into
+FlateDecode streams, so there was nothing to find in the raw bytes and the
+pages were there all along.  The reproduction inflates the streams now
+(`-lz`, `-D_GNU_SOURCE`), and reports **three pages with the patch and one
+without it**, checked both ways in the container on 2026-09-25 by reverting
+`Source/GSPDFPrintOperation.m`, rebuilding and reinstalling.  That makes it a
+candidate for a real test in `Tests/gui`, which would make it a much easier
+yes upstream.
 
 Writing the tests found one bug in the patches themselves: the secure-coding
 patch called `+supportsSecureCoding` on a class that need not implement it,
 so refusing a non-secure object aborted instead of reporting an error.  It
 now asks whether the class responds first.
+
+## Checked and not needed here
+
+Gone through on 2026-09-25 while auditing what RDLKit still carries.  None of
+these is a GNUstep bug; they are recorded so nobody else spends the afternoon:
+
+| What | Where it belongs |
+| --- | --- |
+| `NSXMLDocument` drops a text node that is only whitespace | Apple's Foundation only.  GNUstep reads all five cases correctly - whitespace-only content, with and without `xml:space="preserve"` and `NSXMLNodePreserveWhitespace`, and text with a trailing space - checked with RDLKit's own reproduction in the container |
+| `ibtool` aborts on three pieces of hand-written XIB markup | Xcode's `ibtool` only.  GNUstep's `GSXib5KeyedUnarchiver` loads all three - an `id` on `<tableHeaderCell>`, a `<splitView>` with no `<holdingPriorities>`, a `<tableHeaderView>` with no reference - and instantiates their top-level object |
+| `-[NSView dataWithPDFInsideRect:]` never returns on a headless machine | Not reproducible on this stack.  Both that call and the print-operation path RDLKit actually uses return a valid PDF under `xvfb-run` with no printer configured, patched *and* unpatched, in about a second.  RDLKit's note dates from an older GNUstep and its CI still skips the PDF step; it is worth turning back on |
+
+Two smaller things seen in passing, neither worth a patch on its own:
+`GSXib5KeyedUnarchiver` warns "unknown border type: bezel" from
+`-decodeScrollViewFlagsForElement:` and would warn the same for `groove` from
+`-decodeBorderTypeForElement:` - each decoder is missing the case the other
+has, and in both the fall-through happens to leave the value the markup asked
+for, so it is a spurious warning rather than a wrong border.  And
+`-[NSNib instantiateWithOwner:topLevelObjects:]` raises
+`NSInvalidArgumentException` ("Tried to add nil value for key 'NSOwner'") for
+a nil owner, which Cocoa accepts; that one wants checking against Cocoa with
+a compiled nib before it is called a bug.
 
 ## Done, and still carried somewhere
 

@@ -30,9 +30,9 @@ both the page count and the orientation come out right.
 
 A reproduction program accompanies this patch: a flipped view that
 paginates itself, printed to PDF, whose page objects are counted. It
-reports one page per page of the view with the change and a single sheet
-without it, on a system whose printing produces PDF page objects at
-all.
+reports three pages with the change and one without it -- checked both
+ways on gnustep-gui with the cairo backend under xvfb, by reverting this
+one file and rebuilding.
 ---
  Source/GSPDFPrintOperation.m | 21 ---------------------
  1 file changed, 21 deletions(-)
