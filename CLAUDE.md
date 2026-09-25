@@ -28,6 +28,19 @@ Record the pull request in `STATUS.md`. When it merges, delete the fix from
 here *and* from every repository the table lists as carrying a copy, in the
 same pass.
 
+## The order of work
+
+Reproduce first, in the container, with a program or a test that fails.
+Until the fault is in front of you, a fix is a guess, and every one of these
+patches that turned out to matter started from a reproduction that could be
+run again afterwards. Then write the fix, then turn the reproduction into a
+test in the project's own suite and keep them in one commit.
+
+When the fix is ready it is pushed here, to `gnustep-patches`
+(`github.com/ashalkhakov/gnustep-patches`), and the consuming projects pick
+it up from here by pinned commit. Upstreaming happens from here too, one
+branch per fix; nothing is sent from the project that found the bug.
+
 ## Writing one
 
 **The reasoning goes in the commit message, not in comments.** Maintainers
