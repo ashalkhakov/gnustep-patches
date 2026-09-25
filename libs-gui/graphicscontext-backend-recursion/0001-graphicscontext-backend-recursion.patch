@@ -1,0 +1,57 @@
+From c198d3e20589477b620671256b2c2a9f7514f321 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Fri, 25 Sep 2026 11:37:26 +0000
+Subject: [PATCH] Raise rather than recur when no backend context class is set
+
++initialize sets defaultNSGraphicsContextClass to NSGraphicsContext
+itself, and a backend replaces it when it is loaded. In a process that
+never loaded one -- a tool that draws without making an NSApplication,
+say one printing a view to PDF -- +allocWithZone: therefore forwards to
+itself and recurs for ever: the process spins at 100% with no output and
+no exception. That is what a report generator looks like when it "hangs"
+producing a PDF while its HTML comes out in milliseconds, and the
+backtrace names only objc_msgSend_stret, which says nothing about the
+cause.
+
+The NSAssert there does not catch it, because the class is not nil; it
+is this class. Check for that as well, and raise rather than spin, so
+the caller is told what is missing. Loading the backend here instead
+would be the other answer, but it is a larger change and this one stops
+the spin.
+
+A reproduction accompanies this patch: a view printed to PDF through
++PDFOperationWithView:insideRect:toData:printInfo:, which never returns
+without this change and raises NSInternalInconsistencyException with it.
+The same program returns either way once it makes the shared
+application, which is why this is easy to miss -- a program written to
+demonstrate a GUI bug naturally starts by making one, and a report
+generator has no reason to.
+---
+ Source/NSGraphicsContext.m | 11 +++++++++--
+ 1 file changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/Source/NSGraphicsContext.m b/Source/NSGraphicsContext.m
+index bcad98d26..99b8cc34f 100644
+--- a/Source/NSGraphicsContext.m
++++ b/Source/NSGraphicsContext.m
+@@ -304,8 +304,15 @@ NSGraphicsContext	*GSCurrentContext(void)
+ {
+   if (self == [NSGraphicsContext class])
+     {
+-      NSAssert(defaultNSGraphicsContextClass, 
+-	       @"Internal Error: No default NSGraphicsContext set\n");
++      /* +initialize leaves this class here until a backend replaces it;
++	 forwarding to it would recur for ever.  */
++      if (defaultNSGraphicsContextClass == Nil
++	  || defaultNSGraphicsContextClass == [NSGraphicsContext class])
++	{
++	  [NSException raise: NSInternalInconsistencyException
++		      format: @"No backend NSGraphicsContext class is set:"
++	                      @" the GUI backend has not been loaded"];
++	}
+       return [defaultNSGraphicsContextClass allocWithZone: z];
+     }
+   else
+-- 
+2.43.0
+

@@ -30,6 +30,7 @@ regenerated in the process - the copy it came from no longer matched.
 | `tableau-expression-lifetime-test` | libs-gui | test only | — | (new: the fix is already upstream) |
 | `tracking-walk-retains-subviews` | libs-gui | program | — | GSXFormsKit, HomeRow |
 | `pdf-print-operation` | libs-gui | program | — | RDLKit |
+| `graphicscontext-backend-recursion` | libs-gui | program | — | RDLKit |
 | `cgrectunion-size` | libs-opal | none | — | GSXFormsKit |
 | `cfstring-overrelease` | libs-corebase | none | — | gnustep-build |
 | `keep-nib-textfield-bezel` | gershwin-eau-theme | none | — | gnustep-coredata |
@@ -79,7 +80,12 @@ these is a GNUstep bug; they are recorded so nobody else spends the afternoon:
 | --- | --- |
 | `NSXMLDocument` drops a text node that is only whitespace | Apple's Foundation only.  GNUstep reads all five cases correctly - whitespace-only content, with and without `xml:space="preserve"` and `NSXMLNodePreserveWhitespace`, and text with a trailing space - checked with RDLKit's own reproduction in the container |
 | `ibtool` aborts on three pieces of hand-written XIB markup | Xcode's `ibtool` only.  GNUstep's `GSXib5KeyedUnarchiver` loads all three - an `id` on `<tableHeaderCell>`, a `<splitView>` with no `<holdingPriorities>`, a `<tableHeaderView>` with no reference - and instantiates their top-level object |
-| `-[NSView dataWithPDFInsideRect:]` never returns on a headless machine | Not reproducible on this stack.  Both that call and the print-operation path RDLKit actually uses return a valid PDF under `xvfb-run` with no printer configured, patched *and* unpatched, in about a second.  RDLKit's note dates from an older GNUstep and its CI still skips the PDF step; it is worth turning back on |
+| ~~`-[NSView dataWithPDFInsideRect:]` never returns on a headless machine~~ | **Wrong: it is real, and it is now `graphicscontext-backend-recursion` above.**  The first pass called it unreproducible because every reproduction written to show it made an `NSApplication` first, which is exactly what hides it.  Run the same code in a tool that makes none -- a report generator -- and it spins for ever |
+
+That correction is the lesson of the pass: a reproduction written by hand
+starts from the habits of the person writing it, and the missing
+`sharedApplication` was one nobody would think to leave out.  Reproduce from
+the program that actually failed where you can.
 
 Two smaller things seen in passing, neither worth a patch on its own:
 `GSXib5KeyedUnarchiver` warns "unknown border type: bezel" from
