@@ -1,0 +1,116 @@
+From ce4c116a1e2e90bd166386999f12c096f936020e Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Sat, 26 Sep 2026 15:01:06 +0000
+Subject: [PATCH] Share a constant expression's value when it is copied
+
+-[GSConstantValueExpression copyWithZone:] copied its value. A value
+that does not conform to NSCopying then raised, and so did copying any
+predicate that compares with one. The common case is Core Data:
+
+    [NSPredicate predicateWithFormat: @"department == %@", department]
+
+A managed object cannot be copied, and Core Data copies predicates: a
+fetch request copies its own when it is copied, as counting does. With
+this predicate, -countForFetchRequest:error: raised "does not recognize
+copyWithZone:".
+
+On macOS a copied expression or predicate keeps the same constant
+object, whether or not it could be copied (a mutable array included).
+Expressions and predicates are immutable, so sharing the value is
+enough. The copy now retains it.
+
+Tests/base/NSPredicate/constantCopy.m copies a constant expression, a
+comparison predicate and a compound predicate whose constant cannot be
+copied, and checks that the copies share it. Six of its eight checks fail
+without this change (the copies raise) and all pass with it; the rest of
+Tests/base/NSPredicate, NSArray, NSSet and NSKeyedArchiver pass either
+way.
+---
+ Source/NSPredicate.m                  |  2 +-
+ Tests/base/NSPredicate/constantCopy.m | 61 +++++++++++++++++++++++++++
+ 2 files changed, 62 insertions(+), 1 deletion(-)
+ create mode 100644 Tests/base/NSPredicate/constantCopy.m
+
+diff --git a/Source/NSPredicate.m b/Source/NSPredicate.m
+index dabf91d1c..8047c2f25 100644
+--- a/Source/NSPredicate.m
++++ b/Source/NSPredicate.m
+@@ -2328,7 +2328,7 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
+   GSConstantValueExpression *copy;
+ 
+   copy = (GSConstantValueExpression *)[super copyWithZone: zone];
+-  copy->_obj = [_obj copyWithZone: zone];
++  copy->_obj = RETAIN(_obj);
+   copy->_className = [_className copyWithZone: zone];
+   return copy;
+ }
+diff --git a/Tests/base/NSPredicate/constantCopy.m b/Tests/base/NSPredicate/constantCopy.m
+new file mode 100644
+index 000000000..266f8bb4b
+--- /dev/null
++++ b/Tests/base/NSPredicate/constantCopy.m
+@@ -0,0 +1,61 @@
++#import "ObjectTesting.h"
++#import "Foundation/NSAutoreleasePool.h"
++#import "Foundation/NSArray.h"
++#import "Foundation/NSDictionary.h"
++#import "Foundation/NSExpression.h"
++#import "Foundation/NSPredicate.h"
++#import "Foundation/NSCompoundPredicate.h"
++#import "Foundation/NSComparisonPredicate.h"
++
++/* A value that cannot be copied, as a managed object cannot.  A predicate
++ * that compares with one (department == %@) must still copy: the copy
++ * shares its constants, as it does on macOS.
++ */
++@interface NotCopyable : NSObject
++@end
++@implementation NotCopyable
++@end
++
++int main(void)
++{
++  NSAutoreleasePool     *arp = [NSAutoreleasePool new];
++  NotCopyable           *value = [[NotCopyable new] autorelease];
++  NSMutableArray        *list = [NSMutableArray arrayWithObject: @"a"];
++  NSExpression          *constant;
++  NSExpression          *copied = nil;
++  NSComparisonPredicate *comparison;
++  NSComparisonPredicate *copiedComparison = nil;
++  NSPredicate           *compound;
++  NSPredicate           *copiedCompound = nil;
++
++  constant = [NSExpression expressionForConstantValue: value];
++  PASS_RUNS(copied = [[constant copy] autorelease],
++    "a constant expression whose value cannot be copied can be copied")
++  PASS([copied constantValue] == value,
++    "the copy shares the constant value")
++
++  comparison = (NSComparisonPredicate *)[NSPredicate
++    predicateWithFormat: @"department == %@", value];
++  PASS_RUNS(copiedComparison = [[comparison copy] autorelease],
++    "a predicate with such a constant can be copied")
++  PASS([[copiedComparison rightExpression] constantValue] == value,
++    "the copied predicate compares with the same object")
++  PASS([copiedComparison evaluateWithObject:
++    [NSDictionary dictionaryWithObject: value forKey: @"department"]],
++    "the copied predicate matches what the original matches")
++
++  compound = [NSCompoundPredicate andPredicateWithSubpredicates:
++    [NSArray arrayWithObjects: comparison,
++      [NSPredicate predicateWithFormat: @"name IN %@", list], nil]];
++  PASS_RUNS(copiedCompound = [[compound copy] autorelease],
++    "a compound predicate with such a constant can be copied")
++  PASS([[(NSCompoundPredicate *)copiedCompound subpredicates] count] == 2,
++    "the copied compound predicate keeps its subpredicates")
++
++  copied = [[[NSExpression expressionForConstantValue: list] copy] autorelease];
++  PASS([copied constantValue] == list,
++    "a mutable constant is shared too, not copied")
++
++  [arp release];
++  return 0;
++}
+-- 
+2.43.0
+

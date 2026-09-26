@@ -20,6 +20,7 @@ regenerated in the process - the copy it came from no longer matched.
 | `expression-self-type` | libs-base | test | — | gnustep-coredata |
 | `expression-binary-coding` | libs-base | test | — | gnustep-coredata |
 | `predicate-subquery` | libs-base | test | — | gnustep-coredata |
+| `constant-expression-copy` | libs-base | test | — | (none: FreeCoreData's fix-managed-object-constants branch stops copying fetch predicates) |
 | `dateformatter-cell-behavior` | libs-base | test | — | gnustep-coredata |
 | `keyedarchiver-secure-coding` | libs-base | test | — | gnustep-coredata |
 | `nsxmlelement-addattribute-value-doc` | libs-base | program | — | GSXFormsKit |
@@ -75,6 +76,20 @@ returns a stack block unchanged, as Apple's runtime does; an explicit
 it. The new `Test/StackBlockRetain_arc.m` fails in the optimised build
 without the fix; with it the whole suite passes, 200 tests alone and 202
 with `autoreleased-return-value`, which it co-applies with.
+
+Added on 2026-09-26 against `libs-base` e835e21f5: `constant-expression-copy`.
+Copying a constant expression copied its value, so copying any predicate
+that compares with a value that cannot be copied raised, and Core Data
+copies predicates: with `department == %@` and a managed object,
+`-countForFetchRequest:error:` raised in FreeCoreData (found by
+ODataStore). On macOS the copy shares the constant, a mutable one
+included; the patch retains it instead. The new
+`Tests/base/NSPredicate/constantCopy.m` fails six of its eight checks
+without the fix and passes with it; `Tests/base/NSPredicate` (259 tests
+with the other patches), `NSArray`, `NSSet` and `NSKeyedArchiver` pass.
+All ten libs-base patches co-apply to that master with no fuzz.
+FreeCoreData's own fix (a fetch request's copy shares its predicate, as
+Apple's does) stands on its own, so nothing carries a copy of this one.
 
 Where the column says **test**, the patch adds a test to the project's own
 suite (`Tests/base/...`, run by `gnustep-tests`), so the fix and the thing
