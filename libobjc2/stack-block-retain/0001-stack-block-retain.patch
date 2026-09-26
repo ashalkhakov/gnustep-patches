@@ -1,0 +1,120 @@
+From 04cb21df214b7a2ed6aaac9e2d19530533df2eb5 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Sat, 26 Sep 2026 13:16:46 +0000
+Subject: [PATCH] Return a stack block unchanged from objc_retain()
+
+retain() copied any block to the heap and returned the copy, so
+objc_retain() on a stack block returned a different object. The code
+clang generates cannot rely on that: LLVM's ARC optimiser treats
+objc_retain() as returning its argument, and once the call is optimised
+nothing uses the result. The copy is never released, and neither is
+anything it captured.
+
+It happens as soon as a function or method that captures a block
+parameter in another block is inlined into its caller, with optimisation
+on:
+
+    static void keep(void (^block)(void))
+    {
+      kept = ^{ block(); };
+    }
+    ...
+    keep(^{ use(object); });
+
+ARC retains the parameter on entry. Here that makes a heap copy of the
+caller's stack block, which retains object. The matching release goes to
+the stack block, which the runtime ignores, so object is never
+deallocated. Completion handlers and dispatch_async() have exactly this
+shape. In a server built this way every connection object leaked,
+because its completion block was captured like this.
+
+Apple's runtime returns a stack block unchanged from objc_retain(), and
+so does this one now. Moving a block to the heap is objc_retainBlock()'s
+job, and ARC already calls it wherever a block must outlive its frame.
+Heap blocks are still retained through Block_copy(), and an explicit
+-retain message is not affected: the block classes implement it
+themselves.
+
+Test/StackBlockRetain_arc.m fails its final assertion in the optimised
+build without this change and passes with it; the rest of the suite
+passes either way.
+---
+ Test/CMakeLists.txt         |  1 +
+ Test/StackBlockRetain_arc.m | 37 +++++++++++++++++++++++++++++++++++++
+ arc.mm                      |  4 ++++
+ 3 files changed, 42 insertions(+)
+ create mode 100644 Test/StackBlockRetain_arc.m
+
+diff --git a/Test/CMakeLists.txt b/Test/CMakeLists.txt
+index b88dda3..ca7d7f6 100644
+--- a/Test/CMakeLists.txt
++++ b/Test/CMakeLists.txt
+@@ -33,6 +33,7 @@ set(TESTS
+ 	ProtocolCreation.m
+ 	ResurrectInDealloc_arc.m
+ 	RuntimeTest.m
++	StackBlockRetain_arc.m
+ 	SuperMethodMissing.m
+ 	WeakBlock_arc.m
+ 	WeakRefLoad.m
+diff --git a/Test/StackBlockRetain_arc.m b/Test/StackBlockRetain_arc.m
+new file mode 100644
+index 0000000..4ec4880
+--- /dev/null
++++ b/Test/StackBlockRetain_arc.m
+@@ -0,0 +1,37 @@
++#include "Test.h"
++
++// A block that captures a stack block copies it when it is copied itself,
++// and releases that copy when it goes away. What the captured block
++// captured must go with it.
++
++static int deallocs;
++
++@interface Captured : Test
++@end
++@implementation Captured
++- (void)dealloc
++{
++	deallocs++;
++}
++@end
++
++static id kept;
++
++static void keep(void (^block)(void))
++{
++	kept = ^{ block(); };
++}
++
++int main(void)
++{
++	@autoreleasepool
++	{
++		Captured *captured = [Captured new];
++		keep(^{ (void)captured; });
++		captured = nil;
++		assert(deallocs == 0);
++		kept = nil;
++	}
++	assert(deallocs == 1);
++	return 0;
++}
+diff --git a/arc.mm b/arc.mm
+index 10d4acb..e99bf07 100644
+--- a/arc.mm
++++ b/arc.mm
+@@ -496,6 +496,10 @@ static inline id retain(id obj, BOOL isWeak)
+ 	Class cls = obj->isa;
+ 	if (UNLIKELY(objc_test_class_flag(cls, objc_class_flag_is_block)))
+ 	{
++		if (cls == static_cast<void*>(&_NSConcreteStackBlock))
++		{
++			return obj;
++		}
+ 		return Block_copy(obj);
+ 	}
+ 	if (objc_test_class_flag(cls, objc_class_flag_fast_arc))
+-- 
+2.43.0
+

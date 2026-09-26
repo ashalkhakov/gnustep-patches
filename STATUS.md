@@ -15,6 +15,7 @@ regenerated in the process - the copy it came from no longer matched.
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
 | `autoreleased-return-value` | libobjc2 | test | — | (none: ODataStore works around it) |
+| `stack-block-retain` | libobjc2 | test | — | (none: ODataStore's vendored GCDWebServer works around it) |
 | `predicate-equality-options` | libs-base | test | — | gnustep-coredata |
 | `expression-self-type` | libs-base | test | — | gnustep-coredata |
 | `expression-binary-coding` | libs-base | test | — | gnustep-coredata |
@@ -61,6 +62,19 @@ tests) passes with it. libobjc2 registers tests in `Test/CMakeLists.txt`, so
 unlike the libs-base ones this patch touches a build file. It is the first
 libobjc2 fix here; `Scripts/build-gnustep.sh` now applies patches to
 libobjc2 as it does to the others.
+
+Added on 2026-09-26 against `libobjc2` aca3916: `stack-block-retain`.
+`objc_retain()` copied a stack block to the heap and returned the copy, but
+LLVM's ARC optimiser takes `objc_retain()` to return its argument, so with
+optimisation on the copy went unused and unreleased, along with whatever it
+captured. Any block parameter captured in another block (a completion
+handler, `dispatch_async`) leaked this way once inlined; found in ODataStore,
+where GCDWebServer leaked every connection and kept its socket open. The fix
+returns a stack block unchanged, as Apple's runtime does; an explicit
+`-retain` message still copies, since gnustep-base's block classes implement
+it. The new `Test/StackBlockRetain_arc.m` fails in the optimised build
+without the fix; with it the whole suite passes, 200 tests alone and 202
+with `autoreleased-return-value`, which it co-applies with.
 
 Where the column says **test**, the patch adds a test to the project's own
 suite (`Tests/base/...`, run by `gnustep-tests`), so the fix and the thing
