@@ -150,6 +150,7 @@ gnustep_sh() {
 # ------------------------------------------------------------------ #
 build_libobjc2() {
     fetch libobjc2 https://github.com/gnustep/libobjc2.git
+    apply_patches_for libobjc2 "$SOURCES/libobjc2"
     mkdir -p "$SOURCES/libobjc2/build"
     (cd "$SOURCES/libobjc2/build" && cmake .. \
         -DTESTS=off \

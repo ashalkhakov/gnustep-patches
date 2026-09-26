@@ -14,6 +14,7 @@ regenerated in the process - the copy it came from no longer matched.
 
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
+| `autoreleased-return-value` | libobjc2 | test | — | (none: ODataStore works around it) |
 | `predicate-equality-options` | libs-base | test | — | gnustep-coredata |
 | `expression-self-type` | libs-base | test | — | gnustep-coredata |
 | `expression-binary-coding` | libs-base | test | — | gnustep-coredata |
@@ -47,6 +48,19 @@ now carries only the parsing half (`-getObjectValue:forString:errorDescription:`
 still ignores the 10.4 behaviour) and the test. On unpatched master the
 test's formatting checks pass and its parsing checks fail; patched, all 24
 NSDateFormatter tests pass.
+
+Added on 2026-09-26 against `libobjc2` aca3916: `autoreleased-return-value`.
+With the runtime's own autorelease pool, `objc_retainAutoreleasedReturnValue()`
+popped whatever same object sat on top of the pool, taking it for the
+callee's autorelease; a synthesized nonatomic getter returns unretained, so
+`*error = self.error; ... self.error ...` handed the caller an error the pool
+no longer kept (found in ODataStore, where it freed an `NSError` and then
+corrupted the heap). The new `Test/AutoreleasedReturnValue_arc.m` aborts
+without the fix, in the plain and optimised builds, and the whole suite (200
+tests) passes with it. libobjc2 registers tests in `Test/CMakeLists.txt`, so
+unlike the libs-base ones this patch touches a build file. It is the first
+libobjc2 fix here; `Scripts/build-gnustep.sh` now applies patches to
+libobjc2 as it does to the others.
 
 Where the column says **test**, the patch adds a test to the project's own
 suite (`Tests/base/...`, run by `gnustep-tests`), so the fix and the thing

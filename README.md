@@ -19,7 +19,7 @@ STATUS.md                                   every fix, its state, and who carrie
 Scripts/apply-patches.sh                    apply one project's patches to a checkout
 ```
 
-The upstream projects are `libs-base`, `libs-gui`, `libs-opal`,
+The upstream projects are `libobjc2`, `libs-base`, `libs-gui`, `libs-opal`,
 `libs-corebase` and `gershwin-eau-theme`.
 
 Each patch is a mailbox-format commit rather than a bare diff, because the

@@ -56,6 +56,11 @@ own suites — `Tests/base/<Class>/*.m` and `Tests/gui/<Class>/*.m`, run by
 A patch that adds a failing-before test in the maintainer's own harness is a
 much easier yes than one that points at a program in another repository.
 Adding a file needs no build-file change; the harness discovers it.
+libobjc2 is the exception: its tests are single files listed in
+`Test/CMakeLists.txt` (a name ending in `_arc` is compiled with ARC), built
+with `cmake .. -DTESTS=on` and run by `ctest`, and each runs in a plain, an
+optimised and, for most, a legacy-ABI build. They use `Test.h`'s root class
+and `assert`, not Foundation.
 
 **Prove the test both ways.** A test that passes with and without the fix is
 worse than no test. Revert the source file in a built checkout, rebuild,

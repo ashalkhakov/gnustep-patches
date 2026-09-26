@@ -1,0 +1,174 @@
+From aa8c050e8201eaebda80b1057ff2a5ae95deef34 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Sat, 26 Sep 2026 09:49:38 +0000
+Subject: [PATCH] Only take back an autorelease that
+ objc_autoreleaseReturnValue() made
+
+With the runtime's own autorelease pool, objc_retainAutoreleasedReturnValue()
+decides that its argument was autoreleased by the callee's
+objc_autoreleaseReturnValue() when the object on top of the pool is the
+same object, and then pops it instead of retaining. That is not enough to
+know. A callee need not have autoreleased what it returns at all: the
+getter clang synthesizes for a nonatomic strong property returns its ivar
+unretained, and its caller still calls objc_retainAutoreleasedReturnValue().
+If the top of the pool holds the same object for another reason, that
+autorelease is taken for the return value's: popped, not retained, and
+released at the end of the caller's use. The object loses the reference
+the pool was keeping for someone else.
+
+It happens in the most ordinary error-reporting code:
+
+    - (id)doSomething: (NSError **)error
+    {
+      ...
+      *error = self.error;             // retained, autoreleased: on top of the pool
+      return self.error ? nil : ...;   // the getter again: that autorelease is popped
+    }
+
+The caller receives an error the pool no longer keeps, and once the
+object that held it goes away, the error is freed while the caller still
+has it. On macOS the same code is fine.
+
+objc_autoreleaseReturnValue() now records the pool slot it filled, and
+objc_retainAutoreleasedReturnValue() pops only that slot, and only while
+it is still the top of the pool and still holds the object; the record is
+cleared either way. This also stops the check from reading below the
+start of a pool page that has just been started.
+
+Test/AutoreleasedReturnValue_arc.m aborts without this change, in the
+plain and the optimised builds, and passes with it; the rest of the
+suite passes either way.
+---
+ Test/AutoreleasedReturnValue_arc.m | 45 ++++++++++++++++++++++++++++++
+ Test/CMakeLists.txt                |  1 +
+ arc.mm                             | 25 +++++++++++++----
+ 3 files changed, 66 insertions(+), 5 deletions(-)
+ create mode 100644 Test/AutoreleasedReturnValue_arc.m
+
+diff --git a/Test/AutoreleasedReturnValue_arc.m b/Test/AutoreleasedReturnValue_arc.m
+new file mode 100644
+index 0000000..d71a46b
+--- /dev/null
++++ b/Test/AutoreleasedReturnValue_arc.m
+@@ -0,0 +1,45 @@
++#include <assert.h>
++#include "Test.h"
++
++// A getter synthesized for a nonatomic strong property returns its ivar
++// without retaining it, and its caller still calls
++// objc_retainAutoreleasedReturnValue().  That must retain the value, not
++// take over an autorelease of the same object that was made for another
++// reason and happens to be on top of the pool.
++
++static int deallocated;
++
++@interface Canary : Test
++@end
++@implementation Canary
++- (void)dealloc
++{
++	deallocated++;
++}
++@end
++
++@interface Holder : Test
++@property (nonatomic, strong) id value;
++@end
++@implementation Holder
++- (id)storeValue: (__autoreleasing id *)out
++{
++	*out = self.value;
++	return self.value ? nil : self;
++}
++@end
++
++int main(void)
++{
++	__autoreleasing id out = nil;
++	@autoreleasepool
++	{
++		Holder *holder = [Holder new];
++		holder.value = [Canary new];
++		[holder storeValue: &out];
++		holder = nil;
++		assert(deallocated == 0);
++	}
++	assert(deallocated == 1);
++	return 0;
++}
+diff --git a/Test/CMakeLists.txt b/Test/CMakeLists.txt
+index b88dda3..5e356bd 100644
+--- a/Test/CMakeLists.txt
++++ b/Test/CMakeLists.txt
+@@ -87,6 +87,7 @@ endif ()
+ if (ENABLE_ALL_OBJC_ARC_TESTS)
+ 	list(APPEND TESTS
+ 	ARCTest_arc.m
++	AutoreleasedReturnValue_arc.m
+ 	PropertyIntrospectionTest2_arc.m
+ 	)
+ endif()
+diff --git a/arc.mm b/arc.mm
+index 10d4acb..6d0dfd2 100644
+--- a/arc.mm
++++ b/arc.mm
+@@ -127,6 +127,11 @@ struct arc_tls
+ {
+ 	struct arc_autorelease_pool *pool;
+ 	id returnRetained;
++	/**
++	 * The pool slot filled by the last objc_autoreleaseReturnValue(), which
++	 * objc_retainAutoreleasedReturnValue() may take back.
++	 */
++	id *returnSlot;
+ };
+ 
+ /**
+@@ -712,9 +717,9 @@ extern "C" OBJC_PUBLIC id objc_autorelease(id obj)
+ 
+ extern "C" OBJC_PUBLIC id objc_autoreleaseReturnValue(id obj)
+ {
++	struct arc_tls* tls = getARCThreadData();
+ 	if (!useARCAutoreleasePool) 
+ 	{
+-		struct arc_tls* tls = getARCThreadData();
+ 		if (NULL != tls)
+ 		{
+ 			objc_autorelease(tls->returnRetained);
+@@ -722,7 +727,14 @@ extern "C" OBJC_PUBLIC id objc_autoreleaseReturnValue(id obj)
+ 			return obj;
+ 		}
+ 	}
+-	return objc_autorelease(obj);
++	obj = objc_autorelease(obj);
++	if ((NULL != tls) && useARCAutoreleasePool && (NULL != obj) &&
++	    (NULL != tls->pool) && (tls->pool->insert > tls->pool->pool) &&
++	    (*(tls->pool->insert-1) == obj))
++	{
++		tls->returnSlot = tls->pool->insert-1;
++	}
++	return obj;
+ }
+ 
+ extern "C" OBJC_PUBLIC id objc_retainAutoreleasedReturnValue(id obj)
+@@ -738,11 +750,14 @@ extern "C" OBJC_PUBLIC id objc_retainAutoreleasedReturnValue(id obj)
+ 	struct arc_tls* tls = getARCThreadData();
+ 	if (NULL != tls)
+ 	{
+-		// If we're using our own autorelease pool, just pop the object from the top
++		// If we're using our own autorelease pool, pop the object from the top,
++		// but only if objc_autoreleaseReturnValue() put it there.
+ 		if (useARCAutoreleasePool)
+ 		{
+-			if ((NULL != tls->pool) &&
+-			    (*(tls->pool->insert-1) == obj))
++			id *slot = tls->returnSlot;
++			tls->returnSlot = NULL;
++			if ((NULL != tls->pool) && (NULL != slot) &&
++			    (slot == tls->pool->insert-1) && (*slot == obj))
+ 			{
+ 				tls->pool->insert--;
+ 				return obj;
+-- 
+2.43.0
+
