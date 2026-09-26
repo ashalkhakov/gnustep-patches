@@ -1,39 +1,36 @@
-From 072345d0c019e0f7c75a0d831263f57fe83dab0a Mon Sep 17 00:00:00 2001
+From e7838711dc58e54e7b6450f0ec3d9b54cc7570dd Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Thu, 24 Sep 2026 12:00:00 +0500
-Subject: [PATCH] Use the 10.4 behaviour in NSDateFormatter's NSFormatter
- methods
+Subject: [PATCH] Use the 10.4 behaviour when NSDateFormatter parses as an
+ NSFormatter
 
--[NSDateFormatter stringForObjectValue:] - the NSFormatter entry point
-every NSCell calls, and so the way a date reaches the screen from a text
-field or a bound table column - always formats with the 10.0 calendar-
-format code, even when the formatter was explicitly set to
+-[NSDateFormatter getObjectValue:forString:errorDescription:] - the
+NSFormatter entry point every NSCell calls to read what was typed into
+a text field or a bound table column - always parses with the 10.0
+calendar-format code, even when the formatter was explicitly set to
 NSDateFormatterBehavior10_4. The modern ICU machinery lives only in
--stringFromDate:.
+-dateFromString:, so an ICU pattern such as yyyy-MM-dd, which has no
+%-escapes, does not read back the date it wrote.
 
-An ICU pattern such as yyyy-MM-dd has no %-escapes, so a date column
-shows the literal pattern instead of a date.
--getObjectValue:forString:errorDescription: mis-parses for the same
-reason.
+cd90fbd3c made the other entry point, -stringForObjectValue:, go through
+-stringFromDate:, so formatting now uses the pattern; parsing does not
+yet. Delegate to -dateFromString: when the instance's behaviour is
+NSDateFormatterBehavior10_4, and leave the 10.0 path untouched for
+everyone who has not asked for the modern behaviour.
 
-Delegate both entry points to -stringFromDate: / -dateFromString: when
-the instance's behaviour is NSDateFormatterBehavior10_4, and leave the
-10.0 path untouched for everyone who has not asked for the modern
-behaviour.
-
-The test added here fails on an unpatched library, where
--stringForObjectValue: answers the pattern rather than the date.
+The test added here covers both directions. On an unpatched library its
+formatting checks pass, since cd90fbd3c, and its parsing checks fail.
 ---
- Source/NSDateFormatter.m                      | 25 ++++++++++
+ Source/NSDateFormatter.m                      | 19 ++++++++
  .../base/NSDateFormatter/formatterBehavior.m  | 46 +++++++++++++++++++
- 2 files changed, 71 insertions(+)
+ 2 files changed, 65 insertions(+)
  create mode 100644 Tests/base/NSDateFormatter/formatterBehavior.m
 
 diff --git a/Source/NSDateFormatter.m b/Source/NSDateFormatter.m
-index 51fdd545e..46705d4b4 100644
+index efabeb0..c2bf92f 100644
 --- a/Source/NSDateFormatter.m
 +++ b/Source/NSDateFormatter.m
-@@ -222,6 +222,25 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+@@ -222,6 +222,25 @@ - (BOOL) getObjectValue: (id*)anObject
  {
    NSCalendarDate	*d;
  
@@ -59,22 +56,9 @@ index 51fdd545e..46705d4b4 100644
    if ([string length] == 0)
      {
        d = nil;
-@@ -294,6 +313,12 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
-     {
-       return nil;
-     }
-+
-+  if (internal->_behavior == NSDateFormatterBehavior10_4)
-+    {
-+      return [self stringFromDate: anObject];
-+    }
-+
-   return [anObject descriptionWithCalendarFormat: _dateFormat
- 					timeZone: [NSTimeZone defaultTimeZone]
- 					  locale: nil];
 diff --git a/Tests/base/NSDateFormatter/formatterBehavior.m b/Tests/base/NSDateFormatter/formatterBehavior.m
 new file mode 100644
-index 000000000..0ef8b320c
+index 0000000..0ef8b32
 --- /dev/null
 +++ b/Tests/base/NSDateFormatter/formatterBehavior.m
 @@ -0,0 +1,46 @@
@@ -125,5 +109,5 @@ index 000000000..0ef8b320c
 +  return 0;
 +}
 -- 
-2.43.0
+2.50.1 (Apple Git-155)
 

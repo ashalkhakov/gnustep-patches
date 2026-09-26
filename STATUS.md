@@ -39,6 +39,15 @@ regenerated in the process - the copy it came from no longer matched.
 Re-run that check before sending anything: `Scripts/apply-patches.sh` on a
 fresh checkout is the quickest form of it.
 
+Rechecked on 2026-09-26 against `libs-base` e835e21f5: every libs-base
+patch applies and they co-apply. `dateformatter-cell-behavior` was
+rebased on the way. Upstream cd90fbd3c made `-stringForObjectValue:` go
+through `-stringFromDate:`, which fixes the formatting half, so the patch
+now carries only the parsing half (`-getObjectValue:forString:errorDescription:`
+still ignores the 10.4 behaviour) and the test. On unpatched master the
+test's formatting checks pass and its parsing checks fail; patched, all 24
+NSDateFormatter tests pass.
+
 Where the column says **test**, the patch adds a test to the project's own
 suite (`Tests/base/...`, run by `gnustep-tests`), so the fix and the thing
 that proves it travel in one commit.  Each of those tests was checked both
