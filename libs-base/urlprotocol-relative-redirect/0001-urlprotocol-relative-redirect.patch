@@ -1,0 +1,147 @@
+From e65406050032162256378aa97b234245e864b449 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Sun, 27 Sep 2026 16:03:42 +0000
+Subject: [PATCH] Follow a redirect whose Location is relative
+
+HTTP allows a relative Location (RFC 9110 section 10.2.2), and servers
+send them: /target, not http://host/target. The HTTP URL protocol made
+the new request's URL from the header alone, so it had no scheme or
+host, and the connection timed out. The Location is now resolved
+against the URL of the request that was redirected.
+
+Tests/base/NSURLConnection/relativeRedirect.m (a canned server on a
+thread) fails without it and passes with it; the NSURLConnection and
+NSURLProtocol suites pass. Found by ODataStore against Microsoft TripPin,
+whose service root redirects this way.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/NSURLProtocol.m                        |   3 +-
+ Tests/base/NSURLConnection/relativeRedirect.m | 101 ++++++++++++++++++
+ 2 files changed, 103 insertions(+), 1 deletion(-)
+ create mode 100644 Tests/base/NSURLConnection/relativeRedirect.m
+
+diff --git a/Source/NSURLProtocol.m b/Source/NSURLProtocol.m
+index 7f34b4efb..2cd95f432 100644
+--- a/Source/NSURLProtocol.m
++++ b/Source/NSURLProtocol.m
+@@ -1251,7 +1251,8 @@ typedef struct {
+ 
+               NS_DURING
+                 s = [[document headerNamed: @"location"] value];
+-                url = [NSURL URLWithString: s];
++                url = [[NSURL URLWithString: s
++                              relativeToURL: [this->request URL]] absoluteURL];
+               NS_HANDLER
+                 url = nil;
+               NS_ENDHANDLER
+diff --git a/Tests/base/NSURLConnection/relativeRedirect.m b/Tests/base/NSURLConnection/relativeRedirect.m
+new file mode 100644
+index 000000000..b46275516
+--- /dev/null
++++ b/Tests/base/NSURLConnection/relativeRedirect.m
+@@ -0,0 +1,101 @@
++/**
++ *  A redirect with a relative Location is followed against the URL of
++ *  the request that was redirected.
++ */
++#import <Foundation/Foundation.h>
++#import "Testing.h"
++
++/* Answers each connection with a canned response: GET /start is
++ * redirected to /target, which answers with a body.
++ */
++@interface RedirectingServer : NSObject
++{
++  NSFileHandle	*listener;
++}
++- (NSString*) port;
++- (void) run: (id)unused;
++@end
++
++@implementation RedirectingServer
++- (id) init
++{
++  if ((self = [super init]) != nil)
++    {
++      listener = RETAIN([NSFileHandle fileHandleAsServerAtAddress: @"127.0.0.1"
++							  service: @"0"
++							 protocol: @"tcp"]);
++    }
++  return self;
++}
++
++- (NSString*) port
++{
++  return [listener socketLocalService];
++}
++
++- (void) accepted: (NSNotification*)n
++{
++  NSFileHandle	*h = [[n userInfo] objectForKey: NSFileHandleNotificationFileHandleItem];
++  NSString	*request;
++  NSString	*response;
++
++  [listener acceptConnectionInBackgroundAndNotify];
++  request = AUTORELEASE([[NSString alloc] initWithData: [h availableData]
++					      encoding: NSISOLatin1StringEncoding]);
++  if ([request hasPrefix: @"GET /start "])
++    {
++      response = @"HTTP/1.1 302 Found\r\nLocation: /target\r\n"
++	@"Content-Length: 0\r\nConnection: close\r\n\r\n";
++    }
++  else
++    {
++      response = @"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
++	@"Content-Length: 5\r\nConnection: close\r\n\r\nhello";
++    }
++  [h writeData: [response dataUsingEncoding: NSISOLatin1StringEncoding]];
++  [h closeFile];
++}
++
++- (void) run: (id)unused
++{
++  ENTER_POOL
++  [[NSNotificationCenter defaultCenter] addObserver: self
++    selector: @selector(accepted:)
++    name: NSFileHandleConnectionAcceptedNotification
++    object: listener];
++  [listener acceptConnectionInBackgroundAndNotify];
++  [[NSRunLoop currentRunLoop] runUntilDate:
++    [NSDate dateWithTimeIntervalSinceNow: 30.0]];
++  LEAVE_POOL
++}
++@end
++
++int main()
++{
++  START_SET("relative redirect")
++    RedirectingServer	*server = AUTORELEASE([RedirectingServer new]);
++    NSMutableURLRequest	*request;
++    NSURLResponse	*response = nil;
++    NSError		*error = nil;
++    NSData		*data;
++    NSString		*body;
++
++    [NSThread detachNewThreadSelector: @selector(run:)
++			     toTarget: server
++			   withObject: nil];
++    [NSThread sleepForTimeInterval: 0.2];
++    request = [NSMutableURLRequest requestWithURL: [NSURL URLWithString:
++      [NSString stringWithFormat: @"http://127.0.0.1:%@/start", [server port]]]];
++    [request setTimeoutInterval: 5.0];
++    data = [NSURLConnection sendSynchronousRequest: request
++				 returningResponse: &response
++					     error: &error];
++    body = AUTORELEASE([[NSString alloc] initWithData: data
++					     encoding: NSUTF8StringEncoding]);
++    PASS(error == nil, "a redirect with a relative Location does not fail");
++    PASS_EQUAL([[response URL] path], @"/target",
++      "it is followed to the Location, resolved against the request's URL");
++    PASS_EQUAL(body, @"hello", "and the answer there is the response");
++  END_SET("relative redirect")
++  return 0;
++}
+-- 
+2.43.0
+

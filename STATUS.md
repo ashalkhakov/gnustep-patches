@@ -30,6 +30,8 @@ regenerated in the process - the copy it came from no longer matched.
 | `nsxml-default-namespace` | libs-base | test | — | (none: ODataStore uses it from here) |
 | `string-diacritic-insensitive-search` | libs-base | test | — | (none: ODataStore uses it from here) |
 | `keyedunarchiver-non-archive` | libs-base | test | — | (none: ODataStore uses it from here) |
+| `urlprotocol-relative-redirect` | libs-base | test | — | (none: ODataStore uses it from here) |
+| `urlprotocol-multipart-body` | libs-base | test | — | (none: ODataStore uses it from here) |
 | `arraycontroller-selection-kvo` | libs-gui | test | — | gnustep-coredata |
 | `tableview-column-autoresizing-style` | libs-gui | test | — | gnustep-coredata |
 | `xib-date-picker` | libs-gui | none | — | gnustep-coredata |
