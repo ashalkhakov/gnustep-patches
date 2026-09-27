@@ -26,6 +26,8 @@ regenerated in the process - the copy it came from no longer matched.
 | `nsxmlelement-addattribute-value-doc` | libs-base | program | — | GSXFormsKit |
 | `sax-handler-calloc` | libs-base | program | — | RDLKit |
 | `xmlns-attribute` | libs-base | test | — | RDLKit |
+| `nsxmlnode-string-value-escaping` | libs-base | test | — | (none: ODataStore uses it from here) |
+| `nsxml-default-namespace` | libs-base | test | — | (none: ODataStore uses it from here) |
 | `arraycontroller-selection-kvo` | libs-gui | test | — | gnustep-coredata |
 | `tableview-column-autoresizing-style` | libs-gui | test | — | gnustep-coredata |
 | `xib-date-picker` | libs-gui | none | — | gnustep-coredata |

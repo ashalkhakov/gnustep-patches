@@ -1,0 +1,136 @@
+From 74b7e6305ddb9473698f372baa4c1bf9c0909b12 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Sun, 27 Sep 2026 11:38:04 +0000
+Subject: [PATCH] Keep string values of elements and attributes as text
+
+-[NSXMLNode setStringValue:] gives the string to xmlNodeSetContent(),
+which takes it as a piece of XML: libxml2 parses entity references out
+of it, and expects the characters XML reserves to be escaped already.
+So a value with an ampersand loses what follows it (libxml2 reports
+"unterminated entity reference"), and one with < or a quote is written
+out unescaped, as XML that does not parse:
+
+    [NSXMLNode attributeWithName: @"Name" stringValue: @"A&B <x>"]
+
+prints Name="A&B <x>", and its -stringValue is no longer the string it
+was given. The same holds for -[NSXMLElement setStringValue:].
+-initWithName:stringValue: and text nodes were already right: they make
+a text node.
+
+setStringValue:resolvingEntities: had its two cases the wrong way round:
+NO parsed entity references, and YES escaped them.
+
+For an element or an attribute, set the value as a text node made with
+xmlNewDocText(), which libxml2 never parses, whatever its version; an
+empty value leaves no text node, as before. Resolving entities is the
+xmlNodeSetContent() call. Other kinds of node (text, comments,
+processing instructions) keep their content as it is, as before.
+
+Apple's Foundation keeps the value as it was given and escapes it on
+output; so does this.
+---
+ Source/NSXMLNode.m                         | 19 +++++---
+ Tests/base/NSXMLNode/stringValueEscaping.m | 56 ++++++++++++++++++++++
+ 2 files changed, 69 insertions(+), 6 deletions(-)
+ create mode 100644 Tests/base/NSXMLNode/stringValueEscaping.m
+
+diff --git a/Source/NSXMLNode.m b/Source/NSXMLNode.m
+index e8300f8c5..c77101e49 100644
+--- a/Source/NSXMLNode.m
++++ b/Source/NSXMLNode.m
+@@ -2233,17 +2233,24 @@ execute_xpath(xmlNodePtr node, NSString *xpath_exp, NSDictionary *constants,
+           RELEASE(theSubNodes);
+         }
+ 
+-      if (resolve == NO)
++      if (resolve == YES)
+         {
+           xmlNodeSetContent(theNode, XMLSTRING(string));
+         }
++      else if (theNode->type == XML_ELEMENT_NODE
++        || theNode->type == XML_ATTRIBUTE_NODE)
++        {
++          /* xmlNodeSetContent() parses entity references here. */
++          xmlNodeSetContent(theNode, NULL);
++          if ([string length] > 0)
++            {
++              xmlAddChild(theNode,
++                xmlNewDocText(theNode->doc, XMLSTRING(string)));
++            }
++        }
+       else
+         {
+-          // need to actually resolve entities...
+-          // is this the right functionality?? xmlEncodeSpecialChars()
+-          xmlChar *newstr = xmlEncodeEntitiesReentrant(theNode->doc, XMLSTRING(string));
+-          xmlNodeSetContent(theNode, newstr);
+-          xmlMemFree(newstr);
++          xmlNodeSetContent(theNode, XMLSTRING(string));
+         }
+     }
+   ASSIGN(internal->objectValue, string);
+diff --git a/Tests/base/NSXMLNode/stringValueEscaping.m b/Tests/base/NSXMLNode/stringValueEscaping.m
+new file mode 100644
+index 000000000..c99efc592
+--- /dev/null
++++ b/Tests/base/NSXMLNode/stringValueEscaping.m
+@@ -0,0 +1,56 @@
++#import "Testing.h"
++#import <Foundation/NSAutoreleasePool.h>
++#import <Foundation/NSXMLNode.h>
++#import <Foundation/NSXMLDocument.h>
++#import <Foundation/NSXMLElement.h>
++#import "GNUstepBase/GSConfig.h"
++
++int main()
++{
++  START_SET("NSXMLNode string values are text")
++#if !GS_USE_LIBXML
++    SKIP("library built without libxml2")
++#else
++  NSAutoreleasePool     *arp = [NSAutoreleasePool new];
++  NSString              *tricky = @"A&B <\"x\"> &amp; ]]>";
++  NSXMLNode             *attribute;
++  NSXMLElement          *element;
++  NSXMLDocument         *doc;
++
++  attribute = [NSXMLNode attributeWithName: @"Name" stringValue: tricky];
++  PASS_EQUAL([attribute stringValue], tricky,
++    "an attribute's string value is kept as it is given");
++  PASS_EQUAL([attribute XMLString],
++    @"Name=\"A&amp;B &lt;&quot;x&quot;&gt; &amp;amp; ]]&gt;\"",
++    "an attribute's string value is escaped in XML");
++
++  element = [NSXMLNode elementWithName: @"E"];
++  [element setStringValue: tricky];
++  PASS_EQUAL([element stringValue], tricky,
++    "an element's string value is kept as it is given");
++  PASS_EQUAL([element XMLString],
++    @"<E>A&amp;B &lt;\"x\"&gt; &amp;amp; ]]&gt;</E>",
++    "an element's string value is escaped in XML");
++
++  [element addAttribute: attribute];
++  doc = [[NSXMLDocument alloc] initWithXMLString: [element XMLString]
++                                         options: 0
++                                           error: NULL];
++  PASS_EQUAL([[doc rootElement] stringValue], tricky,
++    "an element's string value survives a round trip");
++  PASS_EQUAL([[[doc rootElement] attributeForName: @"Name"] stringValue], tricky,
++    "an attribute's string value survives a round trip");
++  [doc release];
++
++  [element setStringValue: @"&lt;b&gt;" resolvingEntities: YES];
++  PASS_EQUAL([element stringValue], @"<b>",
++    "resolving entities replaces the references");
++
++  [element setStringValue: @""];
++  PASS([element childCount] == 0, "an empty string value leaves no text node");
++
++  [arp release];
++#endif
++  END_SET("NSXMLNode string values are text")
++  return 0;
++}
+-- 
+2.43.0
+
