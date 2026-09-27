@@ -29,6 +29,7 @@ regenerated in the process - the copy it came from no longer matched.
 | `nsxmlnode-string-value-escaping` | libs-base | test | — | (none: ODataStore uses it from here) |
 | `nsxml-default-namespace` | libs-base | test | — | (none: ODataStore uses it from here) |
 | `string-diacritic-insensitive-search` | libs-base | test | — | (none: ODataStore uses it from here) |
+| `keyedunarchiver-non-archive` | libs-base | test | — | (none: ODataStore uses it from here) |
 | `arraycontroller-selection-kvo` | libs-gui | test | — | gnustep-coredata |
 | `tableview-column-autoresizing-style` | libs-gui | test | — | gnustep-coredata |
 | `xib-date-picker` | libs-gui | none | — | gnustep-coredata |

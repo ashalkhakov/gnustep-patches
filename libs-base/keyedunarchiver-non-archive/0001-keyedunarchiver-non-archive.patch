@@ -1,0 +1,62 @@
+From c0371a8cf1420aa81fc68ce489d23ebab432269e Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Sun, 27 Sep 2026 14:43:19 +0000
+Subject: [PATCH] Secure unarchiving of data that is not an archive is an error
+
++unarchivedObjectOfClasses:fromData:error: (and unarchivedObjectOfClass:,
+which calls it) crashed when the data was not a keyed archive:
+-initForReadingWithData: returns nil then, and the next line writes
+_allowedClasses through the nil pointer. It now raises inside the handler
+that is already there, so the call returns nil with NSCoderReadCorruptError,
+as on macOS.
+
+Tests/base/NSKeyedArchiver/secure_coding.m aborts without it and passes
+with it. Found by ODataStore, which decodes a delta token a client sends.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/NSKeyedUnarchiver.m                 |  5 +++++
+ Tests/base/NSKeyedArchiver/secure_coding.m | 12 ++++++++++++
+ 2 files changed, 17 insertions(+)
+
+diff --git a/Source/NSKeyedUnarchiver.m b/Source/NSKeyedUnarchiver.m
+index d540b98d8..b09e3f89c 100644
+--- a/Source/NSKeyedUnarchiver.m
++++ b/Source/NSKeyedUnarchiver.m
+@@ -449,6 +449,11 @@ GSNSErrorFromUnarchiverException(NSException *exception)
+   NS_DURING
+     {
+       u = [[NSKeyedUnarchiver alloc] initForReadingWithData: data];
++      if (u == nil)
++	{
++	  [NSException raise: NSInvalidUnarchiveOperationException
++		      format: @"The data is not a keyed archive"];
++	}
+       [u setRequiresSecureCoding: YES];
+       u->_allowedClasses = classes;
+       o = RETAIN([u decodeObjectForKey: @"root"]);
+diff --git a/Tests/base/NSKeyedArchiver/secure_coding.m b/Tests/base/NSKeyedArchiver/secure_coding.m
+index a8cdde27d..107178a43 100644
+--- a/Tests/base/NSKeyedArchiver/secure_coding.m
++++ b/Tests/base/NSKeyedArchiver/secure_coding.m
+@@ -233,5 +233,17 @@ int main(void)
+       "a mutable array of a secure class is decoded");
+   END_SET("mutable variants inherit NSSecureCoding")
+ 
++  START_SET("data that is not an archive")
++    NSError	*err = nil;
++    id		obj;
++
++    obj = [NSKeyedUnarchiver
++      unarchivedObjectOfClass: [NSString class]
++                     fromData: [@"not an archive" dataUsingEncoding: NSUTF8StringEncoding]
++                        error: &err];
++    PASS(obj == nil && [err code] == NSCoderReadCorruptError,
++      "data that is not an archive is a read error, not a crash");
++  END_SET("data that is not an archive")
++
+   return 0;
+ }
+-- 
+2.43.0
+
