@@ -28,8 +28,8 @@ regenerated in the process - the copy it came from no longer matched.
 | `xmlns-attribute` | libs-base | test | — | RDLKit |
 | `nsxmlnode-string-value-escaping` | libs-base | test | — | (none: ODataStore uses it from here) |
 | `nsxml-default-namespace` | libs-base | test | — | (none: ODataStore uses it from here) |
-| `nsxml-prefixed-descendants` | libs-base | test | — | (none: UDWorkflow uses it from here) |
-| `nsxmlelement-attribute-private-doc` | libs-base | program | — | (none: UDWorkflow uses it from here) |
+| `nsxml-prefixed-descendants` | libs-base | test | — | (none: WorkflowKit uses it from here) |
+| `nsxmlelement-attribute-private-doc` | libs-base | program | — | (none: WorkflowKit uses it from here) |
 | `string-diacritic-insensitive-search` | libs-base | test | — | (none: ODataStore uses it from here) |
 | `keyedunarchiver-non-archive` | libs-base | test | — | (none: ODataStore uses it from here) |
 | `urlprotocol-relative-redirect` | libs-base | test | — | (none: ODataStore uses it from here) |
