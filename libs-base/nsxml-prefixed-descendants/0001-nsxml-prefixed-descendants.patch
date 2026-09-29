@@ -1,0 +1,234 @@
+From 4f0a0706b16f960c61f1818a248e91622435a87b Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Tue, 29 Sep 2026 17:23:01 +0000
+Subject: [PATCH] Resolve prefixes of descendants added before their
+ declaration
+
+An element or attribute named with a prefix before it is in a tree that
+declares the prefix gets a placeholder namespace with no href, which
+-_insertChild: resolves when the node is added under a declaration. When
+the parent it is added to is itself not yet in such a tree, the
+placeholder is carried into the parent's document, and adopting the
+child declares it on the child: xmlns:a with no href. Adding the parent
+to the root that declares a= then pointed the child's reference at the
+root's namespace, but left that declaration in place, where it shadows
+the root's; libxml2 reconciles the conflict by declaring the namespace
+again under a made-up prefix. Built from the bottom up,
+
+    root (xmlns:a="urn:a") <- parent <- a:child b:one b:two
+
+prints as
+
+    <a_1:child xmlns:a_1="urn:a" xmlns:b_2="urn:b" b_2:one="1" b_1:two="2">
+
+where b_1 is declared nowhere, so the document does not read back.
+Apple's Foundation prints <a:child b:one="1" b:two="2">.
+
+cleanup_namespaces() now drops an element's href-less declaration of
+the prefix it resolves, and no longer stops at a node that already uses
+the namespace, whose descendants may not. Carrying a placeholder into a
+document that already holds one for the same prefix now points the
+moved nodes at that one instead of adding a second, which adoption would
+declare under a made-up prefix of its own.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/NSXMLNode.m                            | 74 +++++++++++++++----
+ Tests/base/NSXMLElement/prefixedDescendants.m | 65 ++++++++++++++++
+ 2 files changed, 123 insertions(+), 16 deletions(-)
+ create mode 100644 Tests/base/NSXMLElement/prefixedDescendants.m
+
+diff --git a/Source/NSXMLNode.m b/Source/NSXMLNode.m
+index e8300f8c5..da738bfdc 100644
+--- a/Source/NSXMLNode.m
++++ b/Source/NSXMLNode.m
+@@ -54,14 +54,33 @@ cleanup_namespaces(xmlNodePtr node, xmlNsPtr ns)
+     || (node->type == XML_ELEMENT_NODE))
+     {
+       xmlNsPtr ns1 = node->ns;
+-      
+-      if (ns1 == ns)
++      xmlNsPtr placeholders = NULL;
++
++      // Drop the href-less declaration adoption left for this prefix
++      if (node->type == XML_ELEMENT_NODE)
+         {
+-          return;
++          xmlNsPtr *link = &node->nsDef;
++
++          while (*link != NULL)
++            {
++              xmlNsPtr cur = *link;
++
++              if (cur != ns && cur->href == NULL
++                && xmlStrcmp(cur->prefix, ns->prefix) == 0)
++                {
++                  *link = cur->next;
++                  cur->next = placeholders;
++                  placeholders = cur;
++                }
++              else
++                {
++                  link = &cur->next;
++                }
++            }
+         }
+ 
+       // Either both the same or one NULL and the other the same
+-      if (ns1 != NULL)
++      if (ns1 != NULL && ns1 != ns)
+ 	{
+ 	  BOOL	equalPrefix;
+ 
+@@ -72,10 +91,6 @@ cleanup_namespaces(xmlNodePtr node, xmlNsPtr ns)
+ 	      || (xmlStrcmp(ns1->href, ns->href) == 0)))
+ 	    {
+ 	      xmlSetNs(node, ns);
+-	      if (ns1->href != NULL)
+-		{
+-	          //xmlFreeNs(ns1);
+-		}
+ 	    }
+ 	}
+  
+@@ -85,6 +100,10 @@ cleanup_namespaces(xmlNodePtr node, xmlNsPtr ns)
+         {
+           cleanup_namespaces((xmlNodePtr)node->properties, ns);
+         }
++      if (placeholders != NULL)
++        {
++          xmlFreeNsList(placeholders);
++        }
+     }
+ }
+ 
+@@ -860,6 +879,7 @@ isEqualTree(xmlNodePtr nodeA, xmlNodePtr nodeB)
+                 {
+                   xmlNsPtr cur = ns;
+                   xmlNsPtr oldNs1;
++                  xmlNsPtr same = NULL;
+ 
+                   // Need to transfer the namespace to the new tree
+                   // Unlink in old
+@@ -874,17 +894,39 @@ isEqualTree(xmlNodePtr nodeA, xmlNodePtr nodeB)
+ 
+                   ns = ns->next;
+                   cur->next = NULL;
+-                  
+-                  // Insert in new
+-                  oldNs1 = parentNode->doc->oldNs;
+-                  while (oldNs1)
++
++                  if (cur->href == NULL)
+                     {
+-                      if (oldNs1->next == NULL)
++                      for (oldNs1 = parentNode->doc->oldNs; oldNs1 != NULL;
++                        oldNs1 = oldNs1->next)
+                         {
+-                          oldNs1->next = cur;
+-                          break;
++                          if (oldNs1->href == NULL
++                            && xmlStrcmp(oldNs1->prefix, cur->prefix) == 0)
++                            {
++                              same = oldNs1;
++                              break;
++                            }
++                        }
++                    }
++                  if (same != NULL)
++                    {
++                      // One unresolved prefix, not one per node using it
++                      cleanup_namespaces(childNode, same);
++                      xmlFreeNs(cur);
++                    }
++                  else
++                    {
++                      // Insert in new
++                      oldNs1 = parentNode->doc->oldNs;
++                      while (oldNs1)
++                        {
++                          if (oldNs1->next == NULL)
++                            {
++                              oldNs1->next = cur;
++                              break;
++                            }
++                          oldNs1 = oldNs1->next;
+                         }
+-                      oldNs1 = oldNs1->next;
+                     }
+                 }
+               else
+diff --git a/Tests/base/NSXMLElement/prefixedDescendants.m b/Tests/base/NSXMLElement/prefixedDescendants.m
+new file mode 100644
+index 000000000..69a53eff1
+--- /dev/null
++++ b/Tests/base/NSXMLElement/prefixedDescendants.m
+@@ -0,0 +1,65 @@
++#import "Testing.h"
++#import <Foundation/NSAutoreleasePool.h>
++#import <Foundation/NSXMLNode.h>
++#import <Foundation/NSXMLDocument.h>
++#import <Foundation/NSXMLElement.h>
++#import "GNUstepBase/GSConfig.h"
++
++static NSXMLElement *
++root()
++{
++  NSXMLElement  *r = [NSXMLNode elementWithName: @"a:root"];
++
++  [r addNamespace: [NSXMLNode namespaceWithName: @"a" stringValue: @"urn:a"]];
++  [r addNamespace: [NSXMLNode namespaceWithName: @"b" stringValue: @"urn:b"]];
++  return r;
++}
++
++int main()
++{
++  START_SET("NSXMLElement prefixed descendants")
++#if !GS_USE_LIBXML
++    SKIP("library built without libxml2")
++#else
++  NSAutoreleasePool     *arp = [NSAutoreleasePool new];
++  NSXMLElement          *r;
++  NSXMLElement          *parent;
++  NSXMLElement          *child;
++  NSXMLDocument         *doc;
++
++  /* A grandchild whose prefix is declared only on the root, built from
++   * the bottom up: named before the tree it joins declares its prefix. */
++  r = root();
++  parent = [NSXMLNode elementWithName: @"a:parent"];
++  child = [NSXMLNode elementWithName: @"a:child"];
++  [parent addChild: child];
++  [r addChild: parent];
++  doc = [[NSXMLDocument alloc] initWithRootElement: r];
++  PASS_EQUAL([r XMLString],
++    @"<a:root xmlns:a=\"urn:a\" xmlns:b=\"urn:b\"><a:parent><a:child></a:child></a:parent></a:root>",
++    "a prefixed grandchild uses the root's declaration");
++  PASS_EQUAL([child URI], @"urn:a", "the grandchild is in the root's namespace");
++  [doc release];
++
++  /* Two attributes with the same prefix on a grandchild. */
++  r = root();
++  parent = [NSXMLNode elementWithName: @"a:parent"];
++  child = [NSXMLNode elementWithName: @"a:child"];
++  [child addAttribute: [NSXMLNode attributeWithName: @"b:one" stringValue: @"1"]];
++  [child addAttribute: [NSXMLNode attributeWithName: @"b:two" stringValue: @"2"]];
++  [parent addChild: child];
++  [r addChild: parent];
++  doc = [[NSXMLDocument alloc] initWithRootElement: r];
++  PASS_EQUAL([r XMLString],
++    @"<a:root xmlns:a=\"urn:a\" xmlns:b=\"urn:b\"><a:parent><a:child b:one=\"1\" b:two=\"2\"></a:child></a:parent></a:root>",
++    "prefixed attributes of a grandchild use the root's declaration");
++  PASS_EQUAL([[child attributeForLocalName: @"two" URI: @"urn:b"] stringValue], @"2",
++    "the second attribute is in the root's namespace");
++
++  [doc release];
++
++  [arp release];
++#endif
++  END_SET("NSXMLElement prefixed descendants")
++  return 0;
++}
+-- 
+2.43.0
+

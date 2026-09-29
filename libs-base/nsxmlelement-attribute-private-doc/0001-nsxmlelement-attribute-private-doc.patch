@@ -1,0 +1,55 @@
+From 5ad4b99a061b0f84358f9111ef3cc72135ed5363 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Tue, 29 Sep 2026 17:34:43 +0000
+Subject: [PATCH] Forget an attribute's private document once it is freed
+
+A prefixed attribute made before it is in a tree gets a private
+document, recorded in its `detached` ivar so that -dealloc frees it.
+-addAttribute: moves the attribute into the element's document and frees
+the private one, but leaves `detached` pointing at it. -_insertChild:
+clears it in the same situation; -addAttribute: did not.
+
+Once another document is allocated at the freed address -- which glibc
+soon does -- the stale pointer matches the document the attribute is in,
+and -detach takes the attribute for already detached and returns without
+unlinking it. When its element is torn down, the element's -dealloc
+detaches its sub-nodes, the attribute stays in the tree, the tree is
+freed, and the attribute object's own -dealloc then writes into the
+freed node:
+
+    malloc_consolidate(): unaligned fastbin chunk detected
+
+Clear `detached` when the document it names is freed.
+
+There is no test in the suite for this: whether the freed address is
+reused depends on the allocator and on what else the process allocates,
+and the test harness's pattern does not reuse it, so a test passes with
+and without the change. repro-attribute-private-doc.m, which builds and
+frees trees of elements with prefixed attributes, aborts within a few
+thousand of them without the change and runs through with it; AddressSanitizer
+and glibc's malloc checking both hide the fault by not reusing the
+address.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/NSXMLElement.m | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/Source/NSXMLElement.m b/Source/NSXMLElement.m
+index 74842090a..ef3d1cd3e 100644
+--- a/Source/NSXMLElement.m
++++ b/Source/NSXMLElement.m
+@@ -329,6 +329,10 @@ GS_PRIVATE_INTERNAL(NSXMLElement)
+ #else
+       xmlSetTreeDoc((xmlNodePtr)attr, theNode->doc);
+ #endif
++      if (tmp == GSIVar(attribute, detached))
++        {
++          GSIVar(attribute, detached) = 0;
++        }
+       xmlFreeDoc(tmp);
+ 
+       oldAttr = xmlHasNsProp(theNode, attr->name, ns->href);
+-- 
+2.43.0
+
