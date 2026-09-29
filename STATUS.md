@@ -30,6 +30,7 @@ regenerated in the process - the copy it came from no longer matched.
 | `nsxml-default-namespace` | libs-base | test | — | (none: ODataStore uses it from here) |
 | `nsxml-prefixed-descendants` | libs-base | test | — | (none: WorkflowKit uses it from here) |
 | `nsxmlelement-attribute-private-doc` | libs-base | program | — | (none: WorkflowKit uses it from here) |
+| `decimal-plain-notation` | libs-base | test | — | (none: WorkflowKit uses it from here) |
 | `string-diacritic-insensitive-search` | libs-base | test | — | (none: ODataStore uses it from here) |
 | `keyedunarchiver-non-archive` | libs-base | test | — | (none: ODataStore uses it from here) |
 | `urlprotocol-relative-redirect` | libs-base | test | — | (none: ODataStore uses it from here) |
