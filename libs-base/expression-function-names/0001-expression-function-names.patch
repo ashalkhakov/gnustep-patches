@@ -1,0 +1,232 @@
+From e2595b95e3cc091dbd0d15ec9fe6bf48ecd99d6f Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Tue, 29 Sep 2026 05:30:47 +0000
+Subject: [PATCH] NSExpression: take the arithmetic functions by the names OS X
+ uses
+
+On OS X the arithmetic operators are functions named add:to:,
+from:subtract:, multiply:by:, divide:by: and raise:toPower: (and there is
+modulus:by:, which has no operator).  That is what a parsed "a + b"
+answers to -function, what a keyed archive of it holds as its
+NSSelectorName, and what code that builds such an expression with
++expressionForFunction:arguments: names.  Here they were known only as
+_add, _sub, _mul, _div and _pow, so building one by its documented name
+raised "Unknown function implementation", and an archive made on OS X
+could not be read back.
+
++expressionForFunction:arguments: now takes the OS X names (the old ones
+still work), the parser produces them, so -function and archives agree
+with OS X, and modulus:by: is implemented.  An expression is still
+written as an operator whichever name it was built with.
+---
+ Source/NSPredicate.m                          | 56 ++++++++++---
+ .../NSPredicate/arithmeticFunctionNames.m     | 82 +++++++++++++++++++
+ 2 files changed, 127 insertions(+), 11 deletions(-)
+ create mode 100644 Tests/base/NSPredicate/arithmeticFunctionNames.m
+
+diff --git a/Source/NSPredicate.m b/Source/NSPredicate.m
+index dabf91d1c..0802e500e 100644
+--- a/Source/NSPredicate.m
++++ b/Source/NSPredicate.m
+@@ -1888,10 +1888,35 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
+   e = AUTORELEASE([[GSFunctionExpression alloc]
+     initWithExpressionType: NSFunctionExpressionType]);
+ 
++  /* The arithmetic operators are functions with two-part names on OS X. */
++  if ([name isEqualToString: @"add:to:"])
++    {
++      implementation = @"_add";
++    }
++  else if ([name isEqualToString: @"from:subtract:"])
++    {
++      implementation = @"_sub";
++    }
++  else if ([name isEqualToString: @"multiply:by:"])
++    {
++      implementation = @"_mul";
++    }
++  else if ([name isEqualToString: @"divide:by:"])
++    {
++      implementation = @"_div";
++    }
++  else if ([name isEqualToString: @"raise:toPower:"])
++    {
++      implementation = @"_pow";
++    }
++  else if ([name isEqualToString: @"modulus:by:"])
++    {
++      implementation = @"_mod";
++    }
+   /* A function is named with its trailing colon on OS X, as in 'sum:', and
+    * without one here, as in 'sum'.  Take either.
+    */
+-  if ([implementation hasSuffix: @":"])
++  else if ([implementation hasSuffix: @":"])
+     {
+       implementation
+ 	= [implementation substringToIndex: [implementation length] - 1];
+@@ -1917,11 +1942,11 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
+   ASSIGN(e->_function, name);
+   e->_argc = [args count];
+   ASSIGN(e->_args, args);
+-  if ([name isEqualToString: @"_add"]) e->_op = @"+";
+-  else if ([name isEqualToString: @"_sub"]) e->_op = @"-";
+-  else if ([name isEqualToString: @"_mul"]) e->_op = @"*";
+-  else if ([name isEqualToString: @"_div"]) e->_op = @"/";
+-  else if ([name isEqualToString: @"_pow"]) e->_op = @"**";
++  if ([implementation isEqualToString: @"_add"]) e->_op = @"+";
++  else if ([implementation isEqualToString: @"_sub"]) e->_op = @"-";
++  else if ([implementation isEqualToString: @"_mul"]) e->_op = @"*";
++  else if ([implementation isEqualToString: @"_div"]) e->_op = @"/";
++  else if ([implementation isEqualToString: @"_pow"]) e->_op = @"**";
+   return e;
+ }
+ 
+@@ -3206,6 +3231,15 @@ do { \
+   return [NSNumber numberWithDouble: [left doubleValue] - [right doubleValue]];
+ }
+ 
++- (id) _eval__mod: (NSArray *)expressions
++{
++  id left = [expressions objectAtIndex: 0];
++  id right = [expressions objectAtIndex: 1];
++
++  return [NSNumber numberWithDouble:
++    fmod([left doubleValue], [right doubleValue])];
++}
++
+ - (id) _eval_count: (NSArray *)expressions
+ {
+   NSAssert(_argc == 1, NSInternalInconsistencyException);
+@@ -4161,7 +4195,7 @@ do { \
+       if ([self scanString: @"**" intoString: NULL])
+         {
+           right = [self parseFunctionalExpression];
+-          left = [NSExpression expressionForFunction: @"_pow" 
++          left = [NSExpression expressionForFunction: @"raise:toPower:" 
+             arguments: [NSArray arrayWithObjects: left, right, nil]];
+         }
+       else
+@@ -4182,13 +4216,13 @@ do { \
+       if ([self scanString: @"*" intoString: NULL])
+         {
+           right = [self parsePowerExpression];
+-          left = [NSExpression expressionForFunction: @"_mul" 
++          left = [NSExpression expressionForFunction: @"multiply:by:" 
+             arguments: [NSArray arrayWithObjects: left, right, nil]];
+         }
+       else if ([self scanString: @"/" intoString: NULL])
+         {
+           right = [self parsePowerExpression];
+-          left = [NSExpression expressionForFunction: @"_div" 
++          left = [NSExpression expressionForFunction: @"divide:by:" 
+             arguments: [NSArray arrayWithObjects: left, right, nil]];
+         }
+       else
+@@ -4209,13 +4243,13 @@ do { \
+       if ([self scanString: @"+" intoString: NULL])
+         {
+           right = [self parseMultiplicationExpression];
+-          left = [NSExpression expressionForFunction: @"_add"
++          left = [NSExpression expressionForFunction: @"add:to:"
+             arguments: [NSArray arrayWithObjects: left, right, nil]];
+         }
+       else if ([self scanString: @"-" intoString: NULL])
+         {
+           right = [self parseMultiplicationExpression];
+-          left = [NSExpression expressionForFunction: @"_sub"
++          left = [NSExpression expressionForFunction: @"from:subtract:"
+             arguments: [NSArray arrayWithObjects: left, right, nil]];
+         }
+       else
+diff --git a/Tests/base/NSPredicate/arithmeticFunctionNames.m b/Tests/base/NSPredicate/arithmeticFunctionNames.m
+new file mode 100644
+index 000000000..b4373a568
+--- /dev/null
++++ b/Tests/base/NSPredicate/arithmeticFunctionNames.m
+@@ -0,0 +1,82 @@
++/* On OS X the arithmetic operators are functions named add:to:,
++   from:subtract:, multiply:by:, divide:by: and raise:toPower:, which is
++   what a parsed 'a + b' answers to -function, what a keyed archive of it
++   holds, and what code that builds such an expression names.  There is
++   modulus:by: too, with no operator.
++*/
++#import <Foundation/NSArray.h>
++#import <Foundation/NSAutoreleasePool.h>
++#import <Foundation/NSData.h>
++#import <Foundation/NSDictionary.h>
++#import <Foundation/NSExpression.h>
++#import <Foundation/NSKeyedArchiver.h>
++#import <Foundation/NSString.h>
++#import <Foundation/NSValue.h>
++#import "ObjectTesting.h"
++
++static NSExpression *
++function(NSString *name)
++{
++  return [NSExpression expressionForFunction: name
++                                   arguments:
++    [NSArray arrayWithObjects: [NSExpression expressionForKeyPath: @"a"],
++      [NSExpression expressionForKeyPath: @"b"], nil]];
++}
++
++static double
++valueOf(NSExpression *e, NSDictionary *object)
++{
++  return [[e expressionValueWithObject: object context: nil] doubleValue];
++}
++
++int
++main(int argc, char **argv)
++{
++  NSAutoreleasePool *arp = [NSAutoreleasePool new];
++  NSDictionary *object = [NSDictionary dictionaryWithObjectsAndKeys:
++    [NSNumber numberWithInt: 8], @"a", [NSNumber numberWithInt: 2], @"b", nil];
++  NSExpression *e;
++  NSData *archive;
++
++  e = function(@"add:to:");
++  PASS(valueOf(e, object) == 10.0, "add:to: adds");
++  PASS_EQUAL([e function], @"add:to:", "and keeps the name it was given");
++  PASS_EQUAL([e description], @"a + b", "and is written as an operator");
++  PASS(valueOf(function(@"from:subtract:"), object) == 6.0,
++    "from:subtract: subtracts the second from the first");
++  PASS(valueOf(function(@"multiply:by:"), object) == 16.0,
++    "multiply:by: multiplies");
++  PASS(valueOf(function(@"divide:by:"), object) == 4.0,
++    "divide:by: divides");
++  PASS(valueOf(function(@"raise:toPower:"), object) == 64.0,
++    "raise:toPower: raises to a power");
++  PASS_EQUAL([function(@"raise:toPower:") description], @"a ** b",
++    "and is written as an operator");
++  PASS(valueOf(function(@"modulus:by:"), object) == 0.0,
++    "modulus:by: is the remainder");
++  PASS(valueOf(function(@"_add"), object) == 10.0,
++    "the name used here before is still taken");
++
++  e = [NSExpression expressionWithFormat: @"a + b"];
++  PASS_EQUAL([e function], @"add:to:", "a parsed + is add:to:");
++  PASS_EQUAL([[NSExpression expressionWithFormat: @"a - b"] function],
++    @"from:subtract:", "a parsed - is from:subtract:");
++  PASS_EQUAL([[NSExpression expressionWithFormat: @"a * b"] function],
++    @"multiply:by:", "a parsed * is multiply:by:");
++  PASS_EQUAL([[NSExpression expressionWithFormat: @"a / b"] function],
++    @"divide:by:", "a parsed / is divide:by:");
++  PASS_EQUAL([[NSExpression expressionWithFormat: @"a ** b"] function],
++    @"raise:toPower:", "a parsed ** is raise:toPower:");
++  PASS_EQUAL([[NSExpression expressionWithFormat: @"a + b * 2"] description],
++    @"a + (b * 2)", "nested operators are written as they were");
++
++  archive = [NSKeyedArchiver archivedDataWithRootObject: e];
++  PASS([archive rangeOfData: [@"add:to:" dataUsingEncoding: NSUTF8StringEncoding]
++    options: 0 range: NSMakeRange(0, [archive length])].location != NSNotFound,
++    "a keyed archive names the function as OS X does");
++  e = [NSKeyedUnarchiver unarchiveObjectWithData: archive];
++  PASS(valueOf(e, object) == 10.0, "and the archive reads back");
++
++  [arp release];
++  return 0;
++}
+-- 
+2.43.0
+

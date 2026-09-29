@@ -79,14 +79,19 @@ patch still applied on top. Reverse-apply is the quick check
 
 ## The test environment
 
-GNUstep is built and tested in docker. The container `cdci` holds a built
-stack; `docker ps -a | grep cdci` tells you whether it is still there.
+GNUstep is built and tested in docker, in the container `ois-dev`, which
+holds a built stack; `docker ps -a | grep ois-dev` tells you whether it is
+still there. Leave the `cdci` container alone: it is CI's, and is not to be
+changed. `ois-dev` also has fresh clones of every upstream master under
+`/w/upstream/<project>`, for checking that the patches still apply.
 
 ```
 /w/build                 the prefix: the whole GNUstep stack, installed
 /w/dependencies/libs-*   source trees, patched and built - where you rebuild
 /w/status/<project>      clean checkouts at upstream master - where you git am
 /w/am/gnustep-patches    a copy of this repository, refreshed by you
+/w/upstream/<project>    fresh clones of upstream master - where a fix is written
+/w/oisdev                ODataStore and FreeCoreData, built on this stack
 /repo                    the host's gnustep-coredata, read-only
 ```
 
@@ -96,17 +101,17 @@ stale the moment you edit a patch:
 ```sh
 cd /Volumes/ExtraSSD/Projects/gnustep-patches \
   && COPYFILE_DISABLE=1 tar cf - --exclude .git . \
-  | docker exec -i cdci bash -lc 'rm -rf /w/am/gnustep-patches \
+  | docker exec -i ois-dev bash -lc 'rm -rf /w/am/gnustep-patches \
       && mkdir -p /w/am/gnustep-patches && tar xf - -C /w/am/gnustep-patches'
 ```
 
 Apply, build, install and test:
 
 ```sh
-docker exec cdci bash -lc '/w/am/gnustep-patches/Scripts/apply-patches.sh libs-base /w/dependencies/libs-base'
-docker exec cdci bash -lc 'cd /w/dependencies/libs-base && . /w/build/System/Library/Makefiles/GNUstep.sh \
+docker exec ois-dev bash -lc '/w/am/gnustep-patches/Scripts/apply-patches.sh libs-base /w/dependencies/libs-base'
+docker exec ois-dev bash -lc 'cd /w/dependencies/libs-base && . /w/build/System/Library/Makefiles/GNUstep.sh \
     && make -j4 && make install'
-docker exec cdci bash -lc 'cd /w/dependencies/libs-base && . /w/build/System/Library/Makefiles/GNUstep.sh \
+docker exec ois-dev bash -lc 'cd /w/dependencies/libs-base && . /w/build/System/Library/Makefiles/GNUstep.sh \
     && gnustep-tests Tests/base/NSPredicate'
 ```
 
@@ -124,7 +129,7 @@ the suite's own guard — `[NSApplication sharedApplication]` inside
 - `docker exec` without `-i` swallows stdin, so a heredoc or a pipe into it
   silently does nothing.
 - A shell redirect runs even when the command before it fails:
-  `docker exec cdci cat /tmp/x > patch` truncates `patch` when the container
+  `docker exec ois-dev cat /tmp/x > patch` truncates `patch` when the container
   has no `/tmp/x`. Write to a temporary file, check it, then move it.
 - `git am` needs a committer identity: export `GIT_COMMITTER_NAME` and
   `GIT_COMMITTER_EMAIL`, or every apply fails with "Committer identity
@@ -139,7 +144,7 @@ the suite's own guard — `[NSApplication sharedApplication]` inside
 - There is no valgrind in the image, so a fault only valgrind can see cannot
   be demonstrated there.
 - The container is a pet, not a recipe: it was built by hand on `ubuntu:24.04`
-  and the stack inside it is not in any image. `docker commit cdci` before
+  and the stack inside it is not in any image. `docker commit ois-dev` before
   doing anything drastic, or rebuild it with `Scripts/build-gnustep.sh`.
 - macOS `tar` writes an AppleDouble `._name` beside every file it carries
   metadata for, so a tree piped into the container arrives with a twin of

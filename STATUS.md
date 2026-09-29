@@ -32,6 +32,9 @@ regenerated in the process - the copy it came from no longer matched.
 | `keyedunarchiver-non-archive` | libs-base | test | — | (none: ODataStore uses it from here) |
 | `urlprotocol-relative-redirect` | libs-base | test | — | (none: ODataStore uses it from here) |
 | `urlprotocol-multipart-body` | libs-base | test | — | (none: ODataStore uses it from here) |
+| `expression-function-names` | libs-base | test | — | (none: ODataStore works around it) |
+| `predicate-matches-line-anchors` | libs-base | test | — | (none) |
+| `predicate-like-wildcards` | libs-base | test | — | (none) |
 | `arraycontroller-selection-kvo` | libs-gui | test | — | gnustep-coredata |
 | `tableview-column-autoresizing-style` | libs-gui | test | — | gnustep-coredata |
 | `xib-date-picker` | libs-gui | none | — | gnustep-coredata |
@@ -96,6 +99,39 @@ with the other patches), `NSArray`, `NSSet` and `NSKeyedArchiver` pass.
 All ten libs-base patches co-apply to that master with no fuzz.
 FreeCoreData's own fix (a fetch request's copy shares its predicate, as
 Apple's does) stands on its own, so nothing carries a copy of this one.
+
+Rechecked on 2026-09-29 against fresh clones of every upstream master:
+`libobjc2` aca3916, `libs-base` e0d966983, `libs-gui` ff49ac830,
+`libs-opal` c4502a1, `libs-corebase` e89ff1f and `gershwin-eau-theme`
+3d741fb. Every patch applies with no fuzz and none reverse-applies, and
+the commits upstream since the last check (libs-base's `GSIsBlock()` and
+NSTask signal masks, libs-opal's OpenBSD `swap64`) touch nothing the
+patches fix.
+
+Added on 2026-09-29 against `libs-base` e0d966983, all three found while
+building ODataStore's predicate translation, and checked against macOS:
+
+- `expression-function-names`: OS X names the arithmetic operators
+  `add:to:`, `from:subtract:`, `multiply:by:`, `divide:by:` and
+  `raise:toPower:` (and has `modulus:by:`); here only `_add` and its kin
+  were known, so building one by the documented name raised and an OS X
+  archive of `a + b` could not be read. The patch takes both, has the
+  parser produce OS X's (so `-function` and archives agree with OS X),
+  and adds `modulus:by:`. `arithmeticFunctionNames.m` aborts without it
+  (the first check raises) and its 19 checks pass with it.
+- `predicate-matches-line-anchors`: `^` and `$` in MATCHES match at each
+  line on OS X (`UREGEX_MULTILINE`). `matchesLineAnchors.m`: four of its
+  eight checks fail without the fix; all pass with it.
+- `predicate-like-wildcards`: LIKE left every regular expression character
+  but `*` and `?` live (`.`, `+`, `|`, brackets, `(`, which failed to
+  compile) and took `?` as zero or one character. On OS X only `*`, `?`
+  (exactly one) and a backslash escape mean anything. `likeWildcards.m`:
+  nine of its sixteen checks fail without the fix; all pass with it, and
+  every check was confirmed on macOS first.
+
+With all nineteen libs-base patches, `Tests/base/NSPredicate` passes 293
+tests, and `NSKeyedArchiver`, `NSArray`, `NSSet`, `NSString` and
+`NSRegularExpression` pass; ODataStore's suite passes on the result.
 
 Where the column says **test**, the patch adds a test to the project's own
 suite (`Tests/base/...`, run by `gnustep-tests`), so the fix and the thing

@@ -1,0 +1,148 @@
+From c619fcbcdd1a12a0de9e70c540848292373a476a Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Tue, 29 Sep 2026 05:31:43 +0000
+Subject: [PATCH] NSPredicate: LIKE takes only * and ? as wildcards, as on OS X
+
+A LIKE pattern was made a regular expression by replacing * with .* and
+? with .?, and nothing else, so every other regular expression character
+kept its meaning: "axb" LIKE "a.b" and "aab" LIKE "a+b" were true, "x"
+LIKE "a|x" was true, "a(b" LIKE "a(b" was false (the pattern did not
+compile), and ? matched no character as well as one, so "ab" LIKE "a?b"
+was true.  On OS X only * (any run of characters), ? (exactly one) and a
+backslash (which makes the next character literal) mean anything.
+
+The pattern is now translated character by character: * and ? as
+before, but ? as exactly one character, a backslash escape taken as the
+character it escapes, and every other character quoted.
+---
+ Source/NSPredicate.m                   | 54 +++++++++++++++++++-------
+ Tests/base/NSPredicate/likeWildcards.m | 45 +++++++++++++++++++++
+ 2 files changed, 85 insertions(+), 14 deletions(-)
+ create mode 100644 Tests/base/NSPredicate/likeWildcards.m
+
+diff --git a/Source/NSPredicate.m b/Source/NSPredicate.m
+index dabf91d1c..3e6f09eaf 100644
+--- a/Source/NSPredicate.m
++++ b/Source/NSPredicate.m
+@@ -1359,6 +1359,44 @@ argumentsFromFormat(NSString *format, va_list args)
+ }
+ 
+ #if	GS_USE_ICU == 1
++/* A LIKE pattern as a regular expression: '*' is any run of characters,
++ * '?' any one character, a backslash makes the next character literal,
++ * and every other character stands for itself.
++ */
++static NSString *
++GSRegexForLikePattern(NSString *pattern)
++{
++  NSUInteger		length = [pattern length];
++  NSMutableString	*regex = [NSMutableString stringWithCapacity: length * 2];
++  NSUInteger		i;
++
++  for (i = 0; i < length; i++)
++    {
++      unichar	c = [pattern characterAtIndex: i];
++
++      if (c == '*')
++	{
++	  [regex appendString: @".*"];
++	  continue;
++	}
++      if (c == '?')
++	{
++	  [regex appendString: @"."];
++	  continue;
++	}
++      if (c == '\\' && i + 1 < length)
++	{
++	  c = [pattern characterAtIndex: ++i];
++	}
++      if (c < 128 && !isalnum(c))
++	{
++	  [regex appendString: @"\\"];
++	}
++      [regex appendFormat: @"%C", c];
++    }
++  return regex;
++}
++
+ static BOOL
+ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOptions opts)
+ {
+@@ -1537,20 +1575,8 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
+ #endif
+       case NSLikePredicateOperatorType:
+ #if	GS_USE_ICU == 1
+-	{
+-	  NSString *regex;
+-
+-	  /* The right hand is a pattern with '?' meaning match one character,
+-	   * and '*' meaning match zero or more characters, so translate that
+-	   * into a regex.
+-	   */
+-	  regex = [rightResult stringByReplacingOccurrencesOfString: @"*"
+-							 withString: @".*"];
+-	  regex = [regex stringByReplacingOccurrencesOfString: @"?"
+-						   withString: @".?"];
+-	  regex = [NSString stringWithFormat: @"^%@$", regex];
+-	  return GSICUStringMatchesRegex(leftResult, regex, compareOptions);
+-	}
++	return GSICUStringMatchesRegex(leftResult,
++	  GSRegexForLikePattern(rightResult), compareOptions);
+ #else
+ 	return [leftResult compare: rightResult options: compareOptions]
+ 	  == NSOrderedSame ? YES : NO;
+diff --git a/Tests/base/NSPredicate/likeWildcards.m b/Tests/base/NSPredicate/likeWildcards.m
+new file mode 100644
+index 000000000..85d62a06b
+--- /dev/null
++++ b/Tests/base/NSPredicate/likeWildcards.m
+@@ -0,0 +1,45 @@
++/* In a LIKE pattern only '*' (any run of characters), '?' (exactly one
++   character) and a backslash (which makes the next character literal) mean
++   anything; every other character stands for itself, as on OS X.
++*/
++#import <Foundation/NSAutoreleasePool.h>
++#import <Foundation/NSPredicate.h>
++#import <Foundation/NSString.h>
++#import "ObjectTesting.h"
++
++static BOOL
++like(NSString *string, NSString *pattern)
++{
++  return [[NSPredicate predicateWithFormat: @"SELF LIKE %@", pattern]
++    evaluateWithObject: string];
++}
++
++int
++main(int argc, char **argv)
++{
++  NSAutoreleasePool *arp = [NSAutoreleasePool new];
++
++  PASS(like(@"abc", @"a*"), "* matches any run of characters");
++  PASS(like(@"a", @"a*"), "including none");
++  PASS(like(@"a\nb", @"a*"), "and line breaks");
++  PASS(like(@"axb", @"a?b"), "? matches one character");
++  PASS(!like(@"ab", @"a?b"), "not none");
++  PASS(!like(@"axxb", @"a?b"), "nor two");
++  PASS(like(@"a.b", @"a.b") && !like(@"axb", @"a.b"), ". is a dot");
++  PASS(like(@"a+b", @"a+b") && !like(@"aab", @"a+b"), "+ is a plus");
++  PASS(like(@"a(b", @"a(b"), "( is a parenthesis");
++  PASS(like(@"[ab]", @"[ab]") && !like(@"a", @"[ab]"),
++    "brackets are brackets");
++  PASS(!like(@"x", @"a|x"), "| is a bar");
++  PASS(like(@"a$^b", @"a$^b"), "$ and ^ are themselves");
++  PASS(like(@"a*b", @"a\\*b") && !like(@"axb", @"a\\*b"),
++    "a backslash makes * literal");
++  PASS(like(@"a?", @"a\\?") && !like(@"ab", @"a\\?"),
++    "and ?");
++  PASS(like(@"a\\b", @"a\\\\b"), "and a backslash");
++  PASS(([[NSPredicate predicateWithFormat: @"SELF LIKE[c] %@", @"A?C"]
++    evaluateWithObject: @"abc"]), "LIKE[c] ignores case");
++
++  [arp release];
++  return 0;
++}
+-- 
+2.43.0
+
