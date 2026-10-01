@@ -46,6 +46,7 @@ regenerated in the process - the copy it came from no longer matched.
 | `tracking-walk-retains-subviews` | libs-gui | program | — | GSXFormsKit, HomeRow |
 | `pdf-print-operation` | libs-gui | program | — | RDLKit |
 | `graphicscontext-backend-recursion` | libs-gui | program | — | RDLKit |
+| `tableview-bound-value-transform` | libs-gui | test | — | (none: WorkflowKit uses it from here) |
 | `cgrectunion-size` | libs-opal | none | — | GSXFormsKit |
 | `cfstring-overrelease` | libs-corebase | none | — | gnustep-build |
 | `keep-nib-textfield-bezel` | gershwin-eau-theme | none | — | gnustep-coredata |
