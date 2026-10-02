@@ -27,6 +27,7 @@ regenerated in the process - the copy it came from no longer matched.
 | `sax-handler-calloc` | libs-base | program | — | RDLKit |
 | `xmlns-attribute` | libs-base | test | — | RDLKit |
 | `nsxmlnode-string-value-escaping` | libs-base | test | — | (none: ODataStore uses it from here) |
+| `nsxmlnode-attribute-prefix` | libs-base | test | — | (none: WorkflowKit's designer reads an attribute's URI instead) |
 | `nsxml-default-namespace` | libs-base | test | — | (none: ODataStore uses it from here) |
 | `nsxml-prefixed-descendants` | libs-base | test | — | (none: WorkflowKit uses it from here) |
 | `nsxmlelement-attribute-private-doc` | libs-base | program | — | (none: WorkflowKit uses it from here) |

@@ -1,0 +1,104 @@
+From 600117390909c76eeb7a87ed3a3c335d5e661058 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Fri, 2 Oct 2026 12:19:56 +0000
+Subject: [PATCH] Name an attribute in a namespace with its prefix
+
+-[NSXMLNode prefix] answers @"" for every node that is not an element,
+attributes included, and -name puts the prefix in front of the local name
+only when -prefix gives one. So an attribute in a namespace -- c:x, parsed
+or added with +attributeWithName:URI:stringValue: -- was named x, with no
+prefix, where Apple's NSXMLNode names it c:x with the prefix c. Its URI
+was right, and -attributeForName:@"c:x" still found it, which is why this
+went unnoticed: what it broke was code that copies attributes by name from
+one element to another, which wrote x and dropped the attribute out of
+its namespace.
+
+An attribute node keeps its namespace in xmlAttr's ns, as an element does
+in xmlNode's; -prefix reads it for attributes too.
+
+Tests/base/NSXMLNode/attributePrefix.m checks the name, prefix, local name
+and URI of a parsed attribute in a namespace, of one in none, of a copied
+one and of one added with a URI. Four of its eight checks fail without
+this change and all pass with it; the NSXMLNode, NSXMLElement and
+NSXMLDocument suites pass as before.
+---
+ Source/NSXMLNode.m                     |  6 ++++
+ Tests/base/NSXMLNode/attributePrefix.m | 49 ++++++++++++++++++++++++++
+ 2 files changed, 55 insertions(+)
+ create mode 100644 Tests/base/NSXMLNode/attributePrefix.m
+
+diff --git a/Source/NSXMLNode.m b/Source/NSXMLNode.m
+index e8300f8c5..59e03d5e3 100644
+--- a/Source/NSXMLNode.m
++++ b/Source/NSXMLNode.m
+@@ -2011,6 +2011,12 @@ execute_xpath(xmlNodePtr node, NSString *xpath_exp, NSDictionary *constants,
+     {
+       return @"";
+     }
++  if (XML_ATTRIBUTE_NODE == theNode->type)
++    {
++      xmlNsPtr	ns = ((xmlAttrPtr)theNode)->ns;
++
++      return (NULL == ns) ? @"" : StringFromXMLStringPtr(ns->prefix);
++    }
+   if (XML_ELEMENT_NODE != theNode->type)
+     {
+       return @"";
+diff --git a/Tests/base/NSXMLNode/attributePrefix.m b/Tests/base/NSXMLNode/attributePrefix.m
+new file mode 100644
+index 000000000..b49c6f5ed
+--- /dev/null
++++ b/Tests/base/NSXMLNode/attributePrefix.m
+@@ -0,0 +1,49 @@
++#import "ObjectTesting.h"
++#import "Foundation/NSAutoreleasePool.h"
++#import "Foundation/NSArray.h"
++#import "Foundation/NSString.h"
++#import "Foundation/NSXMLDocument.h"
++#import "Foundation/NSXMLElement.h"
++#import "Foundation/NSXMLNode.h"
++
++/* An attribute in a namespace is named with its prefix, as an element is:
++ * c:x, whose prefix is c and whose local name is x. */
++
++int main()
++{
++  NSAutoreleasePool	*arp = [NSAutoreleasePool new];
++  NSXMLDocument		*doc;
++  NSXMLElement		*e;
++  NSXMLNode		*prefixed;
++  NSXMLNode		*plain;
++  NSXMLNode		*made;
++  NSXMLElement		*copy;
++
++  doc = [[NSXMLDocument alloc]
++    initWithXMLString: @"<r xmlns:c=\"urn:c\"><e c:x=\"1\" y=\"2\"/></r>"
++	      options: 0
++		error: NULL];
++  e = (NSXMLElement *)[[doc rootElement] childAtIndex: 0];
++  prefixed = [e attributeForName: @"c:x"];
++  plain = [e attributeForName: @"y"];
++
++  PASS_EQUAL([prefixed name], @"c:x",
++    "a parsed attribute in a namespace is named with its prefix")
++  PASS_EQUAL([prefixed prefix], @"c", "its prefix is the namespace's")
++  PASS_EQUAL([prefixed localName], @"x", "its local name has no prefix")
++  PASS_EQUAL([prefixed URI], @"urn:c", "and it is in the namespace")
++  PASS_EQUAL([plain name], @"y", "an attribute in no namespace has no prefix")
++  PASS_EQUAL([plain prefix], @"", "not even an empty one in its name")
++  copy = [[e copy] autorelease];
++  PASS_EQUAL([[copy attributeForName: @"c:x"] name], @"c:x",
++    "a copy's attribute is named as the original's")
++
++  made = [NSXMLNode attributeWithName: @"c:z" URI: @"urn:c" stringValue: @"3"];
++  [e addAttribute: made];
++  PASS_EQUAL([[e attributeForName: @"c:z"] name], @"c:z",
++    "so is one added in the namespace")
++
++  [doc release];
++  [arp release];
++  return 0;
++}
+-- 
+2.43.0
+
