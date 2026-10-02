@@ -30,6 +30,7 @@ regenerated in the process - the copy it came from no longer matched.
 | `nsxmlnode-attribute-prefix` | libs-base | test | — | (none: WorkflowKit's designer reads an attribute's URI instead) |
 | `nsxml-default-namespace` | libs-base | test | — | (none: ODataStore uses it from here) |
 | `nsxml-prefixed-descendants` | libs-base | test | — | (none: WorkflowKit uses it from here) |
+| `nsxml-default-namespace-descendants` | libs-base | test | — | (none: WorkflowKit uses it from here) |
 | `nsxmlelement-attribute-private-doc` | libs-base | program | — | (none: WorkflowKit uses it from here) |
 | `decimal-plain-notation` | libs-base | test | — | (none: WorkflowKit uses it from here) |
 | `string-diacritic-insensitive-search` | libs-base | test | — | (none: ODataStore uses it from here) |
@@ -139,6 +140,21 @@ building ODataStore's predicate translation, and checked against macOS:
 With all nineteen libs-base patches, `Tests/base/NSPredicate` passes 293
 tests, and `NSKeyedArchiver`, `NSArray`, `NSSet`, `NSString` and
 `NSRegularExpression` pass; ODataStore's suite passes on the result.
+
+Added on 2026-10-02 against `libs-base` 2e5067f8e:
+`nsxml-default-namespace-descendants`. An element made with
+`-initWithName:URI:` and given children while detached, then added under
+an ancestor declaring that URI as the default namespace, printed
+`xmlns="uri"` on every element below it, and a detached tree printed one
+on every element; Apple's Foundation declares no namespace it was not
+given (found by WorkflowKit's designer writing DMN). With libxml2 before
+2.12, adoption declared the namespace on each child because the parent's
+own was only a placeholder in its document; the fix lets adoption map
+the child to that placeholder instead. `defaultNamespaceDescendants.m`
+fails two of its six checks without the fix and passes with it;
+`NSXMLElement` (147), `NSXMLNode` (266) and `NSXMLDocument` (39) pass
+with all 25 libs-base patches, which apply to that master in order with
+no fuzz. The patch applies to master on its own as well.
 
 Where the column says **test**, the patch adds a test to the project's own
 suite (`Tests/base/...`, run by `gnustep-tests`), so the fix and the thing
