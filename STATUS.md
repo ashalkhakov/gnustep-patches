@@ -39,6 +39,7 @@ regenerated in the process - the copy it came from no longer matched.
 | `expression-function-names` | libs-base | test | — | (none: ODataStore works around it) |
 | `predicate-matches-line-anchors` | libs-base | test | — | (none) |
 | `predicate-like-wildcards` | libs-base | test | — | (none) |
+| `bundle-load-and-return-error` | libs-base | test | — | (none: WorkflowKit's plugin loading uses it from here) |
 | `arraycontroller-selection-kvo` | libs-gui | test | — | gnustep-coredata |
 | `tableview-column-autoresizing-style` | libs-gui | test | — | gnustep-coredata |
 | `xib-date-picker` | libs-gui | none | — | gnustep-coredata |

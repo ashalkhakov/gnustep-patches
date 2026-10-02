@@ -1,0 +1,153 @@
+From 742e81d165133123a4bcdcf4a51e142aa0e4d6be Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Fri, 2 Oct 2026 06:57:00 +0000
+Subject: [PATCH] NSBundle: -loadAndReturnError: and -preflightAndReturnError:
+ do their work
+
+Both were stubs answering NO, so code that loads a bundle the modern way
+-- a plugin host checking for errors, as Apple's documentation shows --
+found every bundle unloadable, even one -load loads at once, and was
+given no error to say why.
+
+-loadAndReturnError: now loads the bundle and answers what -load answers;
+when that is NO it gives an NSCocoaErrorDomain error:
+NSExecutableNotLoadableError for a bundle with no executable to load,
+NSExecutableLoadError for one whose executable did not load.
+-preflightAndReturnError: answers whether there is a readable executable
+to load (YES once the code is loaded), with the same error when not.
+
+The test is in Tests/base/NSBundle, beside general.m, which runs: the
+load/ directory has no TestInfo, so the harness does not run what is in
+it.
+---
+ Source/NSBundle.m                        | 40 ++++++++++++++++
+ Tests/base/NSBundle/loadAndReturnError.m | 60 ++++++++++++++++++++++++
+ 2 files changed, 100 insertions(+)
+ create mode 100644 Tests/base/NSBundle/loadAndReturnError.m
+
+diff --git a/Source/NSBundle.m b/Source/NSBundle.m
+index 7f0735c6a..d2aa57747 100644
+--- a/Source/NSBundle.m
++++ b/Source/NSBundle.m
+@@ -3271,12 +3271,52 @@ IF_NO_ARC(
+ {
+   return nil;
+ }
++- (NSError *) _executableError: (NSInteger)code reason: (NSString *)reason
++{
++  NSDictionary  *info;
++
++  info = [NSDictionary dictionaryWithObjectsAndKeys:
++    [NSString stringWithFormat: @"The bundle %@ could not be loaded: %@",
++      [[self bundlePath] lastPathComponent], reason],
++    NSLocalizedDescriptionKey,
++    [self bundlePath], NSFilePathErrorKey,
++    nil];
++  return [NSError errorWithDomain: NSCocoaErrorDomain code: code userInfo: info];
++}
++
+ - (BOOL) preflightAndReturnError: (NSError **)error
+ {
++  NSString      *path;
++
++  if (_codeLoaded == YES)
++    {
++      return YES;
++    }
++  path = [self executablePath];
++  if (path != nil
++    && [[NSFileManager defaultManager] isReadableFileAtPath: path] == YES)
++    {
++      return YES;
++    }
++  if (error != NULL)
++    {
++      *error = [self _executableError: NSExecutableNotLoadableError
++                               reason: @"it has no executable"];
++    }
+   return NO;
+ }
++
+ - (BOOL) loadAndReturnError: (NSError **)error
+ {
++  if ([self load] == YES)
++    {
++      return YES;
++    }
++  if ([self preflightAndReturnError: error] == YES && error != NULL)
++    {
++      *error = [self _executableError: NSExecutableLoadError
++                               reason: @"its executable did not load"];
++    }
+   return NO;
+ }
+ 
+diff --git a/Tests/base/NSBundle/loadAndReturnError.m b/Tests/base/NSBundle/loadAndReturnError.m
+new file mode 100644
+index 000000000..c6f218e02
+--- /dev/null
++++ b/Tests/base/NSBundle/loadAndReturnError.m
+@@ -0,0 +1,60 @@
++#import "ObjectTesting.h"
++#import <Foundation/NSAutoreleasePool.h>
++#import <Foundation/NSBundle.h>
++#import <Foundation/NSError.h>
++#import <Foundation/NSFileManager.h>
++#import <Foundation/NSPathUtilities.h>
++#import <Foundation/NSString.h>
++#import <Foundation/FoundationErrors.h>
++
++int main()
++{
++  NSAutoreleasePool     *arp = [NSAutoreleasePool new];
++  NSFileManager         *fm = [NSFileManager defaultManager];
++  NSString              *resources;
++  NSString              *empty;
++  NSBundle              *bundle;
++  NSBundle              *nothing;
++  NSError               *error = nil;
++
++  START_SET("NSBundle loadAndReturnError")
++
++  resources = [[fm currentDirectoryPath]
++    stringByAppendingPathComponent: @"Resources"];
++  bundle = [NSBundle bundleWithPath:
++    [resources stringByAppendingPathComponent: @"TestBundle.bundle"]];
++
++  PASS([bundle preflightAndReturnError: &error],
++    "-preflightAndReturnError: is YES for a bundle with an executable")
++  PASS([bundle loadAndReturnError: &error],
++    "-loadAndReturnError: loads a bundle")
++  PASS(error == nil, "-loadAndReturnError: leaves the error alone on success")
++  PASS(NSClassFromString(@"TestBundle") != Nil,
++    "-loadAndReturnError: loads the bundle's classes")
++  PASS([bundle loadAndReturnError: NULL],
++    "-loadAndReturnError: is YES for a bundle already loaded")
++
++  empty = [NSTemporaryDirectory()
++    stringByAppendingPathComponent: @"NoExecutable.bundle"];
++  [fm createDirectoryAtPath: empty
++withIntermediateDirectories: YES
++                 attributes: nil
++                      error: NULL];
++  nothing = [NSBundle bundleWithPath: empty];
++  PASS([nothing preflightAndReturnError: &error] == NO,
++    "-preflightAndReturnError: is NO for a bundle without an executable")
++  PASS([error code] == NSExecutableNotLoadableError,
++    "-preflightAndReturnError: says there is nothing to load")
++  error = nil;
++  PASS([nothing loadAndReturnError: &error] == NO,
++    "-loadAndReturnError: is NO for a bundle without an executable")
++  PASS(([[error domain] isEqual: NSCocoaErrorDomain]
++    && [error code] == NSExecutableNotLoadableError),
++    "-loadAndReturnError: says why it did not load")
++  [fm removeItemAtPath: empty error: NULL];
++
++  END_SET("NSBundle loadAndReturnError")
++
++  [arp release];
++  return 0;
++}
+-- 
+2.43.0
+
