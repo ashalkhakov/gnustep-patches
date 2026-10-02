@@ -48,6 +48,7 @@ regenerated in the process - the copy it came from no longer matched.
 | `graphicscontext-backend-recursion` | libs-gui | program | — | RDLKit |
 | `tableview-bound-value-transform` | libs-gui | test | — | (none: WorkflowKit uses it from here) |
 | `cgrectunion-size` | libs-opal | none | — | GSXFormsKit |
+| `freetype-advance-without-size` | libs-opal | test | — | (none: XFormsKit uses it from here) |
 | `cfstring-overrelease` | libs-corebase | none | — | gnustep-build |
 | `keep-nib-textfield-bezel` | gershwin-eau-theme | none | — | gnustep-coredata |
 | `nsalert-window-ownership` | gershwin-eau-theme | none | — | gnustep-build |
