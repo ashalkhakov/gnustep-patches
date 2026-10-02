@@ -1,0 +1,258 @@
+From d0027a2135f1a6a559676a01b6098f381cab597b Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Fri, 2 Oct 2026 17:26:33 +0000
+Subject: [PATCH] Declare no namespace for a node added under a placeholder
+
+An element made with -initWithName:URI: before it is in a tree that
+declares its namespace holds the namespace as a placeholder in its
+document's oldNs, undeclared. Adding a child in the same namespace to
+it adopts the child with xmlDOMWrapAdoptNode(), which finds nothing in
+scope at the parent and declares the namespace on the child. When the
+parent then joins a tree that declares the namespace, adoption maps the
+parent to that declaration, but the child keeps its own, so
+
+    NSXMLElement *c = [[NSXMLElement alloc] initWithName: @"c" URI: u];
+    [c addChild: [[NSXMLElement alloc] initWithName: @"g" URI: u]];
+    [rule addChild: c];   // under <d xmlns="u">
+
+prints <c><g xmlns="u"></g></c>, with a declaration on every level
+below the one added. A tree that never joins one prints a declaration
+on each element too: <r><g xmlns="u"><h xmlns="u"></h></g></r>.
+
+Apple's Foundation declares no namespace it was not given, in all of
+these: <c><g></g></c> and <r><g><h></h></g></r>. It keeps one that was
+parsed or added with -addNamespace:, redundant or not. Built against
+libxml2 2.12 or later, -_insertChild: moves the subtree without
+xmlDOMWrapAdoptNode() and already declares nothing.
+
+Before adopting, declare on the parent a copy of each placeholder in
+its document that no declaration in scope binds by prefix or URI, so
+that adoption maps the child's references to the copy instead of
+declaring the namespace anew; then point the references back at the
+placeholder and remove the copies. Adoption still maps a reference to
+a declaration that is in scope, and the subtree's own declarations are
+untouched.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/NSXMLNode.m                            | 102 +++++++++++++++++-
+ .../defaultNamespaceDescendants.m             |  87 +++++++++++++++
+ 2 files changed, 187 insertions(+), 2 deletions(-)
+ create mode 100644 Tests/base/NSXMLElement/defaultNamespaceDescendants.m
+
+diff --git a/Source/NSXMLNode.m b/Source/NSXMLNode.m
+index e8300f8c5..a373eb733 100644
+--- a/Source/NSXMLNode.m
++++ b/Source/NSXMLNode.m
+@@ -253,6 +253,99 @@ ensure_oldNs(xmlNodePtr node)
+   return newDoc;
+ }
+ 
++#if LIBXML_VERSION >= 20620 && LIBXML_VERSION < 21200
++static BOOL
++ns_in_scope(xmlNodePtr node, xmlNsPtr ns)
++{
++  for (; node != NULL && node->type == XML_ELEMENT_NODE; node = node->parent)
++    {
++      xmlNsPtr cur;
++
++      for (cur = node->nsDef; cur != NULL; cur = cur->next)
++        {
++          if (xmlStrEqual(cur->prefix, ns->prefix)
++            || xmlStrEqual(cur->href, ns->href))
++            {
++              return YES;
++            }
++        }
++    }
++  return NO;
++}
++
++static void
++rebind_ns(xmlNodePtr node, xmlNsPtr from, xmlNsPtr to, BOOL siblings)
++{
++  while (node != NULL)
++    {
++      if (node->type == XML_ELEMENT_NODE || node->type == XML_ATTRIBUTE_NODE)
++        {
++          if (node->ns == from)
++            {
++              node->ns = to;
++            }
++          if (node->type == XML_ELEMENT_NODE)
++            {
++              rebind_ns((xmlNodePtr)node->properties, from, to, YES);
++            }
++          rebind_ns(node->children, from, to, YES);
++        }
++      node = siblings ? node->next : NULL;
++    }
++}
++
++/* Declare on parent a copy of each of its document's placeholders that
++ * nothing in scope there binds, and return how many it declared.
++ */
++static NSUInteger
++declare_placeholders(xmlNodePtr parent)
++{
++  NSUInteger    count = 0;
++  xmlNsPtr      ns;
++
++  if (parent->type != XML_ELEMENT_NODE)
++    {
++      return 0;
++    }
++  for (ns = parent->doc->oldNs; ns != NULL; ns = ns->next)
++    {
++      if (ns->href != NULL && !xmlStrEqual(ns->href, XML_XML_NAMESPACE)
++        && !ns_in_scope(parent, ns))
++        {
++          xmlNsPtr      copy = xmlNewNs(NULL, ns->href, ns->prefix);
++
++          copy->next = parent->nsDef;
++          parent->nsDef = copy;
++          count++;
++        }
++    }
++  return count;
++}
++
++/* Remove the copies declare_placeholders() made, pointing the nodes of
++ * child that adoption bound to one back at its placeholder.
++ */
++static void
++unbind_placeholders(xmlNodePtr parent, NSUInteger count, xmlNodePtr child)
++{
++  while (count-- > 0)
++    {
++      xmlNsPtr  copy = parent->nsDef;
++      xmlNsPtr  ns = parent->doc->oldNs;
++
++      while (!xmlStrEqual(ns->href, copy->href)
++        || !xmlStrEqual(ns->prefix, copy->prefix))
++        {
++          ns = ns->next;
++        }
++      parent->nsDef = copy->next;
++      rebind_ns(child, copy, ns, NO);
++      copy->next = NULL;
++      xmlFreeNs(copy);
++    }
++}
++#endif
++
+ #if LIBXML_VERSION >= 21200
+ /* Recursively update document pointers without calling xmlSetTreeDoc
+  * to avoid automatic text node merging in libxml2 2.12.0+.
+@@ -909,8 +1002,13 @@ isEqualTree(xmlNodePtr nodeA, xmlNodePtr nodeB)
+               updateTreeDocManually(childNode, parentNode->doc);
+             }
+ #elif LIBXML_VERSION >= 20620
+-          xmlDOMWrapAdoptNode(NULL, childNode->doc, childNode, 
+-                              parentNode->doc, parentNode, 0);
++          {
++            NSUInteger  count = declare_placeholders(parentNode);
++
++            xmlDOMWrapAdoptNode(NULL, childNode->doc, childNode,
++                                parentNode->doc, parentNode, 0);
++            unbind_placeholders(parentNode, count, childNode);
++          }
+ #else
+           xmlSetTreeDoc(childNode, parentNode->doc);
+ #endif
+diff --git a/Tests/base/NSXMLElement/defaultNamespaceDescendants.m b/Tests/base/NSXMLElement/defaultNamespaceDescendants.m
+new file mode 100644
+index 000000000..4e7176195
+--- /dev/null
++++ b/Tests/base/NSXMLElement/defaultNamespaceDescendants.m
+@@ -0,0 +1,87 @@
++#import "Testing.h"
++#import <Foundation/NSAutoreleasePool.h>
++#import <Foundation/NSXMLNode.h>
++#import <Foundation/NSXMLDocument.h>
++#import <Foundation/NSXMLElement.h>
++#import "GNUstepBase/GSConfig.h"
++
++static NSXMLElement *
++element(NSString *name)
++{
++  return [[[NSXMLElement alloc] initWithName: name URI: @"urn:u"] autorelease];
++}
++
++static NSXMLDocument *
++document()
++{
++  return [[[NSXMLDocument alloc]
++    initWithXMLString: @"<d xmlns=\"urn:u\"><rule/></d>"
++              options: 0
++                error: NULL] autorelease];
++}
++
++int main()
++{
++  START_SET("NSXMLElement default namespace descendants")
++#if !GS_USE_LIBXML
++    SKIP("library built without libxml2")
++#else
++  NSAutoreleasePool     *arp = [NSAutoreleasePool new];
++  NSXMLDocument         *doc;
++  NSXMLDocument         *parsed;
++  NSXMLElement          *rule;
++  NSXMLElement          *c;
++  NSXMLElement          *g;
++  NSXMLElement          *h;
++  NSXMLNode             *t;
++
++  /* Built while detached, then added under the declaration. */
++  doc = document();
++  rule = [[[doc rootElement] elementsForName: @"rule"] objectAtIndex: 0];
++  c = element(@"c");
++  g = element(@"g");
++  h = element(@"h");
++  [g addChild: h];
++  [c addChild: g];
++  [rule addChild: c];
++  PASS_EQUAL([[doc rootElement] XMLString],
++    @"<d xmlns=\"urn:u\"><rule><c><g><h></h></g></c></rule></d>",
++    "descendants of an element added under a default namespace declare nothing");
++  PASS_EQUAL([h URI], @"urn:u", "a descendant stays in its namespace");
++
++  /* Added under the declaration first, given children afterwards. */
++  c = element(@"c");
++  [rule addChild: c];
++  [c addChild: element(@"g")];
++  PASS_EQUAL([c XMLString], @"<c><g></g></c>",
++    "a child added to an element already under the declaration declares nothing");
++
++  /* Never under a declaration. */
++  c = [[[NSXMLElement alloc] initWithName: @"r"] autorelease];
++  g = element(@"g");
++  [g addChild: element(@"h")];
++  [c addChild: g];
++  PASS_EQUAL([c XMLString], @"<r><g><h></h></g></r>",
++    "a detached tree declares no namespace it was not given");
++  PASS_EQUAL([[[g children] objectAtIndex: 0] URI], @"urn:u",
++    "a detached descendant stays in its namespace");
++
++  /* A declaration that was parsed stays. */
++  parsed = [[NSXMLDocument alloc]
++    initWithXMLString: @"<x><t xmlns=\"urn:u\"/></x>"
++              options: 0
++                error: NULL];
++  t = [[[parsed rootElement] children] objectAtIndex: 0];
++  [t detach];
++  c = element(@"c");
++  [c addChild: t];
++  [rule addChild: c];
++  PASS_EQUAL([c XMLString], @"<c><t xmlns=\"urn:u\"></t></c>",
++    "a parsed declaration is kept");
++  [parsed release];
++
++  [arp release];
++#endif
++  END_SET("NSXMLElement default namespace descendants")
++  return 0;
++}
+-- 
+2.43.0
+
