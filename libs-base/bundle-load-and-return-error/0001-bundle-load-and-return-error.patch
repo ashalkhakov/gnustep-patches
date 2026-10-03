@@ -29,7 +29,15 @@ diff --git a/Source/NSBundle.m b/Source/NSBundle.m
 index 7f0735c6a..d2aa57747 100644
 --- a/Source/NSBundle.m
 +++ b/Source/NSBundle.m
-@@ -3271,12 +3271,52 @@ IF_NO_ARC(
+@@ -34,6 +34,7 @@
+ #include "objc-load.h"
+ #import "Foundation/NSBundle.h"
+ #import "Foundation/NSException.h"
++#import "Foundation/FoundationErrors.h"
+ #import "Foundation/NSArray.h"
+ #import "Foundation/NSDictionary.h"
+ #import "Foundation/NSEnumerator.h"
+@@ -3271,12 +3272,52 @@ IF_NO_ARC(
  {
    return nil;
  }
