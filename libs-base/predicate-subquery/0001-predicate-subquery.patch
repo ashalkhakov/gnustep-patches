@@ -22,20 +22,22 @@ parser ask an expression for its kind before it asks for a key path.
 
 The iterator variable is bound by substituting it into the subpredicate
 for each member in turn, since -evaluateWithObject: passes no context
-for a variable to be looked up in. The member is also the object the
-subpredicate is evaluated against, so a key path inside it may be
-written either way round. The iterator variable belongs to the
-subquery, so a substitution of variables from outside leaves it alone.
+for a variable to be looked up in. The subpredicate is evaluated against
+the object the subquery belongs to, as Apple's is: a key path inside it
+is that object's, and the member is reached through the variable, which
+is what lets a subquery compare its members with the object
+($f.age > age). The iterator variable belongs to the subquery, so a
+substitution of variables from outside leaves it alone.
 
-The NSPredicate test suite (214 tests) passes with the change.
+The NSPredicate test suite (295 tests) passes with the change.
 
 The test added here cannot run on an unpatched library: parsing
 "$f.age > 40" raises before the subquery is reached.
 ---
  Headers/Foundation/NSExpression.h |   6 +
  Source/NSPredicate.m              | 253 +++++++++++++++++++++++++++++-
- Tests/base/NSPredicate/subquery.m |  88 +++++++++++
- 3 files changed, 344 insertions(+), 3 deletions(-)
+ Tests/base/NSPredicate/subquery.m | 100 ++++++++++++
+ 3 files changed, 356 insertions(+), 3 deletions(-)
  create mode 100644 Tests/base/NSPredicate/subquery.m
 
 diff --git a/Headers/Foundation/NSExpression.h b/Headers/Foundation/NSExpression.h
@@ -70,7 +72,7 @@ index f39304723..087c9e76f 100644
  #endif
  @end
 diff --git a/Source/NSPredicate.m b/Source/NSPredicate.m
-index dabf91d1c..14f53c7a3 100644
+index dabf91d1c..0da7db656 100644
 --- a/Source/NSPredicate.m
 +++ b/Source/NSPredicate.m
 @@ -212,6 +212,12 @@ extern void     GSPropertyListMake(id,NSDictionary*,BOOL,BOOL,unsigned,id*);
@@ -268,7 +270,7 @@ index dabf91d1c..14f53c7a3 100644
 +	  bound = [_subpredicate predicateWithSubstitutionVariables:
 +	    [NSDictionary dictionaryWithObject: member forKey: _variable]];
 +	}
-+      if ([bound evaluateWithObject: member])
++      if ([bound evaluateWithObject: object])
 +	{
 +	  [result addObject: member];
 +	}
@@ -399,10 +401,10 @@ index dabf91d1c..14f53c7a3 100644
        else
 diff --git a/Tests/base/NSPredicate/subquery.m b/Tests/base/NSPredicate/subquery.m
 new file mode 100644
-index 000000000..60fa6bf60
+index 000000000..a81c16cdd
 --- /dev/null
 +++ b/Tests/base/NSPredicate/subquery.m
-@@ -0,0 +1,88 @@
+@@ -0,0 +1,100 @@
 +#import "ObjectTesting.h"
 +#import "Foundation/NSAutoreleasePool.h"
 +#import "Foundation/NSArray.h"
@@ -480,6 +482,18 @@ index 000000000..60fa6bf60
 +    "SUBQUERY answers nothing for a member with no such friends");
 +  PASS([[sociable predicateFormat] hasPrefix: @"SUBQUERY(friends, $f,"],
 +    "a subquery prints back the way it was written");
++
++  /* Inside the subquery, a key path is the object's the subquery belongs
++   * to, and the member is reached through the variable: friends older than
++   * the person whose friends they are.
++   */
++  PASS([[NSPredicate predicateWithFormat:
++    @"SUBQUERY(friends, $f, $f.age > age).@count == 2"] evaluateWithObject: ada],
++    "a key path in a subquery is the outer object's");
++  PASS([[NSPredicate predicateWithFormat:
++    @"SUBQUERY(friends, $f, $f.name == \"Grace\" AND $f.age > age).@count == 1"]
++    evaluateWithObject: ada],
++    "the variable and the outer object's key paths mix");
 +
 +  /* And it survives an archive, which a subquery whose predicate holds a
 +   * key path composition could not do before either.
