@@ -1,0 +1,100 @@
+From 093ba0e7098ced2c00636c820a8002af7a07d512 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Mon, 5 Oct 2026 14:14:34 +0000
+Subject: [PATCH] NSSortDescriptor: nil sorts before every value
+
+-compareObject:toObject: sent the comparison selector to the first
+key path value, so a nil value answered NSOrderedSame against
+everything (a message to nil returns zero), and a nil argument made
+-compare: raise on NSNumber. A sort over objects some of which lack the
+key then put those anywhere, or aborted.
+
+On macOS nil is less than any value: first in ascending order, last in
+descending. Do the same for selector-based descriptors; a comparator
+block is still handed the values as they are.
+---
+ Source/NSSortDescriptor.m         | 13 +++++++--
+ Tests/base/NSSortDescriptor/nil.m | 47 +++++++++++++++++++++++++++++++
+ 2 files changed, 58 insertions(+), 2 deletions(-)
+ create mode 100644 Tests/base/NSSortDescriptor/nil.m
+
+diff --git a/Source/NSSortDescriptor.m b/Source/NSSortDescriptor.m
+index a4251f4a2..d60e2149c 100644
+--- a/Source/NSSortDescriptor.m
++++ b/Source/NSSortDescriptor.m
+@@ -114,8 +114,17 @@ static BOOL     initialized = NO;
+ 
+   if (_comparator == NULL)
+     {
+-      result = (NSComparisonResult) [comparedKey1 performSelector: _selector
+-                                                       withObject: comparedKey2];
++      /* nil is less than any value, as on macOS. */
++      if (comparedKey1 == nil || comparedKey2 == nil)
++        {
++          result = comparedKey1 == comparedKey2 ? NSOrderedSame
++            : (comparedKey1 == nil ? NSOrderedAscending : NSOrderedDescending);
++        }
++      else
++        {
++          result = (NSComparisonResult) [comparedKey1
++            performSelector: _selector withObject: comparedKey2];
++        }
+     }
+   else
+     {
+diff --git a/Tests/base/NSSortDescriptor/nil.m b/Tests/base/NSSortDescriptor/nil.m
+new file mode 100644
+index 000000000..6339c531e
+--- /dev/null
++++ b/Tests/base/NSSortDescriptor/nil.m
+@@ -0,0 +1,47 @@
++#import "ObjectTesting.h"
++#import <Foundation/NSArray.h>
++#import <Foundation/NSAutoreleasePool.h>
++#import <Foundation/NSDictionary.h>
++#import <Foundation/NSSortDescriptor.h>
++#import <Foundation/NSValue.h>
++
++/* A missing value sorts before every value, as on macOS. */
++int main()
++{
++  NSAutoreleasePool	*arp = [NSAutoreleasePool new];
++  NSSortDescriptor	*up;
++  NSSortDescriptor	*down;
++  NSDictionary		*none;
++  NSDictionary		*one;
++  NSDictionary		*two;
++  NSArray		*all;
++  NSArray		*sorted;
++
++  up = [NSSortDescriptor sortDescriptorWithKey: @"age" ascending: YES];
++  down = [NSSortDescriptor sortDescriptorWithKey: @"age" ascending: NO];
++  none = [NSDictionary dictionary];
++  one = [NSDictionary dictionaryWithObject: [NSNumber numberWithInt: 1]
++				    forKey: @"age"];
++  two = [NSDictionary dictionaryWithObject: [NSNumber numberWithInt: 2]
++				    forKey: @"age"];
++
++  PASS(([up compareObject: none toObject: one] == NSOrderedAscending),
++    "nil is less than a value");
++  PASS(([up compareObject: one toObject: none] == NSOrderedDescending),
++    "a value is greater than nil");
++  PASS(([up compareObject: none toObject: none] == NSOrderedSame),
++    "nil is the same as nil");
++  PASS(([down compareObject: none toObject: one] == NSOrderedDescending),
++    "nil comes after a value in descending order");
++
++  all = [NSArray arrayWithObjects: two, none, one, nil];
++  sorted = [all sortedArrayUsingDescriptors: [NSArray arrayWithObject: up]];
++  PASS_EQUAL(sorted, ([NSArray arrayWithObjects: none, one, two, nil]),
++    "nil sorts first in ascending order");
++  sorted = [all sortedArrayUsingDescriptors: [NSArray arrayWithObject: down]];
++  PASS_EQUAL(sorted, ([NSArray arrayWithObjects: two, one, none, nil]),
++    "nil sorts last in descending order");
++
++  [arp release];
++  return 0;
++}
+-- 
+2.47.3
+

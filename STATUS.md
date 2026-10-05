@@ -28,6 +28,7 @@ regenerated in the process - the copy it came from no longer matched.
 | `xmlns-attribute` | libs-base | test | — | RDLKit |
 | `nsxmlnode-string-value-escaping` | libs-base | test | — | (none: ODataStore uses it from here) |
 | `nsxmlnode-attribute-prefix` | libs-base | test | — | (none: WorkflowKit's designer reads an attribute's URI instead) |
+| `sortdescriptor-nil-first` | libs-base | test | — | (none: FreeCoreData's in-memory sorts and ORMKit's paging rely on it from here) |
 | `nsxml-default-namespace` | libs-base | test | — | (none: ODataStore uses it from here) |
 | `nsxml-prefixed-descendants` | libs-base | test | — | (none: WorkflowKit uses it from here) |
 | `nsxml-default-namespace-descendants` | libs-base | test | — | (none: WorkflowKit uses it from here) |
