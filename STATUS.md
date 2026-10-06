@@ -16,12 +16,15 @@ Pull requests opened on 2026-10-06, each a branch `fix/<name>` on
 `ashalkhakov/<project>`, made with `git am` from the patch here.  Both
 libobjc2 ones were closed unmerged within minutes by David Chisnall: "This
 project does not accept code generated with LLMs."  The patches stay here
-until another route upstream is settled.
+until another route upstream is settled.  `stack-block-retain` has since
+left: libobjc2 fixed the same bug independently in fd475057c ("Fix memory
+leak of block retained by another block", 2026-10-06) - the same early
+return for a stack block in `retain()`, with its own `Test/BlockCapture_arc.m`
+- and our patch no longer applies on top of it.
 
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
 | `autoreleased-return-value` | libobjc2 | test | [#426](https://github.com/gnustep/libobjc2/pull/426) closed unmerged | (none: ODataStore works around it) |
-| `stack-block-retain` | libobjc2 | test | [#427](https://github.com/gnustep/libobjc2/pull/427) closed unmerged | (none: ODataStore's vendored GCDWebServer works around it) |
 | `predicate-equality-options` | libs-base | test | [#826](https://github.com/gnustep/libs-base/pull/826) | gnustep-coredata |
 | `expression-self-type` | libs-base | test | [#810](https://github.com/gnustep/libs-base/pull/810) | gnustep-coredata |
 | `expression-binary-coding` | libs-base | test | [#815](https://github.com/gnustep/libs-base/pull/815) | gnustep-coredata |
@@ -88,19 +91,6 @@ tests) passes with it. libobjc2 registers tests in `Test/CMakeLists.txt`, so
 unlike the libs-base ones this patch touches a build file. It is the first
 libobjc2 fix here; `Scripts/build-gnustep.sh` now applies patches to
 libobjc2 as it does to the others.
-
-Added on 2026-09-26 against `libobjc2` aca3916: `stack-block-retain`.
-`objc_retain()` copied a stack block to the heap and returned the copy, but
-LLVM's ARC optimiser takes `objc_retain()` to return its argument, so with
-optimisation on the copy went unused and unreleased, along with whatever it
-captured. Any block parameter captured in another block (a completion
-handler, `dispatch_async`) leaked this way once inlined; found in ODataStore,
-where GCDWebServer leaked every connection and kept its socket open. The fix
-returns a stack block unchanged, as Apple's runtime does; an explicit
-`-retain` message still copies, since gnustep-base's block classes implement
-it. The new `Test/StackBlockRetain_arc.m` fails in the optimised build
-without the fix; with it the whole suite passes, 200 tests alone and 202
-with `autoreleased-return-value`, which it co-applies with.
 
 Added on 2026-09-26 against `libs-base` e835e21f5: `constant-expression-copy`.
 Copying a constant expression copied its value, so copying any predicate
