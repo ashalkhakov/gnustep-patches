@@ -12,8 +12,6 @@ as on macOS.
 
 Tests/base/NSKeyedArchiver/secure_coding.m aborts without it and passes
 with it. Found by ODataStore, which decodes a delta token a client sends.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  Source/NSKeyedUnarchiver.m                 |  5 +++++
  Tests/base/NSKeyedArchiver/secure_coding.m | 12 ++++++++++++

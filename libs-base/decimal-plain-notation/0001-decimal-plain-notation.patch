@@ -22,8 +22,6 @@ Write the digits positionally at any size, with the separator where the
 exponent puts it, and zero as 0. The two tests in decimal_functions.m
 that expected zero as 0.0 now expect 0, and plainNotation.m covers large
 and small numbers.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  Source/NSDecimal.m                            | 62 +++++--------------
  .../base/NSDecimalNumber/decimal_functions.m  |  4 +-

@@ -20,8 +20,6 @@ without this change. The GSMime, NSURLConnection and NSURLProtocol
 suites pass, apart from GSMime/encoded-word-stack.m, which crashes with
 or without this change on the tree it was tested on. Found by ODataStore,
 whose $batch responses came back empty through NSURLConnection.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  Headers/GNUstepBase/GSMime.h        |  2 ++
  Source/Additions/GSMime.m           | 18 ++++++++--

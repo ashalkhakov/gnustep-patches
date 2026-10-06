@@ -30,8 +30,6 @@ the namespace, whose descendants may not. Carrying a placeholder into a
 document that already holds one for the same prefix now points the
 moved nodes at that one instead of adding a second, which adoption would
 declare under a made-up prefix of its own.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  Source/NSXMLNode.m                            | 74 +++++++++++++++----
  Tests/base/NSXMLElement/prefixedDescendants.m | 65 ++++++++++++++++

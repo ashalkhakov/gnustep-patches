@@ -32,8 +32,6 @@ declaring the namespace anew; then point the references back at the
 placeholder and remove the copies. Adoption still maps a reference to
 a declaration that is in scope, and the subtree's own declarations are
 untouched.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  Source/NSXMLNode.m                            | 102 +++++++++++++++++-
  .../defaultNamespaceDescendants.m             |  87 +++++++++++++++

@@ -29,8 +29,6 @@ frees trees of elements with prefixed attributes, aborts within a few
 thousand of them without the change and runs through with it; AddressSanitizer
 and glibc's malloc checking both hide the fault by not reusing the
 address.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  Source/NSXMLElement.m | 4 ++++
  1 file changed, 4 insertions(+)

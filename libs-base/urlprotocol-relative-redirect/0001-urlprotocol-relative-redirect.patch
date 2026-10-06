@@ -13,8 +13,6 @@ Tests/base/NSURLConnection/relativeRedirect.m (a canned server on a
 thread) fails without it and passes with it; the NSURLConnection and
 NSURLProtocol suites pass. Found by ODataStore against Microsoft TripPin,
 whose service root redirects this way.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  Source/NSURLProtocol.m                        |   3 +-
  Tests/base/NSURLConnection/relativeRedirect.m | 101 ++++++++++++++++++
