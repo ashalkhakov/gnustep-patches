@@ -26,6 +26,7 @@ until another route upstream is settled.
 | `expression-self-type` | libs-base | test | [#810](https://github.com/gnustep/libs-base/pull/810) | gnustep-coredata |
 | `expression-binary-coding` | libs-base | test | [#815](https://github.com/gnustep/libs-base/pull/815) | gnustep-coredata |
 | `predicate-subquery` | libs-base | test | [#829](https://github.com/gnustep/libs-base/pull/829) | gnustep-coredata |
+| `selector-and-fetch-expressions` | libs-base | test | not sent yet | gnustep-coredata |
 | `constant-expression-copy` | libs-base | test | [#812](https://github.com/gnustep/libs-base/pull/812) | (none: FreeCoreData's fix-managed-object-constants branch stops copying fetch predicates) |
 | `dateformatter-cell-behavior` | libs-base | test | [#813](https://github.com/gnustep/libs-base/pull/813) | gnustep-coredata |
 | `keyedarchiver-secure-coding` | libs-base | test | [#817](https://github.com/gnustep/libs-base/pull/817) | gnustep-coredata |

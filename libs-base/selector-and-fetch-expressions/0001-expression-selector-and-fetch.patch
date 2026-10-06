@@ -1,0 +1,934 @@
+From a16e3d9c716cef109b3a4b31bbef8da6a86acfb3 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Tue, 6 Oct 2026 14:57:16 +0000
+Subject: [PATCH] libs-base: NSExpression's selector functions and fetch
+ requests
+
+NSExpression had one kind of function expression, the named kind -
+sum:, uppercase:, and the rest, each an implementation of its own in
+NSPredicate.m. Two kinds it had none of:
+
+FUNCTION(receiver, "selector:", arguments...) sends a selector to the
+object an expression evaluates to. Core Data writes every attribute of
+a mapping model this way - FUNCTION($source, "valueForKey:", "text") -
+and a predicate can reach any method of a model object through it.
+
+FETCH(request, context, countOnly) runs a fetch request against a
+context and answers the rows, or their number. It is how a mapping
+model says which objects a mapping applies to, the request itself
+usually built by a FUNCTION on the migration manager, so the two are
+wanted together or not at all.
+
+Both are parsed, printed, evaluated, archived and read back. The
+selector form is sent through an NSInvocation, one argument per colon,
+and a result that is not an object comes back as an NSNumber. The fetch
+form knows nothing of Core Data - this library cannot - so it sends
+-executeFetchRequest:error: or -countForFetchRequest:error: to whatever
+the context expression evaluates to, which a test can answer as well as
+a managed object context can.
+
+A fetch expression is archived under the keys OS X uses, and named
+NSFetchRequestExpression there as the other kinds are named, so a mapping
+model written by Xcode reads here and one written here reads there.
+
+An archived function expression carries an operand, which until now was
+written as a placeholder standing for the class OS X implements the
+named functions on and ignored when read. It is read now: a placeholder
+still means a named function, and a real receiver means the selector
+form, so archives from either framework come back as what they were.
+
+The test added here cannot run on an unpatched library: it names the
+two new methods, so it fails to compile rather than to pass.
+---
+ Headers/Foundation/NSExpression.h         |  12 +-
+ Source/NSPredicate.m                      | 577 +++++++++++++++++++++-
+ Tests/base/NSPredicate/functionAndFetch.m | 182 +++++++
+ 3 files changed, 768 insertions(+), 3 deletions(-)
+ create mode 100644 Tests/base/NSPredicate/functionAndFetch.m
+
+diff --git a/Headers/Foundation/NSExpression.h b/Headers/Foundation/NSExpression.h
+index 087c9e76f..8fbcee591 100644
+--- a/Headers/Foundation/NSExpression.h
++++ b/Headers/Foundation/NSExpression.h
+@@ -59,8 +59,9 @@ enum
+ #endif
+   NSBlockExpressionType = 19,
+ #if OS_API_VERSION(MAC_OS_X_VERSION_10_11, GS_API_LATEST)
+-  NSConditionalExpressionType = 20
++  NSConditionalExpressionType = 20,
+ #endif
++  NSFetchRequestExpressionType = 50
+ };
+ typedef NSUInteger NSExpressionType;
+ 
+@@ -90,6 +91,12 @@ GS_EXPORT_CLASS
+ + (NSExpression *) expressionForSubquery: (NSExpression *)expression
+ 		   usingIteratorVariable: (NSString *)variable
+ 			       predicate: (id)predicate;
+++ (NSExpression *) expressionForFunction: (NSExpression *)target
++			    selectorName: (NSString *)name
++			       arguments: (NSArray *)parameters;
+++ (NSExpression *) expressionForFetch: (NSExpression *)fetch
++			      context: (id)context
++			    countOnly: (BOOL)countFlag;
+ #endif
+ 
+ #if OS_API_VERSION(MAC_OS_X_VERSION_10_6, GS_API_LATEST)
+@@ -116,6 +123,9 @@ GS_EXPORT_CLASS
+ - (NSExpression *) leftExpression;
+ - (NSPredicate *) predicate;
+ - (NSExpression *) rightExpression;
++- (NSExpression *) requestExpression;
++- (NSExpression *) contextExpression;
++- (BOOL) isCountOnlyRequest;
+ #endif
+ @end
+ 
+diff --git a/Source/NSPredicate.m b/Source/NSPredicate.m
+index 6b4bb0343..10b763c86 100644
+--- a/Source/NSPredicate.m
++++ b/Source/NSPredicate.m
+@@ -42,7 +42,9 @@
+ #import "Foundation/NSDictionary.h"
+ #import "Foundation/NSEnumerator.h"
+ #import "Foundation/NSException.h"
++#import "Foundation/NSInvocation.h"
+ #import "Foundation/NSKeyValueCoding.h"
++#import "Foundation/NSMethodSignature.h"
+ #import "Foundation/NSNull.h"
+ #import "Foundation/NSScanner.h"
+ #import "Foundation/NSValue.h"
+@@ -238,6 +240,24 @@ extern void     GSPropertyListMake(id,NSDictionary*,BOOL,BOOL,unsigned,id*);
+ }
+ @end
+ 
++@interface GSSelectorFunctionExpression : NSExpression
++{
++  @public
++  NSExpression		*_target;
++  NSString		*_selectorName;
++  NSArray		*_args;
++}
++@end
++
++@interface GSFetchExpression : NSExpression
++{
++  @public
++  NSExpression		*_request;
++  NSExpression		*_contextExpression;
++  BOOL			_countOnly;
++}
++@end
++
+ #if OS_API_VERSION(MAC_OS_X_VERSION_10_6, GS_API_LATEST)
+ @interface GSBlockPredicate : NSPredicate
+ {
+@@ -1875,6 +1895,8 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
+ 			   forClass: [GSAggregateExpression class]];
+       [NSKeyedArchiver setClassName: @"NSSubqueryExpression"
+ 			   forClass: [GSSubqueryExpression class]];
++      [NSKeyedArchiver setClassName: @"NSFetchRequestExpression"
++			   forClass: [GSFetchExpression class]];
+ 
+       [NSKeyedUnarchiver setClass: [GSSubqueryExpression class]
+ 		     forClassName: @"NSSubqueryExpression"];
+@@ -1892,6 +1914,8 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
+ 		     forClassName: @"NSFunctionExpression"];
+       [NSKeyedUnarchiver setClass: [GSAggregateExpression class]
+ 		     forClassName: @"NSAggregateExpression"];
++      [NSKeyedUnarchiver setClass: [GSFetchExpression class]
++		     forClassName: @"NSFetchRequestExpression"];
+     }
+ }
+ 
+@@ -2008,6 +2032,41 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
+   return e;
+ }
+ 
+++ (NSExpression *) expressionForFunction: (NSExpression *)target
++			    selectorName: (NSString *)name
++			       arguments: (NSArray *)parameters
++{
++  GSSelectorFunctionExpression	*e;
++
++  if (nil == target || nil == name)
++    {
++      [NSException raise: NSInvalidArgumentException
++		  format: @"expressionForFunction:selectorName:arguments:"
++	@" needs a target and a selector name"];
++    }
++  e = AUTORELEASE([[GSSelectorFunctionExpression alloc]
++    initWithExpressionType: NSFunctionExpressionType]);
++  ASSIGN(e->_target, target);
++  ASSIGN(e->_selectorName, name);
++  ASSIGN(e->_args, (nil == parameters) ? (NSArray *)[NSArray array] : parameters);
++  return e;
++}
++
+++ (NSExpression *) expressionForFetch: (NSExpression *)fetch
++			      context: (id)context
++			    countOnly: (BOOL)countFlag
++{
++  GSFetchExpression	*e;
++
++  e = AUTORELEASE([[GSFetchExpression alloc]
++    initWithExpressionType: NSFetchRequestExpressionType]);
++  ASSIGN(e->_request, fetch);
++  ASSIGN(e->_contextExpression,
++    [NSExpression expressionForConstantValue: context]);
++  e->_countOnly = countFlag;
++  return e;
++}
++
+ + (NSExpression *) expressionForKeyPath: (NSString *)path
+ {
+   GSKeyPathExpression *e;
+@@ -2220,6 +2279,24 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
+   return nil;
+ }
+ 
++- (NSExpression *) requestExpression
++{
++  [self subclassResponsibility: _cmd];
++  return nil;
++}
++
++- (NSExpression *) contextExpression
++{
++  [self subclassResponsibility: _cmd];
++  return nil;
++}
++
++- (BOOL) isCountOnlyRequest
++{
++  [self subclassResponsibility: _cmd];
++  return NO;
++}
++
+ - (NSString *) variable
+ {
+   [self subclassResponsibility: _cmd];
+@@ -3286,11 +3363,13 @@ do { \
+ {
+   NSString	*name;
+   NSArray	*args;
++  NSExpression	*operand = nil;
+ 
+   if ([coder allowsKeyedCoding])
+     {
+       name = [coder decodeObjectForKey: @"NSSelectorName"];
+       args = [coder decodeObjectForKey: @"NSArguments"];
++      operand = [coder decodeObjectForKey: @"NSOperand"];
+     }
+   else
+     {
+@@ -3300,6 +3379,25 @@ do { \
+ 
+   DESTROY(self);
+ 
++  /* An operand standing for a class is the placeholder a named function is
++   * archived with; anything else is a receiver, and the archive is of the
++   * form FUNCTION(receiver, "selector:", ...).
++   */
++  if ([operand isKindOfClass: [GSConstantValueExpression class]]
++    && nil == ((GSConstantValueExpression *)operand)->_className)
++    {
++      return RETAIN([NSExpression expressionForFunction: operand
++					   selectorName: name
++					      arguments: args]);
++    }
++  else if (nil != operand
++    && NO == [operand isKindOfClass: [GSConstantValueExpression class]])
++    {
++      return RETAIN([NSExpression expressionForFunction: operand
++					   selectorName: name
++					      arguments: args]);
++    }
++
+   return RETAIN([NSExpression expressionForFunction: name arguments: args]);
+ }
+ 
+@@ -3632,6 +3730,408 @@ do { \
+ 
+ 
+ 
++@implementation GSSelectorFunctionExpression
++
++- (NSArray *) arguments
++{
++  return _args;
++}
++
++- (NSExpression *) operand
++{
++  return _target;
++}
++
++- (NSString *) function
++{
++  return _selectorName;
++}
++
++- (NSString *) keyPath
++{
++  return nil;
++}
++
++- (NSString *) description
++{
++  NSMutableString	*result;
++  NSUInteger		i, count = [_args count];
++
++  result = [NSMutableString stringWithFormat: @"FUNCTION(%@, \"%@\"",
++    _target, _selectorName];
++  if (count > 0)
++    {
++      [result appendString: @" "];	// OS X writes one here
++    }
++  for (i = 0; i < count; i++)
++    {
++      [result appendFormat: @", %@", [_args objectAtIndex: i]];
++    }
++  [result appendString: @")"];
++  return result;
++}
++
++/* The receiver is sent the selector with the evaluated arguments, one per
++ * colon in its name.  A result that is not an object is returned as an
++ * NSNumber, as the rest of this file expects of a value.
++ */
++- (id) expressionValueWithObject: (id)object
++			 context: (NSMutableDictionary *)context
++{
++  id			target;
++  SEL			selector;
++  NSMethodSignature	*signature;
++  NSInvocation		*invocation;
++  NSUInteger		i, count = [_args count];
++  const char		*type;
++
++  target = [_target expressionValueWithObject: object context: context];
++  if (nil == target)
++    {
++      return nil;
++    }
++
++  selector = NSSelectorFromString(_selectorName);
++  signature = [target methodSignatureForSelector: selector];
++  if (0 == selector || nil == signature)
++    {
++      [NSException raise: NSInvalidArgumentException
++		  format: @"%@ does not respond to %@",
++	NSStringFromClass([target class]), _selectorName];
++    }
++  if ([signature numberOfArguments] != count + 2)
++    {
++      [NSException raise: NSInvalidArgumentException
++		  format: @"%@ takes %u arguments, %u given",
++	_selectorName, (unsigned)([signature numberOfArguments] - 2),
++	(unsigned)count];
++    }
++
++  invocation = [NSInvocation invocationWithMethodSignature: signature];
++  [invocation setTarget: target];
++  [invocation setSelector: selector];
++  for (i = 0; i < count; i++)
++    {
++      id	value;
++
++      value = [[_args objectAtIndex: i] expressionValueWithObject: object
++							 context: context];
++      [invocation setArgument: &value atIndex: i + 2];
++    }
++  [invocation invoke];
++
++  type = [signature methodReturnType];
++  if (0 == strcmp(type, @encode(void)))
++    {
++      return nil;
++    }
++  if (0 == strcmp(type, @encode(id)) || 0 == strcmp(type, @encode(Class)))
++    {
++      id	result = nil;
++
++      [invocation getReturnValue: &result];
++      return result;
++    }
++
++#define GSFETCH_NUMBER(ctype, method) \
++  if (0 == strcmp(type, @encode(ctype))) \
++    { \
++      ctype	v = 0; \
++      [invocation getReturnValue: &v]; \
++      return [NSNumber method v]; \
++    }
++
++  GSFETCH_NUMBER(BOOL, numberWithBool:)
++  GSFETCH_NUMBER(char, numberWithChar:)
++  GSFETCH_NUMBER(int, numberWithInt:)
++  GSFETCH_NUMBER(short, numberWithShort:)
++  GSFETCH_NUMBER(long, numberWithLong:)
++  GSFETCH_NUMBER(long long, numberWithLongLong:)
++  GSFETCH_NUMBER(unsigned char, numberWithUnsignedChar:)
++  GSFETCH_NUMBER(unsigned int, numberWithUnsignedInt:)
++  GSFETCH_NUMBER(unsigned short, numberWithUnsignedShort:)
++  GSFETCH_NUMBER(unsigned long, numberWithUnsignedLong:)
++  GSFETCH_NUMBER(unsigned long long, numberWithUnsignedLongLong:)
++  GSFETCH_NUMBER(float, numberWithFloat:)
++  GSFETCH_NUMBER(double, numberWithDouble:)
++#undef GSFETCH_NUMBER
++
++  [NSException raise: NSInvalidArgumentException
++	      format: @"%@ returns %s, which is not a value",
++    _selectorName, type];
++  return nil;
++}
++
++- (void) encodeWithCoder: (NSCoder *)coder
++{
++  if ([coder allowsKeyedCoding])
++    {
++      [coder encodeInt: NSFunctionExpressionType forKey: @"NSExpressionType"];
++      [coder encodeObject: _selectorName forKey: @"NSSelectorName"];
++      [coder encodeObject: _target forKey: @"NSOperand"];
++      [coder encodeObject: _args forKey: @"NSArguments"];
++    }
++  else
++    {
++      [coder encodeObject: _selectorName];
++      [coder encodeObject: _target];
++      [coder encodeObject: _args];
++    }
++}
++
++- (id) initWithCoder: (NSCoder *)coder
++{
++  NSString	*name;
++  NSExpression	*target;
++  NSArray	*args;
++
++  if ([coder allowsKeyedCoding])
++    {
++      name = [coder decodeObjectForKey: @"NSSelectorName"];
++      target = [coder decodeObjectForKey: @"NSOperand"];
++      args = [coder decodeObjectForKey: @"NSArguments"];
++    }
++  else
++    {
++      name = [coder decodeObject];
++      target = [coder decodeObject];
++      args = [coder decodeObject];
++    }
++  DESTROY(self);
++
++  return RETAIN([NSExpression expressionForFunction: target
++				       selectorName: name
++					  arguments: args]);
++}
++
++- (id) copyWithZone: (NSZone *)zone
++{
++  return RETAIN(self);
++}
++
++- (NSExpression *) _expressionWithSubstitutionVariables: (NSDictionary *)variables
++{
++  NSMutableArray	*args;
++  NSUInteger		i, count = [_args count];
++
++  args = [NSMutableArray arrayWithCapacity: count];
++  for (i = 0; i < count; i++)
++    {
++      [args addObject: [[_args objectAtIndex: i]
++	_expressionWithSubstitutionVariables: variables]];
++    }
++  return [NSExpression expressionForFunction:
++    [_target _expressionWithSubstitutionVariables: variables]
++				selectorName: _selectorName
++				   arguments: args];
++}
++
++- (BOOL) isEqual: (id)other
++{
++  GSSelectorFunctionExpression	*o = other;
++
++  if (self == other)
++    {
++      return YES;
++    }
++  if (NO == [other isKindOfClass: [GSSelectorFunctionExpression class]])
++    {
++      return NO;
++    }
++  return [_selectorName isEqual: o->_selectorName]
++    && [_target isEqual: o->_target] && [_args isEqual: o->_args];
++}
++
++- (NSUInteger) hash
++{
++  return [_selectorName hash] ^ [_args hash];
++}
++
++- (void) dealloc
++{
++  RELEASE(_target);
++  RELEASE(_selectorName);
++  RELEASE(_args);
++  [super dealloc];
++}
++
++@end
++
++@implementation GSFetchExpression
++
++- (NSExpression *) requestExpression
++{
++  return _request;
++}
++
++- (NSExpression *) contextExpression
++{
++  return _contextExpression;
++}
++
++- (BOOL) isCountOnlyRequest
++{
++  return _countOnly;
++}
++
++- (NSString *) keyPath
++{
++  return nil;
++}
++
++- (NSString *) description
++{
++  return [NSString stringWithFormat: @"FETCH(%@, %@, %@)",
++    _request, _contextExpression, _countOnly ? @"YES" : @"NO"];
++}
++
++/* The request is run against the context, which is whatever object the
++ * context expression evaluates to - this library knows nothing of Core
++ * Data, so the two methods it needs are sent, not called.
++ */
++- (id) expressionValueWithObject: (id)object
++			 context: (NSMutableDictionary *)context
++{
++  id			request;
++  id			target;
++  SEL			selector;
++  NSMethodSignature	*signature;
++  NSInvocation		*invocation;
++  NSError		*error = nil;
++  NSError		**errorPointer = &error;
++
++  request = [_request expressionValueWithObject: object context: context];
++  target = [_contextExpression expressionValueWithObject: object
++						context: context];
++  if (nil == request || nil == target)
++    {
++      return nil;
++    }
++
++  selector = _countOnly
++    ? @selector(countForFetchRequest:error:)
++    : @selector(executeFetchRequest:error:);
++  signature = [target methodSignatureForSelector: selector];
++  if (nil == signature)
++    {
++      [NSException raise: NSInvalidArgumentException
++		  format: @"%@ cannot answer a fetch request",
++	NSStringFromClass([target class])];
++    }
++
++  invocation = [NSInvocation invocationWithMethodSignature: signature];
++  [invocation setTarget: target];
++  [invocation setSelector: selector];
++  [invocation setArgument: &request atIndex: 2];
++  [invocation setArgument: &errorPointer atIndex: 3];
++  [invocation invoke];
++
++  if (_countOnly)
++    {
++      NSUInteger	count = 0;
++
++      [invocation getReturnValue: &count];
++      return [NSNumber numberWithUnsignedInteger: count];
++    }
++  else
++    {
++      id	result = nil;
++
++      [invocation getReturnValue: &result];
++      return result;
++    }
++}
++
++- (void) encodeWithCoder: (NSCoder *)coder
++{
++  if ([coder allowsKeyedCoding])
++    {
++      [coder encodeInt: NSFetchRequestExpressionType
++		forKey: @"NSExpressionType"];
++      [coder encodeObject: _request forKey: @"NSFRExpression"];
++      [coder encodeObject: _contextExpression forKey: @"NSMOCExpression"];
++      [coder encodeBool: _countOnly forKey: @"NSCountOnlyFlag"];
++    }
++  else
++    {
++      [coder encodeObject: _request];
++      [coder encodeObject: _contextExpression];
++      [coder encodeValueOfObjCType: @encode(BOOL) at: &_countOnly];
++    }
++}
++
++- (id) initWithCoder: (NSCoder *)coder
++{
++  self = [super initWithExpressionType: NSFetchRequestExpressionType];
++  if (nil == self)
++    {
++      return nil;
++    }
++  if ([coder allowsKeyedCoding])
++    {
++      ASSIGN(_request, [coder decodeObjectForKey: @"NSFRExpression"]);
++      ASSIGN(_contextExpression,
++	[coder decodeObjectForKey: @"NSMOCExpression"]);
++      _countOnly = [coder decodeBoolForKey: @"NSCountOnlyFlag"];
++    }
++  else
++    {
++      ASSIGN(_request, [coder decodeObject]);
++      ASSIGN(_contextExpression, [coder decodeObject]);
++      [coder decodeValueOfObjCType: @encode(BOOL) at: &_countOnly];
++    }
++  return self;
++}
++
++- (id) copyWithZone: (NSZone *)zone
++{
++  return RETAIN(self);
++}
++
++- (NSExpression *) _expressionWithSubstitutionVariables: (NSDictionary *)variables
++{
++  GSFetchExpression	*e;
++
++  e = AUTORELEASE([[GSFetchExpression alloc]
++    initWithExpressionType: NSFetchRequestExpressionType]);
++  ASSIGN(e->_request,
++    [_request _expressionWithSubstitutionVariables: variables]);
++  ASSIGN(e->_contextExpression,
++    [_contextExpression _expressionWithSubstitutionVariables: variables]);
++  e->_countOnly = _countOnly;
++  return e;
++}
++
++- (BOOL) isEqual: (id)other
++{
++  GSFetchExpression	*o = other;
++
++  if (self == other)
++    {
++      return YES;
++    }
++  if (NO == [other isKindOfClass: [GSFetchExpression class]])
++    {
++      return NO;
++    }
++  return _countOnly == o->_countOnly && [_request isEqual: o->_request]
++    && [_contextExpression isEqual: o->_contextExpression];
++}
++
++- (NSUInteger) hash
++{
++  return [_request hash] ^ [_contextExpression hash];
++}
++
++- (void) dealloc
++{
++  RELEASE(_request);
++  RELEASE(_contextExpression);
++  [super dealloc];
++}
++
++@end
++
+ @implementation NSArray (NSPredicate)
+ 
+ - (NSArray *) filteredArrayUsingPredicate: (NSPredicate *)predicate
+@@ -4448,8 +4948,81 @@ GSKeyPathIfKeyPath(NSExpression *expression)
+                               format: @"Missing ) in function arguments"];
+                 }
+             }
+-          left = [NSExpression expressionForFunction: name
+-                                           arguments: args];
++          /* Two of them are not named functions at all but forms of
++           * their own: a selector sent to a receiver, and a fetch request
++           * run against a context.
++           */
++          if ([name isEqualToString: @"FUNCTION"]
++            || [name isEqualToString: @"FUNCTION:"])
++            {
++              NSExpression	*selectorExpression;
++              id		selectorName;
++
++              if ([args count] < 2)
++                {
++                  [NSException raise: NSInvalidArgumentException
++                              format: @"FUNCTION needs a receiver and a"
++                    @" selector name"];
++                }
++              selectorExpression = [args objectAtIndex: 1];
++              selectorName
++                = ([selectorExpression expressionType]
++                    == NSConstantValueExpressionType)
++                  ? [selectorExpression constantValue]
++                  : [selectorExpression keyPath];
++              if (NO == [selectorName isKindOfClass: [NSString class]])
++                {
++                  [NSException raise: NSInvalidArgumentException
++                              format: @"FUNCTION needs a selector name, had"
++                    @" %@", selectorExpression];
++                }
++              left = [NSExpression
++                expressionForFunction: [args objectAtIndex: 0]
++                         selectorName: selectorName
++                            arguments: [args subarrayWithRange:
++                              NSMakeRange(2, [args count] - 2)]];
++            }
++          else if ([name isEqualToString: @"FETCH"]
++            || [name isEqualToString: @"FETCH:"])
++            {
++              GSFetchExpression	*fetch;
++
++              if ([args count] < 2)
++                {
++                  [NSException raise: NSInvalidArgumentException
++                              format: @"FETCH needs a request and a context"];
++                }
++              fetch = AUTORELEASE([[GSFetchExpression alloc]
++                initWithExpressionType: NSFetchRequestExpressionType]);
++              ASSIGN(fetch->_request, [args objectAtIndex: 0]);
++              ASSIGN(fetch->_contextExpression, [args objectAtIndex: 1]);
++              if ([args count] > 2)
++                {
++                  NSExpression	*flag = [args objectAtIndex: 2];
++                  NSString	*word = ([flag expressionType]
++                    == NSKeyPathExpressionType) ? [flag keyPath] : nil;
++
++                  if (nil != word)
++                    {
++                      fetch->_countOnly = ([word caseInsensitiveCompare: @"YES"]
++                        == NSOrderedSame
++                        || [word caseInsensitiveCompare: @"TRUE"]
++                        == NSOrderedSame);
++                    }
++                  else
++                    {
++                      fetch->_countOnly
++                        = [[flag expressionValueWithObject: nil context: nil]
++                          boolValue];
++                    }
++                }
++              left = fetch;
++            }
++          else
++            {
++              left = [NSExpression expressionForFunction: name
++                                               arguments: args];
++            }
+         }
+       else if ([self scanString: @"[" intoString: NULL])
+         {
+diff --git a/Tests/base/NSPredicate/functionAndFetch.m b/Tests/base/NSPredicate/functionAndFetch.m
+new file mode 100644
+index 000000000..bfb32c042
+--- /dev/null
++++ b/Tests/base/NSPredicate/functionAndFetch.m
+@@ -0,0 +1,182 @@
++#import "ObjectTesting.h"
++#import <Foundation/NSAutoreleasePool.h>
++#import <Foundation/NSArray.h>
++#import <Foundation/NSDictionary.h>
++#import <Foundation/NSError.h>
++#import <Foundation/NSExpression.h>
++#import <Foundation/NSKeyedArchiver.h>
++#import <Foundation/NSPredicate.h>
++#import <Foundation/NSString.h>
++#import <Foundation/NSValue.h>
++
++/* Stands in for what Core Data would pass as a fetch request and a managed
++ * object context: this library knows neither, and sends the two methods a
++ * context answers.
++ */
++@interface FetchStub : NSObject
++{
++  id    _request;
++  int   _calls;
++}
++- (NSArray *) executeFetchRequest: (id)request error: (NSError **)error;
++- (NSUInteger) countForFetchRequest: (id)request error: (NSError **)error;
++- (id) requestFor: (NSString *)name;
++- (NSString *) shout: (NSString *)text;
++- (NSString *) joining: (NSString *)a with: (NSString *)b;
++- (NSUInteger) answer;
++- (id) lastRequest;
++@end
++
++@implementation FetchStub
++- (NSArray *) executeFetchRequest: (id)request error: (NSError **)error
++{
++  ASSIGN(_request, request);
++  return [NSArray arrayWithObjects: @"one", @"two", @"three", nil];
++}
++- (NSUInteger) countForFetchRequest: (id)request error: (NSError **)error
++{
++  ASSIGN(_request, request);
++  return 3;
++}
++- (id) requestFor: (NSString *)name
++{
++  return [@"request:" stringByAppendingString: name];
++}
++- (NSString *) shout: (NSString *)text
++{
++  return [text uppercaseString];
++}
++- (NSString *) joining: (NSString *)a with: (NSString *)b
++{
++  return [NSString stringWithFormat: @"%@+%@", a, b];
++}
++- (NSUInteger) answer
++{
++  return 42;
++}
++- (id) lastRequest
++{
++  return _request;
++}
++@end
++
++int main(void)
++{
++  NSAutoreleasePool     *arp = [NSAutoreleasePool new];
++  FetchStub             *stub = AUTORELEASE([FetchStub new]);
++  NSMutableDictionary   *context;
++  NSExpression          *e;
++  id                     v;
++
++  context = [NSMutableDictionary dictionaryWithObject: stub forKey: @"stub"];
++
++  /* A selector sent to the object a variable stands for. */
++  e = [NSExpression expressionForFunction:
++    [NSExpression expressionForVariable: @"stub"]
++                             selectorName: @"shout:"
++                                arguments: [NSArray arrayWithObject:
++                                  [NSExpression expressionForConstantValue: @"ada"]]];
++  PASS([e expressionType] == NSFunctionExpressionType,
++    "a selector function expression is a function expression");
++  PASS_EQUAL([e function], @"shout:", "its function is the selector name");
++  PASS_EQUAL([[e operand] variable], @"stub", "its operand is the receiver");
++  PASS_EQUAL(([e expressionValueWithObject: nil context: context]), @"ADA",
++    "it sends the selector to the receiver");
++
++  /* Two arguments, one per colon. */
++  e = [NSExpression expressionForFunction:
++    [NSExpression expressionForVariable: @"stub"]
++                             selectorName: @"joining:with:"
++                                arguments: [NSArray arrayWithObjects:
++                                  [NSExpression expressionForConstantValue: @"a"],
++                                  [NSExpression expressionForConstantValue: @"b"], nil]];
++  PASS_EQUAL(([e expressionValueWithObject: nil context: context]), @"a+b",
++    "every colon takes an argument");
++
++  /* A result that is not an object comes back as a number. */
++  e = [NSExpression expressionForFunction:
++    [NSExpression expressionForVariable: @"stub"]
++                             selectorName: @"answer"
++                                arguments: nil];
++  PASS_EQUAL(([e expressionValueWithObject: nil context: context]),
++    [NSNumber numberWithUnsignedInteger: 42],
++    "a scalar result is answered as a number");
++
++  /* Written and read back the way OS X writes it. */
++  e = [NSExpression expressionForFunction:
++    [NSExpression expressionForVariable: @"stub"]
++                             selectorName: @"shout:"
++                                arguments: [NSArray arrayWithObject:
++                                  [NSExpression expressionForConstantValue: @"ada"]]];
++  /* OS X writes a space before that comma, and prints a string constant in
++   * quotes where this library prints it bare - the quoting is what every
++   * constant here does, not this expression's doing.
++   */
++  PASS_EQUAL([e description], @"FUNCTION($stub, \"shout:\" , ada)",
++    "it prints as OS X prints it");
++  e = [NSExpression expressionWithFormat: @"FUNCTION($stub, 'shout:', 'ada')"];
++  PASS([e expressionType] == NSFunctionExpressionType,
++    "FUNCTION(...) parses");
++  PASS_EQUAL(([e expressionValueWithObject: nil context: context]), @"ADA",
++    "and evaluates");
++
++  v = [NSKeyedUnarchiver unarchiveObjectWithData:
++    [NSKeyedArchiver archivedDataWithRootObject: e]];
++  PASS_EQUAL(([v expressionValueWithObject: nil context: context]), @"ADA",
++    "and survives an archive");
++
++  /* A named function still is one: the archive of those carries a class
++   * where this one carries a receiver.
++   */
++  e = [NSExpression expressionWithFormat: @"uppercase:('ada')"];
++  v = [NSKeyedUnarchiver unarchiveObjectWithData:
++    [NSKeyedArchiver archivedDataWithRootObject: e]];
++  PASS_EQUAL(([v expressionValueWithObject: nil context: nil]), @"ADA",
++    "a named function is unaffected");
++
++  /* A fetch request run against a context. */
++  e = [NSExpression expressionForFetch:
++    [NSExpression expressionForConstantValue: @"the request"]
++                                context: stub
++                              countOnly: NO];
++  PASS([e expressionType] == NSFetchRequestExpressionType,
++    "a fetch expression has its own type");
++  PASS([e isCountOnlyRequest] == NO, "and knows it is not a count");
++  PASS_EQUAL([[e requestExpression] constantValue], @"the request",
++    "and keeps the request");
++  PASS_EQUAL(([e expressionValueWithObject: nil context: nil]),
++    ([NSArray arrayWithObjects: @"one", @"two", @"three", nil]),
++    "it executes the request against the context");
++  PASS_EQUAL([stub lastRequest], @"the request",
++    "the context was given the request");
++
++  e = [NSExpression expressionForFetch:
++    [NSExpression expressionForConstantValue: @"the request"]
++                                context: stub
++                              countOnly: YES];
++  PASS_EQUAL(([e expressionValueWithObject: nil context: nil]),
++    [NSNumber numberWithUnsignedInteger: 3],
++    "counting answers a number");
++
++  /* The shape Core Data's mapping models are written in: a request the
++   * context's own method builds, fetched from that same context.
++   */
++  e = [NSExpression expressionWithFormat:
++    @"FETCH(FUNCTION($stub, 'requestFor:', 'Note'), FUNCTION($stub, 'self'), NO)"];
++  PASS([e expressionType] == NSFetchRequestExpressionType, "FETCH(...) parses");
++  PASS_EQUAL(([e expressionValueWithObject: nil context: context]),
++    ([NSArray arrayWithObjects: @"one", @"two", @"three", nil]),
++    "and evaluates, request and context and all");
++  PASS_EQUAL([stub lastRequest], @"request:Note",
++    "the request came from the inner function");
++
++  v = [NSKeyedUnarchiver unarchiveObjectWithData:
++    [NSKeyedArchiver archivedDataWithRootObject: e]];
++  PASS([v isCountOnlyRequest] == NO, "a fetch expression survives an archive");
++  PASS_EQUAL(([v expressionValueWithObject: nil context: context]),
++    ([NSArray arrayWithObjects: @"one", @"two", @"three", nil]),
++    "and evaluates afterwards");
++
++  [arp release];
++  return 0;
++}
+-- 
+2.43.0
+
