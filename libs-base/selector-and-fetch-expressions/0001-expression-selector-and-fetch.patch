@@ -1,67 +1,63 @@
-From a16e3d9c716cef109b3a4b31bbef8da6a86acfb3 Mon Sep 17 00:00:00 2001
+From 13278a64c34d91815b5a397f22f8abc1ba396b40 Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Tue, 6 Oct 2026 14:57:16 +0000
-Subject: [PATCH] libs-base: NSExpression's selector functions and fetch
- requests
+Subject: [PATCH] libs-base: NSExpression's selector functions, fetch requests
+ and key paths
 
-NSExpression had one kind of function expression, the named kind -
-sum:, uppercase:, and the rest, each an implementation of its own in
-NSPredicate.m. Two kinds it had none of:
+NSExpression had one kind of function expression, the named kind - sum:,
+uppercase:, and the rest, each an implementation of its own in
+NSPredicate.m. Core Data's mapping models are written in three forms this
+library did not have, and a mapping model compiled by Xcode could not be
+read, let alone followed.
 
 FUNCTION(receiver, "selector:", arguments...) sends a selector to the
-object an expression evaluates to. Core Data writes every attribute of
-a mapping model this way - FUNCTION($source, "valueForKey:", "text") -
-and a predicate can reach any method of a model object through it.
+object an expression evaluates to. A mapping model fills a relationship
+with one of these, asking the migration manager for the destination
+instances of a source object's related objects.
 
-FETCH(request, context, countOnly) runs a fetch request against a
-context and answers the rows, or their number. It is how a mapping
-model says which objects a mapping applies to, the request itself
-usually built by a FUNCTION on the migration manager, so the two are
-wanted together or not at all.
+FETCH(request, context, countOnly) runs a fetch request against a context
+and answers the rows, or their number. It is how a mapping says which
+objects it applies to, the request itself built by a FUNCTION on the
+manager, so the two are wanted together or not at all.
 
-Both are parsed, printed, evaluated, archived and read back. The
+A key path reached through something else - $source.author - OS X writes
+as a key path expression with that something as its operand. This library
+read the path and dropped the operand, so $source.author meant author,
+evaluated against whatever object happened to be passed; where that was
+not the source object, the value was nil. It is read as the key path
+composition it is now, and written the way OS X writes it rather than as
+a binary expression of its own, so each framework reads the other's.
+
+All three are parsed, printed, evaluated, archived and read back. The
 selector form is sent through an NSInvocation, one argument per colon,
 and a result that is not an object comes back as an NSNumber. The fetch
 form knows nothing of Core Data - this library cannot - so it sends
 -executeFetchRequest:error: or -countForFetchRequest:error: to whatever
-the context expression evaluates to, which a test can answer as well as
-a managed object context can.
-
-A fetch expression is archived under the keys OS X uses, and named
-NSFetchRequestExpression there as the other kinds are named, so a mapping
-model written by Xcode reads here and one written here reads there.
+the context expression evaluates to, which a test can answer as well as a
+managed object context can. Its keys and class name in an archive are the
+ones OS X uses; Core Data declares the type constant and the class, so
+neither is added here.
 
 An archived function expression carries an operand, which until now was
-written as a placeholder standing for the class OS X implements the
-named functions on and ignored when read. It is read now: a placeholder
-still means a named function, and a real receiver means the selector
-form, so archives from either framework come back as what they were.
+written as a placeholder standing for the class OS X implements the named
+functions on, and ignored when read. It is read now: a placeholder still
+means a named function, and a real receiver means the selector form, so
+archives from either framework come back as what they were.
 
-The test added here cannot run on an unpatched library: it names the
-two new methods, so it fails to compile rather than to pass.
+The test added here cannot run on an unpatched library: it names the two
+new methods, so it fails to compile rather than to pass.
 ---
- Headers/Foundation/NSExpression.h         |  12 +-
- Source/NSPredicate.m                      | 577 +++++++++++++++++++++-
- Tests/base/NSPredicate/functionAndFetch.m | 182 +++++++
- 3 files changed, 768 insertions(+), 3 deletions(-)
+ Headers/Foundation/NSExpression.h         |   9 +
+ Source/NSPredicate.m                      | 635 +++++++++++++++++++++-
+ Tests/base/NSPredicate/functionAndFetch.m | 185 +++++++
+ 3 files changed, 825 insertions(+), 4 deletions(-)
  create mode 100644 Tests/base/NSPredicate/functionAndFetch.m
 
 diff --git a/Headers/Foundation/NSExpression.h b/Headers/Foundation/NSExpression.h
-index 087c9e76f..8fbcee591 100644
+index 087c9e76f..5fd82b068 100644
 --- a/Headers/Foundation/NSExpression.h
 +++ b/Headers/Foundation/NSExpression.h
-@@ -59,8 +59,9 @@ enum
- #endif
-   NSBlockExpressionType = 19,
- #if OS_API_VERSION(MAC_OS_X_VERSION_10_11, GS_API_LATEST)
--  NSConditionalExpressionType = 20
-+  NSConditionalExpressionType = 20,
- #endif
-+  NSFetchRequestExpressionType = 50
- };
- typedef NSUInteger NSExpressionType;
- 
-@@ -90,6 +91,12 @@ GS_EXPORT_CLASS
+@@ -90,6 +90,12 @@ GS_EXPORT_CLASS
  + (NSExpression *) expressionForSubquery: (NSExpression *)expression
  		   usingIteratorVariable: (NSString *)variable
  			       predicate: (id)predicate;
@@ -69,12 +65,12 @@ index 087c9e76f..8fbcee591 100644
 +			    selectorName: (NSString *)name
 +			       arguments: (NSArray *)parameters;
 ++ (NSExpression *) expressionForFetch: (NSExpression *)fetch
-+			      context: (id)context
++			      context: (NSExpression *)context
 +			    countOnly: (BOOL)countFlag;
  #endif
  
  #if OS_API_VERSION(MAC_OS_X_VERSION_10_6, GS_API_LATEST)
-@@ -116,6 +123,9 @@ GS_EXPORT_CLASS
+@@ -116,6 +122,9 @@ GS_EXPORT_CLASS
  - (NSExpression *) leftExpression;
  - (NSPredicate *) predicate;
  - (NSExpression *) rightExpression;
@@ -85,7 +81,7 @@ index 087c9e76f..8fbcee591 100644
  @end
  
 diff --git a/Source/NSPredicate.m b/Source/NSPredicate.m
-index 6b4bb0343..10b763c86 100644
+index 6b4bb0343..fa8479789 100644
 --- a/Source/NSPredicate.m
 +++ b/Source/NSPredicate.m
 @@ -42,7 +42,9 @@
@@ -98,10 +94,15 @@ index 6b4bb0343..10b763c86 100644
  #import "Foundation/NSNull.h"
  #import "Foundation/NSScanner.h"
  #import "Foundation/NSValue.h"
-@@ -238,6 +240,24 @@ extern void     GSPropertyListMake(id,NSDictionary*,BOOL,BOOL,unsigned,id*);
+@@ -238,6 +240,29 @@ extern void     GSPropertyListMake(id,NSDictionary*,BOOL,BOOL,unsigned,id*);
  }
  @end
  
++/* Core Data declares this type, as a constant of its own; the value is
++ * what an archive carries, so it is known here too.
++ */
++#define	GSFetchRequestExpressionType	((NSExpressionType)50)
++
 +@interface GSSelectorFunctionExpression : NSExpression
 +{
 +  @public
@@ -123,7 +124,16 @@ index 6b4bb0343..10b763c86 100644
  #if OS_API_VERSION(MAC_OS_X_VERSION_10_6, GS_API_LATEST)
  @interface GSBlockPredicate : NSPredicate
  {
-@@ -1875,6 +1895,8 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
+@@ -1867,6 +1892,8 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
+ 			   forClass: [GSVariableExpression class]];
+       [NSKeyedArchiver setClassName: @"NSKeyPathExpression"
+ 			   forClass: [GSKeyPathExpression class]];
++      [NSKeyedArchiver setClassName: @"NSKeyPathExpression"
++			   forClass: [GSKeyPathCompositionExpression class]];
+       [NSKeyedArchiver setClassName: @"NSKeyPathSpecifierExpression"
+ 			   forClass: [GSKeyPathSpecifierExpression class]];
+       [NSKeyedArchiver setClassName: @"NSFunctionExpression"
+@@ -1875,6 +1902,8 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
  			   forClass: [GSAggregateExpression class]];
        [NSKeyedArchiver setClassName: @"NSSubqueryExpression"
  			   forClass: [GSSubqueryExpression class]];
@@ -132,7 +142,7 @@ index 6b4bb0343..10b763c86 100644
  
        [NSKeyedUnarchiver setClass: [GSSubqueryExpression class]
  		     forClassName: @"NSSubqueryExpression"];
-@@ -1892,6 +1914,8 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
+@@ -1892,6 +1921,8 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
  		     forClassName: @"NSFunctionExpression"];
        [NSKeyedUnarchiver setClass: [GSAggregateExpression class]
  		     forClassName: @"NSAggregateExpression"];
@@ -141,7 +151,7 @@ index 6b4bb0343..10b763c86 100644
      }
  }
  
-@@ -2008,6 +2032,41 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
+@@ -2008,6 +2039,40 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
    return e;
  }
  
@@ -166,16 +176,15 @@ index 6b4bb0343..10b763c86 100644
 +}
 +
 ++ (NSExpression *) expressionForFetch: (NSExpression *)fetch
-+			      context: (id)context
++			      context: (NSExpression *)context
 +			    countOnly: (BOOL)countFlag
 +{
 +  GSFetchExpression	*e;
 +
 +  e = AUTORELEASE([[GSFetchExpression alloc]
-+    initWithExpressionType: NSFetchRequestExpressionType]);
++    initWithExpressionType: GSFetchRequestExpressionType]);
 +  ASSIGN(e->_request, fetch);
-+  ASSIGN(e->_contextExpression,
-+    [NSExpression expressionForConstantValue: context]);
++  ASSIGN(e->_contextExpression, context);
 +  e->_countOnly = countFlag;
 +  return e;
 +}
@@ -183,7 +192,7 @@ index 6b4bb0343..10b763c86 100644
  + (NSExpression *) expressionForKeyPath: (NSString *)path
  {
    GSKeyPathExpression *e;
-@@ -2220,6 +2279,24 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
+@@ -2220,6 +2285,24 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
    return nil;
  }
  
@@ -208,7 +217,81 @@ index 6b4bb0343..10b763c86 100644
  - (NSString *) variable
  {
    [self subclassResponsibility: _cmd];
-@@ -3286,11 +3363,13 @@ do { \
+@@ -2631,9 +2714,10 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
+ 
+   if ([coder allowsKeyedCoding])
+     {
+-      NSArray	*arguments = [coder decodeObjectForKey: @"NSArguments"];
+-      id	first = ([arguments count] > 0
++      NSArray		*arguments = [coder decodeObjectForKey: @"NSArguments"];
++      id		first = ([arguments count] > 0
+ 	? [arguments objectAtIndex: 0] : nil);
++      NSExpression	*operand = [coder decodeObjectForKey: @"NSOperand"];
+ 
+       if ([first isKindOfClass: [GSKeyPathSpecifierExpression class]])
+ 	{
+@@ -2643,6 +2727,23 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
+ 	{
+ 	  ASSIGN(_keyPath, [coder decodeObjectForKey: @"NSKeyPath"]);
+ 	}
++
++      /* A key path reached through something else - $source.author, which
++       * OS X writes as this kind with that something as its operand - is a
++       * key path composition, and evaluating it against the operand is the
++       * whole of what it means.  An operand standing for the object being
++       * evaluated adds nothing, so it stays a plain key path.
++       */
++      if (nil != operand
++	&& NO == [operand isKindOfClass: [GSEvaluatedObjectExpression class]])
++	{
++	  NSExpression	*path;
++
++	  path = [NSExpression expressionForKeyPath: _keyPath];
++	  DESTROY(self);
++	  return RETAIN([NSExpression
++	    expressionForKeyPathCompositionWithLeft: operand right: path]);
++	}
+     }
+   else
+     {
+@@ -2861,6 +2962,36 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
+   return [NSString stringWithFormat: @"%@.%@", _left, _right];
+ }
+ 
++/* As OS X writes it: a key path expression whose operand is what the path
++ * is reached through, the path itself an argument to valueForKeyPath:.
++ * A right side that is not a plain key path has no such form, and keeps
++ * the one this library has always written.
++ */
++- (void) encodeWithCoder: (NSCoder *)coder
++{
++  NSString	*path = [_right keyPath];
++
++  if ([coder allowsKeyedCoding] && nil != path)
++    {
++      GSKeyPathSpecifierExpression	*specifier;
++
++      specifier = [[GSKeyPathSpecifierExpression alloc]
++	initWithExpressionType: NSKeyPathExpressionType];
++      ASSIGN(specifier->_keyPath, path);
++
++      [coder encodeInt: NSKeyPathExpressionType forKey: @"NSExpressionType"];
++      [coder encodeObject: _left forKey: @"NSOperand"];
++      [coder encodeObject: @"valueForKeyPath:" forKey: @"NSSelectorName"];
++      [coder encodeObject: [NSArray arrayWithObject: specifier]
++		   forKey: @"NSArguments"];
++      RELEASE(specifier);
++    }
++  else
++    {
++      [super encodeWithCoder: coder];
++    }
++}
++
+ - (id) expressionValueWithObject: (id)object
+                          context: (NSMutableDictionary *)context
+ {
+@@ -3286,11 +3417,13 @@ do { \
  {
    NSString	*name;
    NSArray	*args;
@@ -222,7 +305,7 @@ index 6b4bb0343..10b763c86 100644
      }
    else
      {
-@@ -3300,6 +3379,25 @@ do { \
+@@ -3300,6 +3433,25 @@ do { \
  
    DESTROY(self);
  
@@ -248,7 +331,7 @@ index 6b4bb0343..10b763c86 100644
    return RETAIN([NSExpression expressionForFunction: name arguments: args]);
  }
  
-@@ -3632,6 +3730,408 @@ do { \
+@@ -3632,6 +3784,408 @@ do { \
  
  
  
@@ -568,7 +651,7 @@ index 6b4bb0343..10b763c86 100644
 +{
 +  if ([coder allowsKeyedCoding])
 +    {
-+      [coder encodeInt: NSFetchRequestExpressionType
++      [coder encodeInt: GSFetchRequestExpressionType
 +		forKey: @"NSExpressionType"];
 +      [coder encodeObject: _request forKey: @"NSFRExpression"];
 +      [coder encodeObject: _contextExpression forKey: @"NSMOCExpression"];
@@ -584,7 +667,7 @@ index 6b4bb0343..10b763c86 100644
 +
 +- (id) initWithCoder: (NSCoder *)coder
 +{
-+  self = [super initWithExpressionType: NSFetchRequestExpressionType];
++  self = [super initWithExpressionType: GSFetchRequestExpressionType];
 +  if (nil == self)
 +    {
 +      return nil;
@@ -615,7 +698,7 @@ index 6b4bb0343..10b763c86 100644
 +  GSFetchExpression	*e;
 +
 +  e = AUTORELEASE([[GSFetchExpression alloc]
-+    initWithExpressionType: NSFetchRequestExpressionType]);
++    initWithExpressionType: GSFetchRequestExpressionType]);
 +  ASSIGN(e->_request,
 +    [_request _expressionWithSubstitutionVariables: variables]);
 +  ASSIGN(e->_contextExpression,
@@ -657,7 +740,7 @@ index 6b4bb0343..10b763c86 100644
  @implementation NSArray (NSPredicate)
  
  - (NSArray *) filteredArrayUsingPredicate: (NSPredicate *)predicate
-@@ -4448,8 +4948,81 @@ GSKeyPathIfKeyPath(NSExpression *expression)
+@@ -4448,8 +5002,81 @@ GSKeyPathIfKeyPath(NSExpression *expression)
                                format: @"Missing ) in function arguments"];
                  }
              }
@@ -708,7 +791,7 @@ index 6b4bb0343..10b763c86 100644
 +                              format: @"FETCH needs a request and a context"];
 +                }
 +              fetch = AUTORELEASE([[GSFetchExpression alloc]
-+                initWithExpressionType: NSFetchRequestExpressionType]);
++                initWithExpressionType: GSFetchRequestExpressionType]);
 +              ASSIGN(fetch->_request, [args objectAtIndex: 0]);
 +              ASSIGN(fetch->_contextExpression, [args objectAtIndex: 1]);
 +              if ([args count] > 2)
@@ -743,10 +826,10 @@ index 6b4bb0343..10b763c86 100644
          {
 diff --git a/Tests/base/NSPredicate/functionAndFetch.m b/Tests/base/NSPredicate/functionAndFetch.m
 new file mode 100644
-index 000000000..bfb32c042
+index 000000000..9cb9561fe
 --- /dev/null
 +++ b/Tests/base/NSPredicate/functionAndFetch.m
-@@ -0,0 +1,182 @@
+@@ -0,0 +1,185 @@
 +#import "ObjectTesting.h"
 +#import <Foundation/NSAutoreleasePool.h>
 +#import <Foundation/NSArray.h>
@@ -883,13 +966,16 @@ index 000000000..bfb32c042
 +  PASS_EQUAL(([v expressionValueWithObject: nil context: nil]), @"ADA",
 +    "a named function is unaffected");
 +
-+  /* A fetch request run against a context. */
++  /* A fetch request run against a context.  Core Data declares the type
++   * this answers, and names it NSFetchRequestExpressionType; its value is
++   * 50, which is what an archive carries.
++   */
 +  e = [NSExpression expressionForFetch:
 +    [NSExpression expressionForConstantValue: @"the request"]
-+                                context: stub
++                                context: [NSExpression expressionForConstantValue: stub]
 +                              countOnly: NO];
-+  PASS([e expressionType] == NSFetchRequestExpressionType,
-+    "a fetch expression has its own type");
++  PASS([e expressionType] == (NSExpressionType)50,
++    "a fetch expression has the type Core Data gives it");
 +  PASS([e isCountOnlyRequest] == NO, "and knows it is not a count");
 +  PASS_EQUAL([[e requestExpression] constantValue], @"the request",
 +    "and keeps the request");
@@ -901,7 +987,7 @@ index 000000000..bfb32c042
 +
 +  e = [NSExpression expressionForFetch:
 +    [NSExpression expressionForConstantValue: @"the request"]
-+                                context: stub
++                                context: [NSExpression expressionForConstantValue: stub]
 +                              countOnly: YES];
 +  PASS_EQUAL(([e expressionValueWithObject: nil context: nil]),
 +    [NSNumber numberWithUnsignedInteger: 3],
@@ -912,7 +998,7 @@ index 000000000..bfb32c042
 +   */
 +  e = [NSExpression expressionWithFormat:
 +    @"FETCH(FUNCTION($stub, 'requestFor:', 'Note'), FUNCTION($stub, 'self'), NO)"];
-+  PASS([e expressionType] == NSFetchRequestExpressionType, "FETCH(...) parses");
++  PASS([e expressionType] == (NSExpressionType)50, "FETCH(...) parses");
 +  PASS_EQUAL(([e expressionValueWithObject: nil context: context]),
 +    ([NSArray arrayWithObjects: @"one", @"two", @"three", nil]),
 +    "and evaluates, request and context and all");
