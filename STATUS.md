@@ -12,50 +12,56 @@ regenerated in the process - the copy it came from no longer matched.
 
 ## Pending
 
+Pull requests opened on 2026-10-06, each a branch `fix/<name>` on
+`ashalkhakov/<project>`, made with `git am` from the patch here.  Both
+libobjc2 ones were closed unmerged within minutes by David Chisnall: "This
+project does not accept code generated with LLMs."  The patches stay here
+until another route upstream is settled.
+
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
-| `autoreleased-return-value` | libobjc2 | test | — | (none: ODataStore works around it) |
-| `stack-block-retain` | libobjc2 | test | — | (none: ODataStore's vendored GCDWebServer works around it) |
-| `predicate-equality-options` | libs-base | test | — | gnustep-coredata |
-| `expression-self-type` | libs-base | test | — | gnustep-coredata |
-| `expression-binary-coding` | libs-base | test | — | gnustep-coredata |
-| `predicate-subquery` | libs-base | test | — | gnustep-coredata |
-| `constant-expression-copy` | libs-base | test | — | (none: FreeCoreData's fix-managed-object-constants branch stops copying fetch predicates) |
-| `dateformatter-cell-behavior` | libs-base | test | — | gnustep-coredata |
-| `keyedarchiver-secure-coding` | libs-base | test | — | gnustep-coredata |
-| `nsxmlelement-addattribute-value-doc` | libs-base | program | — | GSXFormsKit |
-| `sax-handler-calloc` | libs-base | program | — | RDLKit |
-| `xmlns-attribute` | libs-base | test | — | RDLKit |
-| `nsxmlnode-string-value-escaping` | libs-base | test | — | (none: ODataStore uses it from here) |
-| `nsxmlnode-attribute-prefix` | libs-base | test | — | (none: WorkflowKit's designer reads an attribute's URI instead) |
-| `sortdescriptor-nil-first` | libs-base | test | — | (none: FreeCoreData's in-memory sorts and ORMKit's paging rely on it from here) |
-| `nsxml-default-namespace` | libs-base | test | — | (none: ODataStore uses it from here) |
-| `nsxml-prefixed-descendants` | libs-base | test | — | (none: WorkflowKit uses it from here) |
-| `nsxml-default-namespace-descendants` | libs-base | test | — | (none: WorkflowKit uses it from here) |
-| `nsxmlelement-attribute-private-doc` | libs-base | program | — | (none: WorkflowKit uses it from here) |
-| `decimal-plain-notation` | libs-base | test | — | (none: WorkflowKit uses it from here) |
-| `string-diacritic-insensitive-search` | libs-base | test | — | (none: ODataStore uses it from here) |
-| `keyedunarchiver-non-archive` | libs-base | test | — | (none: ODataStore uses it from here) |
-| `urlprotocol-relative-redirect` | libs-base | test | — | (none: ODataStore uses it from here) |
-| `urlprotocol-multipart-body` | libs-base | test | — | (none: ODataStore uses it from here) |
-| `expression-function-names` | libs-base | test | — | (none: ODataStore works around it) |
-| `predicate-matches-line-anchors` | libs-base | test | — | (none) |
-| `predicate-like-wildcards` | libs-base | test | — | (none) |
-| `bundle-load-and-return-error` | libs-base | test | — | (none: WorkflowKit's plugin loading uses it from here) |
-| `arraycontroller-selection-kvo` | libs-gui | test | — | gnustep-coredata |
-| `tableview-column-autoresizing-style` | libs-gui | test | — | gnustep-coredata |
-| `xib-date-picker` | libs-gui | none | — | gnustep-coredata |
-| `action-sender-lifetime` | libs-gui | test | — | GSXFormsKit, HomeRow |
-| `tableau-expression-lifetime-test` | libs-gui | test only | — | (new: the fix is already upstream) |
-| `tracking-walk-retains-subviews` | libs-gui | program | — | GSXFormsKit, HomeRow |
-| `pdf-print-operation` | libs-gui | program | — | RDLKit |
-| `graphicscontext-backend-recursion` | libs-gui | program | — | RDLKit |
-| `tableview-bound-value-transform` | libs-gui | test | — | (none: WorkflowKit uses it from here) |
-| `cgrectunion-size` | libs-opal | none | — | GSXFormsKit |
-| `freetype-advance-without-size` | libs-opal | test | — | (none: XFormsKit uses it from here) |
-| `cfstring-overrelease` | libs-corebase | none | — | gnustep-build |
-| `keep-nib-textfield-bezel` | gershwin-eau-theme | none | — | gnustep-coredata |
-| `nsalert-window-ownership` | gershwin-eau-theme | none | — | gnustep-build |
+| `autoreleased-return-value` | libobjc2 | test | [#426](https://github.com/gnustep/libobjc2/pull/426) closed unmerged | (none: ODataStore works around it) |
+| `stack-block-retain` | libobjc2 | test | [#427](https://github.com/gnustep/libobjc2/pull/427) closed unmerged | (none: ODataStore's vendored GCDWebServer works around it) |
+| `predicate-equality-options` | libs-base | test | [#826](https://github.com/gnustep/libs-base/pull/826) | gnustep-coredata |
+| `expression-self-type` | libs-base | test | [#810](https://github.com/gnustep/libs-base/pull/810) | gnustep-coredata |
+| `expression-binary-coding` | libs-base | test | [#815](https://github.com/gnustep/libs-base/pull/815) | gnustep-coredata |
+| `predicate-subquery` | libs-base | test | [#829](https://github.com/gnustep/libs-base/pull/829) | gnustep-coredata |
+| `constant-expression-copy` | libs-base | test | [#812](https://github.com/gnustep/libs-base/pull/812) | (none: FreeCoreData's fix-managed-object-constants branch stops copying fetch predicates) |
+| `dateformatter-cell-behavior` | libs-base | test | [#813](https://github.com/gnustep/libs-base/pull/813) | gnustep-coredata |
+| `keyedarchiver-secure-coding` | libs-base | test | [#817](https://github.com/gnustep/libs-base/pull/817) | gnustep-coredata |
+| `nsxmlelement-addattribute-value-doc` | libs-base | program | [#822](https://github.com/gnustep/libs-base/pull/822) | GSXFormsKit |
+| `sax-handler-calloc` | libs-base | program | [#830](https://github.com/gnustep/libs-base/pull/830) | RDLKit |
+| `xmlns-attribute` | libs-base | test | [#835](https://github.com/gnustep/libs-base/pull/835) | RDLKit |
+| `nsxmlnode-string-value-escaping` | libs-base | test | [#825](https://github.com/gnustep/libs-base/pull/825) | (none: ODataStore uses it from here) |
+| `nsxmlnode-attribute-prefix` | libs-base | test | [#824](https://github.com/gnustep/libs-base/pull/824) | (none: WorkflowKit's designer reads an attribute's URI instead) |
+| `sortdescriptor-nil-first` | libs-base | test | [#831](https://github.com/gnustep/libs-base/pull/831) | (none: FreeCoreData's in-memory sorts and ORMKit's paging rely on it from here) |
+| `nsxml-default-namespace` | libs-base | test | [#820](https://github.com/gnustep/libs-base/pull/820) | (none: ODataStore uses it from here) |
+| `nsxml-prefixed-descendants` | libs-base | test | [#821](https://github.com/gnustep/libs-base/pull/821) | (none: WorkflowKit uses it from here) |
+| `nsxml-default-namespace-descendants` | libs-base | test | [#819](https://github.com/gnustep/libs-base/pull/819) | (none: WorkflowKit uses it from here) |
+| `nsxmlelement-attribute-private-doc` | libs-base | program | [#823](https://github.com/gnustep/libs-base/pull/823) | (none: WorkflowKit uses it from here) |
+| `decimal-plain-notation` | libs-base | test | [#814](https://github.com/gnustep/libs-base/pull/814) | (none: WorkflowKit uses it from here) |
+| `string-diacritic-insensitive-search` | libs-base | test | [#832](https://github.com/gnustep/libs-base/pull/832) | (none: ODataStore uses it from here) |
+| `keyedunarchiver-non-archive` | libs-base | test | [#818](https://github.com/gnustep/libs-base/pull/818) | (none: ODataStore uses it from here) |
+| `urlprotocol-relative-redirect` | libs-base | test | [#834](https://github.com/gnustep/libs-base/pull/834) | (none: ODataStore uses it from here) |
+| `urlprotocol-multipart-body` | libs-base | test | [#833](https://github.com/gnustep/libs-base/pull/833) | (none: ODataStore uses it from here) |
+| `expression-function-names` | libs-base | test | [#816](https://github.com/gnustep/libs-base/pull/816) | (none: ODataStore works around it) |
+| `predicate-matches-line-anchors` | libs-base | test | [#828](https://github.com/gnustep/libs-base/pull/828) | (none) |
+| `predicate-like-wildcards` | libs-base | test | [#827](https://github.com/gnustep/libs-base/pull/827) | (none) |
+| `bundle-load-and-return-error` | libs-base | test | [#811](https://github.com/gnustep/libs-base/pull/811) | (none: WorkflowKit's plugin loading uses it from here) |
+| `arraycontroller-selection-kvo` | libs-gui | test | [#977](https://github.com/gnustep/libs-gui/pull/977) | gnustep-coredata |
+| `tableview-column-autoresizing-style` | libs-gui | test | [#982](https://github.com/gnustep/libs-gui/pull/982) | gnustep-coredata |
+| `xib-date-picker` | libs-gui | none | [#984](https://github.com/gnustep/libs-gui/pull/984) | gnustep-coredata |
+| `action-sender-lifetime` | libs-gui | test | [#976](https://github.com/gnustep/libs-gui/pull/976) | GSXFormsKit, HomeRow |
+| `tableau-expression-lifetime-test` | libs-gui | test only | [#980](https://github.com/gnustep/libs-gui/pull/980) | (new: the fix is already upstream) |
+| `tracking-walk-retains-subviews` | libs-gui | program | [#983](https://github.com/gnustep/libs-gui/pull/983) | GSXFormsKit, HomeRow |
+| `pdf-print-operation` | libs-gui | program | [#979](https://github.com/gnustep/libs-gui/pull/979) | RDLKit |
+| `graphicscontext-backend-recursion` | libs-gui | program | [#978](https://github.com/gnustep/libs-gui/pull/978) | RDLKit |
+| `tableview-bound-value-transform` | libs-gui | test | [#981](https://github.com/gnustep/libs-gui/pull/981) | (none: WorkflowKit uses it from here) |
+| `cgrectunion-size` | libs-opal | none | [#71](https://github.com/gnustep/libs-opal/pull/71) | GSXFormsKit |
+| `freetype-advance-without-size` | libs-opal | test | [#72](https://github.com/gnustep/libs-opal/pull/72) | (none: XFormsKit uses it from here) |
+| `cfstring-overrelease` | libs-corebase | none | [#166](https://github.com/gnustep/libs-corebase/pull/166) | gnustep-build |
+| `keep-nib-textfield-bezel` | gershwin-eau-theme | none | [#62](https://github.com/gershwin-desktop/gershwin-eau-theme/pull/62) | gnustep-coredata |
+| `nsalert-window-ownership` | gershwin-eau-theme | none | [#63](https://github.com/gershwin-desktop/gershwin-eau-theme/pull/63) | gnustep-build |
 
 Re-run that check before sending anything: `Scripts/apply-patches.sh` on a
 fresh checkout is the quickest form of it.
