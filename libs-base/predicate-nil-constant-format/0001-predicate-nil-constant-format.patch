@@ -1,0 +1,91 @@
+From ba7805a979bee4f58665d77f31df522404567d25 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Wed, 7 Oct 2026 17:57:46 +0000
+Subject: [PATCH] NSPredicate: a nil constant prints as nil
+
+A constant expression whose value is nil or NSNull printed as "(null)"
+or "<null>", which no predicate parser reads back: "title != nil" came
+out as "title != <null>", so writing a predicate out and reading it
+again failed - a Core Data model saved on GNUstep, with a fetch request
+or a partial index comparing with nil, could not be compiled again.
+Apple's Foundation prints a nil constant as nil.  This one parses nil
+to NSNull, so an NSNull constant is printed as nil too, and reads back
+to what it was.
+
+Tests/base/NSPredicate/nilConstant.m fails three of its six tests
+without the change, and its set stops where the format does not parse
+back; it passes with it.
+---
+ Source/NSPredicate.m                 |  4 +++
+ Tests/base/NSPredicate/nilConstant.m | 44 ++++++++++++++++++++++++++++
+ 2 files changed, 48 insertions(+)
+ create mode 100644 Tests/base/NSPredicate/nilConstant.m
+
+diff --git a/Source/NSPredicate.m b/Source/NSPredicate.m
+index 15fd99a62..266471756 100644
+--- a/Source/NSPredicate.m
++++ b/Source/NSPredicate.m
+@@ -2452,6 +2452,10 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
+ 
+ - (NSString *) description
+ {
++  if (nil == _obj || [_obj isKindOfClass: [NSNull class]])
++    {
++      return @"nil";
++    }
+   if ([_obj isKindOfClass: [NSString class]])
+     {
+       NSMutableString	*result = nil;
+diff --git a/Tests/base/NSPredicate/nilConstant.m b/Tests/base/NSPredicate/nilConstant.m
+new file mode 100644
+index 000000000..e4608d3cc
+--- /dev/null
++++ b/Tests/base/NSPredicate/nilConstant.m
+@@ -0,0 +1,44 @@
++#import "ObjectTesting.h"
++#import <Foundation/NSAutoreleasePool.h>
++#import <Foundation/NSDictionary.h>
++#import <Foundation/NSExpression.h>
++#import <Foundation/NSNull.h>
++#import <Foundation/NSPredicate.h>
++#import <Foundation/NSString.h>
++
++int main()
++{
++  NSAutoreleasePool     *arp = [NSAutoreleasePool new];
++  NSDictionary          *named;
++  NSDictionary          *unnamed;
++  NSPredicate           *p;
++  NSPredicate           *again;
++
++  named = [NSDictionary dictionaryWithObject: @"ada" forKey: @"title"];
++  unnamed = [NSDictionary dictionary];
++
++  START_SET("a nil constant reads back as nil")
++
++  PASS_EQUAL([[NSExpression expressionForConstantValue: nil] description],
++    @"nil", "a nil constant prints as nil")
++  PASS_EQUAL([[NSExpression expressionForConstantValue: [NSNull null]]
++    description], @"nil", "and so does a null one")
++
++  p = [NSPredicate predicateWithFormat: @"title != nil"];
++  PASS_EQUAL([p predicateFormat], @"title != nil",
++    "a predicate comparing with nil prints it so")
++
++  again = [NSPredicate predicateWithFormat: [p predicateFormat]];
++  PASS(again != nil, "and the format parses back")
++  PASS([again evaluateWithObject: named] && ![again evaluateWithObject: unnamed],
++    "to a predicate that means the same")
++
++  p = [NSPredicate predicateWithFormat: @"title == NULL"];
++  PASS([[p predicateFormat] hasSuffix: @" nil"],
++    "NULL is printed as nil too")
++
++  END_SET("a nil constant reads back as nil")
++
++  [arp release];
++  return 0;
++}
+-- 
+2.43.0
+

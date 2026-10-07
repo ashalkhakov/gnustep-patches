@@ -51,6 +51,7 @@ in use.
 | `predicate-subquery` | libs-base | test | [#829](https://github.com/gnustep/libs-base/pull/829) | gnustep-coredata |
 | `selector-and-fetch-expressions` | libs-base | test | not sent yet | gnustep-coredata |
 | `predicate-format-expression-arguments` | libs-base | test | not sent yet | gnustep-coredata |
+| `predicate-nil-constant-format` | libs-base | test | not sent yet | gnustep-coredata |
 | `constant-expression-copy` | libs-base | test | [#812](https://github.com/gnustep/libs-base/pull/812) | (none: FreeCoreData's fix-managed-object-constants branch stops copying fetch predicates) |
 | `dateformatter-cell-behavior` | libs-base | test | [#813](https://github.com/gnustep/libs-base/pull/813) | gnustep-coredata |
 | `keyedarchiver-secure-coding` | libs-base | test | [#817](https://github.com/gnustep/libs-base/pull/817) | gnustep-coredata |
@@ -187,6 +188,20 @@ master in order with no fuzz. Two neighbouring differences from Apple are
 not fixed here: an expression substituted for a `$variable` is wrapped as a
 constant too, and an aggregate literal `{a, b}` parses as a constant array
 whose `-collection` raises.
+
+Added on 2026-10-07 against `libs-base` e6de7b7db:
+`predicate-nil-constant-format`. A constant expression whose value is nil
+or `NSNull` printed as `(null)` or `<null>`, which no parser reads back, so
+`title != nil` came out as `title != <null>` and a model saved on GNUstep
+with a fetch request or partial index comparing with nil could not be
+compiled again (found by FreeCoreData's fetch index round trip). Apple's
+Foundation prints nil; this one parses nil to `NSNull`, so `NSNull` prints
+as nil too. `nilConstant.m` fails three of its six checks without the fix,
+its set stopping where the format does not parse back, and passes with it;
+`NSPredicate` (341) passes with all libs-base patches applied in order.
+Apple also prints `==` where this one prints `=`, and spells a function
+call's arguments in one pair of parentheses where this one uses two; both
+still parse, and are left alone.
 
 Where the column says **test**, the patch adds a test to the project's own
 suite (`Tests/base/...`, run by `gnustep-tests`), so the fix and the thing
