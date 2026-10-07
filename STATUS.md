@@ -34,6 +34,14 @@ pull requests were opened against `main` and closed on 2026-10-07:
 is now that commit; `nsalert-window-ownership` (#63) has left, because `dev`
 fixed the same ownership bug itself, handing `_window` its own +1.
 
+A consumer that moves its pin past 8ec8484 has to build Eau from `dev`
+(`git clone -b dev ...`) at the same time, or `keep-nib-textfield-bezel`
+fails to apply to `main` and the build stops.  FreeCoreData and
+gnustep-coredata apply the Eau patches and need this.  HomeRow, NativeORM2,
+RDLKit, UDQuakeTools and XFormsKit clone Eau without patches, so for them
+`dev` is only the branch Gershwin actually maintains.  gnustep-build is not
+in use.
+
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
 | `autoreleased-return-value` | libobjc2 | test | [#426](https://github.com/gnustep/libobjc2/pull/426) closed unmerged | (none: ODataStore works around it) |
