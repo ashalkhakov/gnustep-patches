@@ -20,7 +20,11 @@ until another route upstream is settled.  `stack-block-retain` has since
 left: libobjc2 fixed the same bug independently in fd475057c ("Fix memory
 leak of block retained by another block", 2026-10-06) - the same early
 return for a stack block in `retain()`, with its own `Test/BlockCapture_arc.m`
-- and our patch no longer applies on top of it.
+- and our patch no longer applies on top of it.  `sax-handler-calloc` was
+merged as [#830](https://github.com/gnustep/libs-base/pull/830)
+(434b1f806, 2026-10-06).  RDLKit, which the table listed as carrying it,
+has no copy of its own: it applies this repository at a pinned commit, and
+`apply-patches.sh` skips a patch that is already upstream.
 
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
@@ -34,7 +38,6 @@ return for a stack block in `retain()`, with its own `Test/BlockCapture_arc.m`
 | `dateformatter-cell-behavior` | libs-base | test | [#813](https://github.com/gnustep/libs-base/pull/813) | gnustep-coredata |
 | `keyedarchiver-secure-coding` | libs-base | test | [#817](https://github.com/gnustep/libs-base/pull/817) | gnustep-coredata |
 | `nsxmlelement-addattribute-value-doc` | libs-base | program | [#822](https://github.com/gnustep/libs-base/pull/822) | GSXFormsKit |
-| `sax-handler-calloc` | libs-base | program | [#830](https://github.com/gnustep/libs-base/pull/830) | RDLKit |
 | `xmlns-attribute` | libs-base | test | [#835](https://github.com/gnustep/libs-base/pull/835) | RDLKit |
 | `nsxmlnode-string-value-escaping` | libs-base | test | [#825](https://github.com/gnustep/libs-base/pull/825) | (none: ODataStore uses it from here) |
 | `nsxmlnode-attribute-prefix` | libs-base | test | [#824](https://github.com/gnustep/libs-base/pull/824) | (none: WorkflowKit's designer reads an attribute's URI instead) |

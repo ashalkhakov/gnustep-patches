@@ -272,9 +272,8 @@ There are two, both worth patching upstream on their own.
 `GSXML.m:3801` allocates an `xmlSAXHandler` with `malloc` and hands it straight
 to `xmlSAX2InitDefaultSAXHandler`, which begins `if (hdlr->initialized != 0)
 return;`. When the uninitialised field happens to be non-zero the handler is
-left as it was found. `calloc` fixes it: see `../gnustep-base-sax-handler-calloc.patch`, applied by
-`.github/scripts/dependencies.sh`, with `sax-handler-init.m` beside this file
-as its reproduction. In practice `_initLibXML` goes on to call
+left as it was found. `calloc` fixes it, and libs-base 434b1f806 (#830)
+does that upstream. In practice `_initLibXML` goes on to call
 `xmlSAXVersion()`, which re-establishes the callbacks, so what this costs is an
 uninitialised read on every parse rather than a broken parser.
 
