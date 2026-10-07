@@ -41,6 +41,13 @@ When the fix is ready it is pushed here, to `gnustep-patches`
 it up from here by pinned commit. Upstreaming happens from here too, one
 branch per fix; nothing is sent from the project that found the bug.
 
+Gershwin's projects (`gershwin-desktop/*`, Eau among them) merge only into
+`dev`, never into `main`, which is their default branch. Write and check
+their patches against `dev`, branch from `dev`, and open the pull request
+with `--base dev`. A pull request against `main` also builds with an older
+toolchain that fails for unrelated reasons, and gets closed. The other
+projects take `master`.
+
 ## Writing one
 
 **The reasoning goes in the commit message, not in comments.** Maintainers

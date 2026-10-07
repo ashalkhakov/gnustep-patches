@@ -26,6 +26,14 @@ merged as [#830](https://github.com/gnustep/libs-base/pull/830)
 has no copy of its own: it applies this repository at a pinned commit, and
 `apply-patches.sh` skips a patch that is already upstream.
 
+Gershwin merges only into `dev`, never `main`, so its patches here are made
+against `dev` and `Scripts/build-gnustep.sh` builds Eau from it.  Both Eau
+pull requests were opened against `main` and closed on 2026-10-07:
+`keep-nib-textfield-bezel` (#62) was brought onto `dev` by the maintainer as
+#64, with its authorship kept and one conflict resolved, and the patch here
+is now that commit; `nsalert-window-ownership` (#63) has left, because `dev`
+fixed the same ownership bug itself, handing `_window` its own +1.
+
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
 | `autoreleased-return-value` | libobjc2 | test | [#426](https://github.com/gnustep/libobjc2/pull/426) closed unmerged | (none: ODataStore works around it) |
@@ -67,8 +75,7 @@ has no copy of its own: it applies this repository at a pinned commit, and
 | `cgrectunion-size` | libs-opal | none | [#71](https://github.com/gnustep/libs-opal/pull/71) | GSXFormsKit |
 | `freetype-advance-without-size` | libs-opal | test | [#72](https://github.com/gnustep/libs-opal/pull/72) | (none: XFormsKit uses it from here) |
 | `cfstring-overrelease` | libs-corebase | none | [#166](https://github.com/gnustep/libs-corebase/pull/166) | gnustep-build |
-| `keep-nib-textfield-bezel` | gershwin-eau-theme | none | [#62](https://github.com/gershwin-desktop/gershwin-eau-theme/pull/62) | gnustep-coredata |
-| `nsalert-window-ownership` | gershwin-eau-theme | none | [#63](https://github.com/gershwin-desktop/gershwin-eau-theme/pull/63) | gnustep-build |
+| `keep-nib-textfield-bezel` | gershwin-eau-theme | none | [#64](https://github.com/gershwin-desktop/gershwin-eau-theme/pull/64) | gnustep-coredata |
 
 Re-run that check before sending anything: `Scripts/apply-patches.sh` on a
 fresh checkout is the quickest form of it.

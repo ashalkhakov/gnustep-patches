@@ -1,4 +1,4 @@
-From 666c4bbc27df65633b42d2954c2182efd348aa29 Mon Sep 17 00:00:00 2001
+From 5504b12239e81fc785a5e3053be6bc60010211ac Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Thu, 24 Sep 2026 12:00:00 +0500
 Subject: [PATCH] Keep the bezel a nib gives a text field
@@ -17,15 +17,15 @@ default for fields made in code.
  1 file changed, 2 insertions(+), 6 deletions(-)
 
 diff --git a/NSTextFieldCell+Eau.m b/NSTextFieldCell+Eau.m
-index 0b66cd1..56f62d8 100644
+index d69207f..aa9748f 100644
 --- a/NSTextFieldCell+Eau.m
 +++ b/NSTextFieldCell+Eau.m
-@@ -262,12 +262,8 @@ titleRect.size.height += 2;
+@@ -281,12 +281,8 @@ - (id)initEauWithFrame:(NSRect)frameRect
  
  - (id)initEauWithCoder:(NSCoder *)aDecoder
  {
 -  self = [self initEauWithCoder:aDecoder];
--  if (self != nil)
+-  if (self != nil && EauThemeIsActive())
 -    {
 -      [self setBezeled: NO];
 -    }
@@ -36,5 +36,5 @@ index 0b66cd1..56f62d8 100644
  
  @end
 -- 
-2.43.0
+2.50.1 (Apple Git-155)
 
