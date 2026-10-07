@@ -1,0 +1,120 @@
+From e5f9dee89b4bc5ac2b5fc140ea9f44f4d85b33a2 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Wed, 7 Oct 2026 10:09:04 +0000
+Subject: [PATCH] NSPredicate: an expression given for %@ is that expression
+
+Given an NSExpression for %@, +expressionWithFormat: and
++predicateWithFormat: wrapped it in a constant expression, so
+FUNCTION($manager, 'f:', %@) received the expression object itself
+instead of its value, and "name IN %@" with a key path expression
+compared against an NSExpression.  Apple's Foundation uses the argument
+as the expression in its place, in an expression or a predicate, on
+either side of a comparison, as a function argument, and through
+-argumentArray: alike; any other object, an array of expressions
+included, is still a constant.
+
+Tests/base/NSPredicate/expressionArguments.m fails seven of its ten
+tests without the change and passes with it.
+---
+ Source/NSPredicate.m                         | 12 ++++
+ Tests/base/NSPredicate/expressionArguments.m | 65 ++++++++++++++++++++
+ 2 files changed, 77 insertions(+)
+ create mode 100644 Tests/base/NSPredicate/expressionArguments.m
+
+diff --git a/Source/NSPredicate.m b/Source/NSPredicate.m
+index fa8479789..15fd99a62 100644
+--- a/Source/NSPredicate.m
++++ b/Source/NSPredicate.m
+@@ -4844,6 +4844,18 @@ GSKeyPathIfKeyPath(NSExpression *expression)
+                   [self nextArg]];
+ 
+               case '@':
++                {
++                  id    arg;
++
++                  [self setScanLocation: [self scanLocation] + 1];
++                  arg = [self nextArg];
++                  if ([arg isKindOfClass: [NSExpression class]])
++                    {
++                      return arg;
++                    }
++                  return [NSExpression expressionForConstantValue: arg];
++                }
++
+               case 'c':
+               case 'C':
+               case 'd':
+diff --git a/Tests/base/NSPredicate/expressionArguments.m b/Tests/base/NSPredicate/expressionArguments.m
+new file mode 100644
+index 000000000..2224183c7
+--- /dev/null
++++ b/Tests/base/NSPredicate/expressionArguments.m
+@@ -0,0 +1,65 @@
++#import "ObjectTesting.h"
++#import <Foundation/NSAutoreleasePool.h>
++#import <Foundation/NSArray.h>
++#import <Foundation/NSDictionary.h>
++#import <Foundation/NSExpression.h>
++#import <Foundation/NSPredicate.h>
++#import <Foundation/NSString.h>
++#import <Foundation/NSValue.h>
++
++int main()
++{
++  NSAutoreleasePool     *arp = [NSAutoreleasePool new];
++  NSExpression          *path = [NSExpression expressionForKeyPath: @"tags"];
++  NSExpression          *e;
++  NSComparisonPredicate *p;
++  NSDictionary          *ada;
++
++  ada = [NSDictionary dictionaryWithObjectsAndKeys:
++    @"ada", @"name", [NSArray arrayWithObject: @"ada"], @"tags", nil];
++
++  START_SET("an expression given for %@ is that expression")
++
++  e = [NSExpression expressionWithFormat: @"%@", path];
++  PASS(e == path, "a whole expression format is the argument itself")
++
++  e = [NSExpression expressionWithFormat: @"FUNCTION($m, 'f:', %@)", path];
++  PASS([[e arguments] count] == 1 && [[e arguments] objectAtIndex: 0] == path,
++    "a function argument is the argument itself")
++  e = [NSExpression expressionWithFormat: @"FUNCTION(%@, 'uppercaseString')",
++    [NSExpression expressionForKeyPath: @"name"]];
++  PASS_EQUAL([e expressionValueWithObject: ada context: nil], @"ADA",
++    "and is evaluated as one")
++
++  e = [NSExpression expressionWithFormat: @"%@"
++                           argumentArray: [NSArray arrayWithObject: path]];
++  PASS(e == path, "the same through an argument array")
++
++  p = (NSComparisonPredicate *)[NSPredicate predicateWithFormat: @"%@ == 1", path];
++  PASS([p leftExpression] == path, "a predicate's left side")
++
++  p = (NSComparisonPredicate *)[NSPredicate predicateWithFormat: @"name IN %@", path];
++  PASS([p rightExpression] == path, "a predicate's right side")
++  PASS([p evaluateWithObject: ada], "and is evaluated as one")
++
++  END_SET("an expression given for %@ is that expression")
++
++  START_SET("anything else given for %@ is a constant")
++
++  e = [NSExpression expressionWithFormat: @"%@", @"tags"];
++  PASS([e expressionType] == NSConstantValueExpressionType
++    && [[e constantValue] isEqual: @"tags"], "a string")
++
++  e = [NSExpression expressionWithFormat: @"%@", [NSArray arrayWithObject: path]];
++  PASS([e expressionType] == NSConstantValueExpressionType,
++    "an array, even of expressions")
++
++  e = [NSExpression expressionWithFormat: @"%d", 5];
++  PASS([e expressionType] == NSConstantValueExpressionType
++    && [[e constantValue] isEqual: [NSNumber numberWithInt: 5]], "a number")
++
++  END_SET("anything else given for %@ is a constant")
++
++  [arp release];
++  return 0;
++}
+-- 
+2.43.0
+

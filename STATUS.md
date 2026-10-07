@@ -50,6 +50,7 @@ in use.
 | `expression-binary-coding` | libs-base | test | [#815](https://github.com/gnustep/libs-base/pull/815) | gnustep-coredata |
 | `predicate-subquery` | libs-base | test | [#829](https://github.com/gnustep/libs-base/pull/829) | gnustep-coredata |
 | `selector-and-fetch-expressions` | libs-base | test | not sent yet | gnustep-coredata |
+| `predicate-format-expression-arguments` | libs-base | test | not sent yet | gnustep-coredata |
 | `constant-expression-copy` | libs-base | test | [#812](https://github.com/gnustep/libs-base/pull/812) | (none: FreeCoreData's fix-managed-object-constants branch stops copying fetch predicates) |
 | `dateformatter-cell-behavior` | libs-base | test | [#813](https://github.com/gnustep/libs-base/pull/813) | gnustep-coredata |
 | `keyedarchiver-secure-coding` | libs-base | test | [#817](https://github.com/gnustep/libs-base/pull/817) | gnustep-coredata |
@@ -171,6 +172,21 @@ fails two of its six checks without the fix and passes with it;
 `NSXMLElement` (147), `NSXMLNode` (266) and `NSXMLDocument` (39) pass
 with all 25 libs-base patches, which apply to that master in order with
 no fuzz. The patch applies to master on its own as well.
+
+Added on 2026-10-07 against `libs-base` e6de7b7db:
+`predicate-format-expression-arguments`. Given an `NSExpression` for `%@`,
+`+expressionWithFormat:` and `+predicateWithFormat:` wrapped it in a
+constant, where Apple's Foundation uses the expression itself - so an
+inferred mapping's `FUNCTION($manager, ..., %@)` handed the migration
+manager an expression object instead of the related objects (found by
+FreeCoreData, which now builds that expression rather than formatting it).
+`expressionArguments.m` fails seven of its ten checks without the fix and
+passes with it, and Apple's Foundation gives all ten the same answers;
+`NSPredicate` (335) passes with all libs-base patches, which apply to that
+master in order with no fuzz. Two neighbouring differences from Apple are
+not fixed here: an expression substituted for a `$variable` is wrapped as a
+constant too, and an aggregate literal `{a, b}` parses as a constant array
+whose `-collection` raises.
 
 Where the column says **test**, the patch adds a test to the project's own
 suite (`Tests/base/...`, run by `gnustep-tests`), so the fix and the thing
