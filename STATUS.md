@@ -30,13 +30,17 @@ Gershwin merges only into `dev`, never `main`, so its patches here are made
 against `dev` and `Scripts/build-gnustep.sh` builds Eau from it.  Both Eau
 pull requests were opened against `main` and closed on 2026-10-07:
 `keep-nib-textfield-bezel` (#62) was brought onto `dev` by the maintainer as
-#64, with its authorship kept and one conflict resolved, and the patch here
-is now that commit; `nsalert-window-ownership` (#63) has left, because `dev`
-fixed the same ownership bug itself, handing `_window` its own +1.
+#64, with its authorship kept and one conflict resolved; `nsalert-window-ownership`
+(#63) has left, because `dev` fixed the same ownership bug itself, handing
+`_window` its own +1.  `keep-nib-textfield-bezel` left on 2026-10-08: #64
+merged, and `dev`'s 01be00b then took the initializers' default away
+altogether (a field keeps its bezel unless the application makes it
+non-editable), so the patch neither applied nor reverse-applied and stopped
+every build of Eau.  No Eau patch is carried now.
 
 A consumer that moves its pin past 8ec8484 has to build Eau from `dev`
-(`git clone -b dev ...`) at the same time, or `keep-nib-textfield-bezel`
-fails to apply to `main` and the build stops.  FreeCoreData and
+(`git clone -b dev ...`) at the same time: that is the branch Gershwin
+maintains, and the one any Eau patch here is made against.  FreeCoreData and
 gnustep-coredata apply the Eau patches and need this.  HomeRow, NativeORM2,
 RDLKit, UDQuakeTools and XFormsKit clone Eau without patches, so for them
 `dev` is only the branch Gershwin actually maintains.  gnustep-build is not
@@ -86,7 +90,6 @@ in use.
 | `cgrectunion-size` | libs-opal | none | [#71](https://github.com/gnustep/libs-opal/pull/71) | GSXFormsKit |
 | `freetype-advance-without-size` | libs-opal | test | [#72](https://github.com/gnustep/libs-opal/pull/72) | (none: XFormsKit uses it from here) |
 | `cfstring-overrelease` | libs-corebase | none | [#166](https://github.com/gnustep/libs-corebase/pull/166) | gnustep-build |
-| `keep-nib-textfield-bezel` | gershwin-eau-theme | none | [#64](https://github.com/gershwin-desktop/gershwin-eau-theme/pull/64) | gnustep-coredata |
 
 Re-run that check before sending anything: `Scripts/apply-patches.sh` on a
 fresh checkout is the quickest form of it.
