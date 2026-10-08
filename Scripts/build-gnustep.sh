@@ -25,11 +25,12 @@
 #   CLEAN            1 empties the prefix's contents first (never the prefix)
 #   <COMPONENT>_REF  build that component at a commit instead of master,
 #                    e.g. LIBS_BASE_REF=4579c681f
-#   EAU_REF          default dev: Gershwin merges only into dev, and the
-#                    patches here are made against it
+#   EAU_REF          default a commit of dev, the branch Gershwin merges into
+#                    and the patches here are made against: pinned, so a
+#                    change on dev cannot stop a build; moved on purpose
 set -eu
 
-EAU_REF=${EAU_REF:-dev}
+EAU_REF=${EAU_REF:-01be00b5216b0ad508f30d66fa0d6734f44052c2}
 
 PATCHES_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 

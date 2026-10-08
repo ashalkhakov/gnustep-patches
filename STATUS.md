@@ -27,7 +27,9 @@ has no copy of its own: it applies this repository at a pinned commit, and
 `apply-patches.sh` skips a patch that is already upstream.
 
 Gershwin merges only into `dev`, never `main`, so its patches here are made
-against `dev` and `Scripts/build-gnustep.sh` builds Eau from it.  Both Eau
+against `dev` and `Scripts/build-gnustep.sh` builds Eau from it, at a pinned
+commit (`EAU_REF`, 01be00b since 2026-10-08): a change on `dev` broke every
+build once, and a pin is moved on purpose.  Both Eau
 pull requests were opened against `main` and closed on 2026-10-07:
 `keep-nib-textfield-bezel` (#62) was brought onto `dev` by the maintainer as
 #64, with its authorship kept and one conflict resolved; `nsalert-window-ownership`
