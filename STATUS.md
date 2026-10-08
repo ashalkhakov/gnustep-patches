@@ -52,6 +52,7 @@ in use.
 | `selector-and-fetch-expressions` | libs-base | test | not sent yet | gnustep-coredata |
 | `predicate-format-expression-arguments` | libs-base | test | not sent yet | gnustep-coredata |
 | `predicate-nil-constant-format` | libs-base | test | not sent yet | gnustep-coredata |
+| `predicate-format-nil-arguments` | libs-base | test | not sent yet | (none) |
 | `constant-expression-copy` | libs-base | test | [#812](https://github.com/gnustep/libs-base/pull/812) | (none: FreeCoreData's fix-managed-object-constants branch stops copying fetch predicates) |
 | `dateformatter-cell-behavior` | libs-base | test | [#813](https://github.com/gnustep/libs-base/pull/813) | gnustep-coredata |
 | `keyedarchiver-secure-coding` | libs-base | test | [#817](https://github.com/gnustep/libs-base/pull/817) | gnustep-coredata |
@@ -202,6 +203,18 @@ its set stopping where the format does not parse back, and passes with it;
 Apple also prints `==` where this one prints `=`, and spells a function
 call's arguments in one pair of parentheses where this one uses two; both
 still parse, and are left alone.
+
+Added on 2026-10-08 against `libs-base` 2f1bf18:
+`predicate-format-nil-arguments`. `+predicateWithFormat:` and
+`+expressionWithFormat:` gather their variadic arguments into an array
+before parsing, so a nil object argument raised "Tried to add nil to array"
+and `owner == %@` could not be made for no owner (found by SimpleNotes'
+per-user notebooks, whose server compares with the signed-in user, nil for
+an anonymous request). Apple's Foundation compares with nil; a nil argument
+is now the `NSNull` constant the literal `nil` already parses to, and the
+arguments after it keep their places. `nilArguments.m` fails eight of its
+ten checks without the fix and passes with it; `NSPredicate` (351) passes
+with all libs-base patches applied in order.
 
 Where the column says **test**, the patch adds a test to the project's own
 suite (`Tests/base/...`, run by `gnustep-tests`), so the fix and the thing

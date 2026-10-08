@@ -1,0 +1,101 @@
+From 289b20350b3da44ab131bcf3327296ff80671f5a Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Thu, 8 Oct 2026 05:15:26 +0000
+Subject: [PATCH] NSPredicate: a nil argument for %@ is nil
+
++predicateWithFormat: and +expressionWithFormat: gather their variadic
+arguments into an array before parsing, and a nil object argument
+raised NSInvalidArgumentException ("Tried to add nil to array"), so
+[NSPredicate predicateWithFormat: @"owner == %@", nil] could not be
+made.  Apple's Foundation takes nil there and compares with nil, the
+same predicate as the literal "owner == nil", which this scanner already
+reads as an NSNull constant; a nil argument now becomes that constant,
+and the arguments after it keep their places.
+
+Tests/base/NSPredicate/nilArguments.m fails eight of its ten tests
+without the change and passes with it.
+---
+ Source/NSPredicate.m                  |  8 +++--
+ Tests/base/NSPredicate/nilArguments.m | 51 +++++++++++++++++++++++++++
+ 2 files changed, 57 insertions(+), 2 deletions(-)
+ create mode 100644 Tests/base/NSPredicate/nilArguments.m
+
+diff --git a/Source/NSPredicate.m b/Source/NSPredicate.m
+index dabf91d..ab43f5b 100644
+--- a/Source/NSPredicate.m
++++ b/Source/NSPredicate.m
+@@ -358,8 +358,12 @@ argumentsFromFormat(NSString *format, va_list args)
+ 
+               case 'K':
+               case '@':
+-                ptr++;
+-                [arr addObject: va_arg(args, id)];
++                {
++                  id    arg = va_arg(args, id);
++
++                  ptr++;
++                  [arr addObject: (arg == nil) ? [NSNull null] : arg];
++                }
+                 break;
+ 
+               case 'c':
+diff --git a/Tests/base/NSPredicate/nilArguments.m b/Tests/base/NSPredicate/nilArguments.m
+new file mode 100644
+index 0000000..5cc4e36
+--- /dev/null
++++ b/Tests/base/NSPredicate/nilArguments.m
+@@ -0,0 +1,51 @@
++#import "ObjectTesting.h"
++#import <Foundation/NSAutoreleasePool.h>
++#import <Foundation/NSDictionary.h>
++#import <Foundation/NSException.h>
++#import <Foundation/NSExpression.h>
++#import <Foundation/NSPredicate.h>
++#import <Foundation/NSString.h>
++
++int main()
++{
++  NSAutoreleasePool     *arp = [NSAutoreleasePool new];
++  NSDictionary          *ada;
++  NSDictionary          *none;
++  NSPredicate           *p = nil;
++  NSExpression          *e = nil;
++  NSString              *missing = nil;
++
++  ada = [NSDictionary dictionaryWithObjectsAndKeys:
++    @"ada", @"name", @"london", @"city", nil];
++  none = [NSDictionary dictionaryWithObjectsAndKeys:
++    @"london", @"city", nil];
++
++  START_SET("a nil argument for %@ is nil")
++
++  PASS_RUNS((p = [NSPredicate predicateWithFormat: @"name == %@", missing]),
++    "a predicate takes a nil argument")
++  PASS_EQUAL([p predicateFormat],
++    [[NSPredicate predicateWithFormat: @"name == nil"] predicateFormat],
++    "and compares with nil, as written out")
++  PASS([p evaluateWithObject: none], "matching an object without the value")
++  PASS(![p evaluateWithObject: ada], "and not one with it")
++
++  PASS_RUNS((p = [NSPredicate predicateWithFormat: @"%K == %@", @"name", missing]),
++    "after a key")
++  PASS([p evaluateWithObject: none], "the same")
++
++  PASS_RUNS((p = [NSPredicate predicateWithFormat:
++    @"name == %@ AND city == %@", missing, @"london"]),
++    "an argument after a nil one")
++  PASS([p evaluateWithObject: none], "is still its own")
++
++  PASS_RUNS((e = [NSExpression expressionWithFormat: @"%@", missing]),
++    "an expression takes a nil argument")
++  PASS([e expressionType] == NSConstantValueExpressionType,
++    "as a constant")
++
++  END_SET("a nil argument for %@ is nil")
++
++  [arp release];
++  return 0;
++}
+-- 
+2.43.0
+
