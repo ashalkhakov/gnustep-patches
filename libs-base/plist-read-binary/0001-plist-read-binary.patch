@@ -1,0 +1,360 @@
+From 681a3f07bb54319356c19b5ab65bd75f9337c533 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Thu, 8 Oct 2026 15:46:32 +0000
+Subject: [PATCH] NSDictionary, NSArray: read a binary property list from a
+ file or URL
+
+-initWithContentsOfFile: and -initWithContentsOfURL: of NSDictionary and
+NSArray read the file as an NSString and parsed it with -propertyList,
+which knows the text formats only: a binary property list, as Apple's
+Foundation and NSPropertyListSerialization write by default, was "not
+string data using Unicode (UTF-8)" and gave nil, so
++dictionaryWithContentsOfFile: could not read back a file this same
+library had written.  They read the data and parse it with
+NSPropertyListSerialization now, which recognises binary, XML and
+OpenStep alike; an array is still returned mutable.
+
+Tests/base/NSPropertyList/binaryPropertyLists.m fails five of its ten
+tests without the change and passes with it; NSDictionary (143),
+NSArray (139), NSMutableDictionary (68), NSPropertyList (29),
+PropertyLists (133) and NSUserDefaults (94) pass with every libs-base
+patch applied.
+---
+ Source/NSArray.m                              | 49 ++++++------
+ Source/NSDictionary.m                         | 49 ++++++------
+ .../base/NSPropertyList/binaryPropertyLists.m | 79 +++++++++++++++++++
+ 3 files changed, 133 insertions(+), 44 deletions(-)
+ create mode 100644 Tests/base/NSPropertyList/binaryPropertyLists.m
+
+diff --git a/Source/NSArray.m b/Source/NSArray.m
+index 142e0e5..2dbd779 100644
+--- a/Source/NSArray.m
++++ b/Source/NSArray.m
+@@ -34,6 +34,7 @@
+ #import "Foundation/NSEnumerator.h"
+ #import "Foundation/NSCoder.h"
+ #import "Foundation/NSData.h"
++#import "Foundation/NSPropertyList.h"
+ #import "Foundation/NSRange.h"
+ #import "Foundation/NSException.h"
+ #import "Foundation/NSAutoreleasePool.h"
+@@ -798,24 +799,23 @@ static SEL	rlSel;
+  * <p>Initialises the array with the contents of the specified file,
+  * which must contain an array in property-list format.
+  * </p>
+- * <p>In GNUstep, the property-list format may be either the OpenStep
+- * format (ASCII data), or the MacOS-X format (UTF-8 XML data) ... this
+- * method will recognise which it is.
++ * <p>The property list may be in any format NSPropertyListSerialization
++ * reads: binary, XML or OpenStep ... this method recognises which it is.
+  * </p>
+  * <p>If there is a failure to load the file for any reason, the receiver
+  * will be released, the method will return nil, and a warning may be logged.
+  * </p>
+- * <p>Works by invoking [NSString-initWithContentsOfFile:] and
+- * [NSString-propertyList] then checking that the result is an array.
++ * <p>Works by reading the data and parsing it with
++ * [NSPropertyListSerialization+propertyListWithData:options:format:error:]
++ * then checking that the result is an array.
+  * </p>
+  */
+ - (id) initWithContentsOfFile: (NSString*)file
+ {
+-  NSString 	*myString;
++  NSData	*data;
+ 
+-  myString = [[NSString allocWithZone: NSDefaultMallocZone()]
+-    initWithContentsOfFile: file];
+-  if (myString == nil)
++  data = [NSData dataWithContentsOfFile: file];
++  if (data == nil)
+     {
+       DESTROY(self);
+     }
+@@ -823,16 +823,19 @@ static SEL	rlSel;
+     {
+       id result;
+ 
++      /* Any format: the data says which (binary, XML or OpenStep). */
+       NS_DURING
+ 	{
+-	  result = [myString propertyList];
++	  result = [NSPropertyListSerialization propertyListWithData: data
++	    options: NSPropertyListMutableContainers
++	    format: NULL
++	    error: NULL];
+ 	}
+       NS_HANDLER
+ 	{
+           result = nil;
+ 	}
+       NS_ENDHANDLER
+-      RELEASE(myString);
+       if ([result isKindOfClass: NSArrayClass])
+ 	{
+ 	  //self = [self initWithArray: result];
+@@ -855,24 +858,23 @@ static SEL	rlSel;
+  * <p>Initialises the array with the contents of the specified URL,
+  * which must contain an array in property-list format.
+  * </p>
+- * <p>In GNUstep, the property-list format may be either the OpenStep
+- * format (ASCII data), or the MacOS-X format (UTF8 XML data) ... this
+- * method will recognise which it is.
++ * <p>The property list may be in any format NSPropertyListSerialization
++ * reads: binary, XML or OpenStep ... this method recognises which it is.
+  * </p>
+  * <p>If there is a failure to load the URL for any reason, the receiver
+  * will be released, the method will return nil, and a warning may be logged.
+  * </p>
+- * <p>Works by invoking [NSString-initWithContentsOfURL:] and
+- * [NSString-propertyList] then checking that the result is an array.
++ * <p>Works by reading the data and parsing it with
++ * [NSPropertyListSerialization+propertyListWithData:options:format:error:]
++ * then checking that the result is an array.
+  * </p>
+  */
+ - (id) initWithContentsOfURL: (NSURL*)aURL
+ {
+-  NSString 	*myString;
++  NSData	*data;
+ 
+-  myString = [[NSString allocWithZone: NSDefaultMallocZone()]
+-    initWithContentsOfURL: aURL];
+-  if (myString == nil)
++  data = [NSData dataWithContentsOfURL: aURL];
++  if (data == nil)
+     {
+       DESTROY(self);
+     }
+@@ -880,16 +882,19 @@ static SEL	rlSel;
+     {
+       id result;
+ 
++      /* Any format: the data says which (binary, XML or OpenStep). */
+       NS_DURING
+ 	{
+-	  result = [myString propertyList];
++	  result = [NSPropertyListSerialization propertyListWithData: data
++	    options: NSPropertyListMutableContainers
++	    format: NULL
++	    error: NULL];
+ 	}
+       NS_HANDLER
+ 	{
+           result = nil;
+ 	}
+       NS_ENDHANDLER
+-      RELEASE(myString);
+       if ([result isKindOfClass: NSArrayClass])
+ 	{
+ 	  self = [self initWithArray: result];
+diff --git a/Source/NSDictionary.m b/Source/NSDictionary.m
+index 68d5a7c..4eb1be0 100644
+--- a/Source/NSDictionary.m
++++ b/Source/NSDictionary.m
+@@ -31,6 +31,7 @@
+ #import "Foundation/NSEnumerator.h"
+ #import "Foundation/NSOrderedSet.h"
+ #import "Foundation/NSData.h"
++#import "Foundation/NSPropertyList.h"
+ #import "Foundation/NSException.h"
+ #import "Foundation/NSAutoreleasePool.h"
+ #import "Foundation/NSFileManager.h"
+@@ -636,24 +637,23 @@ static SEL	appSel;
+  * <p>Initialises the dictionary with the contents of the specified file,
+  * which must contain a dictionary in property-list format.
+  * </p>
+- * <p>In GNUstep, the property-list format may be either the OpenStep
+- * format (ASCII data), or the MacOS-X format (UTF-8 XML data) ... this
+- * method will recognise which it is.
++ * <p>The property list may be in any format NSPropertyListSerialization
++ * reads: binary, XML or OpenStep ... this method recognises which it is.
+  * </p>
+  * <p>If there is a failure to load the file for any reason, the receiver
+  * will be released and the method will return nil.
+  * </p>
+- * <p>Works by invoking [NSString-initWithContentsOfFile:] and
+- * [NSString-propertyList] then checking that the result is a dictionary.
++ * <p>Works by reading the data and parsing it with
++ * [NSPropertyListSerialization+propertyListWithData:options:format:error:]
++ * then checking that the result is a dictionary.
+  * </p>
+  */
+ - (id) initWithContentsOfFile: (NSString*)path
+ {
+-  NSString 	*myString;
++  NSData	*data;
+ 
+-  myString = [[NSString allocWithZone: NSDefaultMallocZone()]
+-    initWithContentsOfFile: path];
+-  if (myString == nil)
++  data = [NSData dataWithContentsOfFile: path];
++  if (data == nil)
+     {
+       DESTROY(self);
+     }
+@@ -661,16 +661,19 @@ static SEL	appSel;
+     {
+       id result;
+ 
++      /* Any format: the data says which (binary, XML or OpenStep). */
+       NS_DURING
+ 	{
+-	  result = [myString propertyList];
++	  result = [NSPropertyListSerialization propertyListWithData: data
++	    options: NSPropertyListImmutable
++	    format: NULL
++	    error: NULL];
+ 	}
+       NS_HANDLER
+ 	{
+           result = nil;
+ 	}
+       NS_ENDHANDLER
+-      RELEASE(myString);
+       if ([result isKindOfClass: NSDictionaryClass])
+ 	{
+ 	  self = [self initWithDictionary: result];
+@@ -689,24 +692,23 @@ static SEL	appSel;
+  * <p>Initialises the dictionary with the contents of the specified URL,
+  * which must contain a dictionary in property-list format.
+  * </p>
+- * <p>In GNUstep, the property-list format may be either the OpenStep
+- * format (ASCII data), or the MacOS-X format (UTF-8 XML data) ... this
+- * method will recognise which it is.
++ * <p>The property list may be in any format NSPropertyListSerialization
++ * reads: binary, XML or OpenStep ... this method recognises which it is.
+  * </p>
+  * <p>If there is a failure to load the URL for any reason, the receiver
+  * will be released and the method will return nil.
+  * </p>
+- * <p>Works by invoking [NSString-initWithContentsOfURL:] and
+- * [NSString-propertyList] then checking that the result is a dictionary.
++ * <p>Works by reading the data and parsing it with
++ * [NSPropertyListSerialization+propertyListWithData:options:format:error:]
++ * then checking that the result is a dictionary.
+  * </p>
+  */
+ - (id) initWithContentsOfURL: (NSURL*)aURL
+ {
+-  NSString 	*myString;
++  NSData	*data;
+ 
+-  myString = [[NSString allocWithZone: NSDefaultMallocZone()]
+-    initWithContentsOfURL: aURL];
+-  if (myString == nil)
++  data = [NSData dataWithContentsOfURL: aURL];
++  if (data == nil)
+     {
+       DESTROY(self);
+     }
+@@ -714,16 +716,19 @@ static SEL	appSel;
+     {
+       id result;
+ 
++      /* Any format: the data says which (binary, XML or OpenStep). */
+       NS_DURING
+ 	{
+-	  result = [myString propertyList];
++	  result = [NSPropertyListSerialization propertyListWithData: data
++	    options: NSPropertyListImmutable
++	    format: NULL
++	    error: NULL];
+ 	}
+       NS_HANDLER
+ 	{
+           result = nil;
+ 	}
+       NS_ENDHANDLER
+-      RELEASE(myString);
+       if ([result isKindOfClass: NSDictionaryClass])
+ 	{
+ 	  self = [self initWithDictionary: result];
+diff --git a/Tests/base/NSPropertyList/binaryPropertyLists.m b/Tests/base/NSPropertyList/binaryPropertyLists.m
+new file mode 100644
+index 0000000..1c1cd0c
+--- /dev/null
++++ b/Tests/base/NSPropertyList/binaryPropertyLists.m
+@@ -0,0 +1,79 @@
++#import "ObjectTesting.h"
++#import <Foundation/NSArray.h>
++#import <Foundation/NSAutoreleasePool.h>
++#import <Foundation/NSData.h>
++#import <Foundation/NSDictionary.h>
++#import <Foundation/NSPropertyList.h>
++#import <Foundation/NSString.h>
++#import <Foundation/NSURL.h>
++#import <Foundation/NSValue.h>
++
++static NSString *
++written(id plist, NSPropertyListFormat format, NSString *name)
++{
++  NSString      *path;
++  NSData        *data;
++
++  path = [NSTemporaryDirectory() stringByAppendingPathComponent: name];
++  data = [NSPropertyListSerialization dataWithPropertyList: plist
++                                                    format: format
++                                                   options: 0
++                                                     error: NULL];
++  [data writeToFile: path atomically: YES];
++  return path;
++}
++
++int main()
++{
++  NSAutoreleasePool     *arp = [NSAutoreleasePool new];
++  NSDictionary          *dict;
++  NSArray               *array;
++  NSString              *path;
++
++  dict = [NSDictionary dictionaryWithObjectsAndKeys:
++    @"a.b.c", @"access", [NSNumber numberWithDouble: 1.5], @"expires",
++    [NSArray arrayWithObject: @"x"], @"list", nil];
++  array = [NSArray arrayWithObjects: @"one", [NSNumber numberWithInt: 2], dict, nil];
++
++  START_SET("a binary property list is read back")
++
++  path = written(dict, NSPropertyListBinaryFormat_v1_0, @"plist-binary-dict");
++  PASS_EQUAL([NSDictionary dictionaryWithContentsOfFile: path], dict,
++    "+[NSDictionary dictionaryWithContentsOfFile:]")
++  PASS_EQUAL([NSDictionary dictionaryWithContentsOfURL:
++    [NSURL fileURLWithPath: path]], dict,
++    "+[NSDictionary dictionaryWithContentsOfURL:]")
++
++  path = written(array, NSPropertyListBinaryFormat_v1_0, @"plist-binary-array");
++  PASS_EQUAL([NSArray arrayWithContentsOfFile: path], array,
++    "+[NSArray arrayWithContentsOfFile:]")
++  PASS_EQUAL([NSArray arrayWithContentsOfURL: [NSURL fileURLWithPath: path]],
++    array, "+[NSArray arrayWithContentsOfURL:]")
++  PASS([[NSArray arrayWithContentsOfFile: path]
++    isKindOfClass: [NSMutableArray class]], "and the array is mutable, as before")
++
++  END_SET("a binary property list is read back")
++
++  START_SET("text property lists are read as before")
++
++  path = written(dict, NSPropertyListXMLFormat_v1_0, @"plist-xml-dict");
++  PASS_EQUAL([NSDictionary dictionaryWithContentsOfFile: path], dict, "XML")
++  path = written(array, NSPropertyListOpenStepFormat, @"plist-openstep-array");
++  PASS([[NSArray arrayWithContentsOfFile: path] count] == 3, "OpenStep")
++
++  END_SET("text property lists are read as before")
++
++  START_SET("anything else is nil")
++
++  path = [NSTemporaryDirectory() stringByAppendingPathComponent: @"plist-none"];
++  [[NSData dataWithBytes: "\x01\x02\xff" length: 3] writeToFile: path atomically: YES];
++  PASS([NSDictionary dictionaryWithContentsOfFile: path] == nil, "bytes that are no property list")
++  path = written(array, NSPropertyListBinaryFormat_v1_0, @"plist-binary-array");
++  PASS([NSDictionary dictionaryWithContentsOfFile: path] == nil, "an array, for a dictionary")
++  PASS([NSDictionary dictionaryWithContentsOfFile: @"/nonexistent/plist"] == nil, "no file")
++
++  END_SET("anything else is nil")
++
++  [arp release];
++  return 0;
++}
+-- 
+2.43.0
+

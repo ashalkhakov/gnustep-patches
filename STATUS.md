@@ -59,6 +59,7 @@ in use.
 | `predicate-format-expression-arguments` | libs-base | test | not sent yet | gnustep-coredata |
 | `predicate-nil-constant-format` | libs-base | test | not sent yet | gnustep-coredata |
 | `predicate-format-nil-arguments` | libs-base | test | not sent yet | (none) |
+| `plist-read-binary` | libs-base | test | not sent yet | TopoText (SimpleNotes' SNSecretStore reads through NSPropertyListSerialization) |
 | `constant-expression-copy` | libs-base | test | [#812](https://github.com/gnustep/libs-base/pull/812) | (none: FreeCoreData's fix-managed-object-constants branch stops copying fetch predicates) |
 | `dateformatter-cell-behavior` | libs-base | test | [#813](https://github.com/gnustep/libs-base/pull/813) | gnustep-coredata |
 | `keyedarchiver-secure-coding` | libs-base | test | [#817](https://github.com/gnustep/libs-base/pull/817) | gnustep-coredata |
@@ -220,6 +221,20 @@ is now the `NSNull` constant the literal `nil` already parses to, and the
 arguments after it keep their places. `nilArguments.m` fails eight of its
 ten checks without the fix and passes with it; `NSPredicate` (351) passes
 with all libs-base patches applied in order.
+
+Added on 2026-10-08 against `libs-base` 2f1bf18: `plist-read-binary`.
+`-initWithContentsOfFile:` and `-initWithContentsOfURL:` of `NSDictionary`
+and `NSArray` read the file as an `NSString` and called `-propertyList`,
+which parses the text formats only, so a binary property list (what
+Apple's Foundation, and `NSPropertyListSerialization` here, write by
+default) was "not string data using Unicode (UTF-8)" and came back nil.
+Found by SimpleNotes on Linux: it kept a signed-in user's tokens in a
+binary property list and never read them back. They read the data and
+parse it with `NSPropertyListSerialization` now; an array is still
+returned mutable. `binaryPropertyLists.m` fails five of its ten checks
+without the fix; `NSDictionary` (143), `NSArray` (139),
+`NSMutableDictionary` (68), `NSPropertyList` (29), `PropertyLists` (133)
+and `NSUserDefaults` (94) pass with all libs-base patches applied in order.
 
 Where the column says **test**, the patch adds a test to the project's own
 suite (`Tests/base/...`, run by `gnustep-tests`), so the fix and the thing
