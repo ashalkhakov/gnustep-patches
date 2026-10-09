@@ -24,7 +24,23 @@ return for a stack block in `retain()`, with its own `Test/BlockCapture_arc.m`
 merged as [#830](https://github.com/gnustep/libs-base/pull/830)
 (434b1f806, 2026-10-06).  RDLKit, which the table listed as carrying it,
 has no copy of its own: it applies this repository at a pinned commit, and
-`apply-patches.sh` skips a patch that is already upstream.
+`apply-patches.sh` skips a patch that is already upstream.  Six more left on
+2026-10-09, merged upstream: `urlprotocol-multipart-body`
+([#833](https://github.com/gnustep/libs-base/pull/833), 2f1bf18,
+2026-10-08), `expression-self-type`
+([#810](https://github.com/gnustep/libs-base/pull/810), c788b60),
+`bundle-load-and-return-error`
+([#811](https://github.com/gnustep/libs-base/pull/811), 4458f49),
+`constant-expression-copy` ([#812](https://github.com/gnustep/libs-base/pull/812),
+a4453aa), `expression-function-names`
+([#816](https://github.com/gnustep/libs-base/pull/816), da7c651) and
+`keyedarchiver-secure-coding`
+([#817](https://github.com/gnustep/libs-base/pull/817), d357cab).
+`constant-expression-copy` was merged with a comment added beside the
+changed line, so the patch neither applied nor reverse-applied and stopped
+every build of libs-base from master; the other five reverse-apply.
+gnustep-coredata, which the table listed as carrying two of them, has no
+copy of its own either.
 
 Gershwin merges only into `dev`, never `main`, so its patches here are made
 against `dev` and `Scripts/build-gnustep.sh` builds Eau from it, at a pinned
@@ -52,7 +68,6 @@ in use.
 | --- | --- | --- | --- | --- |
 | `autoreleased-return-value` | libobjc2 | test | [#426](https://github.com/gnustep/libobjc2/pull/426) closed unmerged | (none: ODataStore works around it) |
 | `predicate-equality-options` | libs-base | test | [#826](https://github.com/gnustep/libs-base/pull/826) | gnustep-coredata |
-| `expression-self-type` | libs-base | test | [#810](https://github.com/gnustep/libs-base/pull/810) | gnustep-coredata |
 | `expression-binary-coding` | libs-base | test | [#815](https://github.com/gnustep/libs-base/pull/815) | gnustep-coredata |
 | `predicate-subquery` | libs-base | test | [#829](https://github.com/gnustep/libs-base/pull/829) | gnustep-coredata |
 | `selector-and-fetch-expressions` | libs-base | test | not sent yet | gnustep-coredata |
@@ -60,9 +75,7 @@ in use.
 | `predicate-nil-constant-format` | libs-base | test | not sent yet | gnustep-coredata |
 | `predicate-format-nil-arguments` | libs-base | test | not sent yet | (none) |
 | `plist-read-binary` | libs-base | test | not sent yet | TopoText (SimpleNotes' SNSecretStore reads through NSPropertyListSerialization) |
-| `constant-expression-copy` | libs-base | test | [#812](https://github.com/gnustep/libs-base/pull/812) | (none: FreeCoreData's fix-managed-object-constants branch stops copying fetch predicates) |
 | `dateformatter-cell-behavior` | libs-base | test | [#813](https://github.com/gnustep/libs-base/pull/813) | gnustep-coredata |
-| `keyedarchiver-secure-coding` | libs-base | test | [#817](https://github.com/gnustep/libs-base/pull/817) | gnustep-coredata |
 | `nsxmlelement-addattribute-value-doc` | libs-base | program | [#822](https://github.com/gnustep/libs-base/pull/822) | GSXFormsKit |
 | `xmlns-attribute` | libs-base | test | [#835](https://github.com/gnustep/libs-base/pull/835) | RDLKit |
 | `nsxmlnode-string-value-escaping` | libs-base | test | [#825](https://github.com/gnustep/libs-base/pull/825) | (none: ODataStore uses it from here) |
@@ -76,11 +89,8 @@ in use.
 | `string-diacritic-insensitive-search` | libs-base | test | [#832](https://github.com/gnustep/libs-base/pull/832) | (none: ODataStore uses it from here) |
 | `keyedunarchiver-non-archive` | libs-base | test | [#818](https://github.com/gnustep/libs-base/pull/818) | (none: ODataStore uses it from here) |
 | `urlprotocol-relative-redirect` | libs-base | test | [#834](https://github.com/gnustep/libs-base/pull/834) | (none: ODataStore uses it from here) |
-| `urlprotocol-multipart-body` | libs-base | test | [#833](https://github.com/gnustep/libs-base/pull/833) | (none: ODataStore uses it from here) |
-| `expression-function-names` | libs-base | test | [#816](https://github.com/gnustep/libs-base/pull/816) | (none: ODataStore works around it) |
 | `predicate-matches-line-anchors` | libs-base | test | [#828](https://github.com/gnustep/libs-base/pull/828) | (none) |
 | `predicate-like-wildcards` | libs-base | test | [#827](https://github.com/gnustep/libs-base/pull/827) | (none) |
-| `bundle-load-and-return-error` | libs-base | test | [#811](https://github.com/gnustep/libs-base/pull/811) | (none: WorkflowKit's plugin loading uses it from here) |
 | `arraycontroller-selection-kvo` | libs-gui | test | [#977](https://github.com/gnustep/libs-gui/pull/977) | gnustep-coredata |
 | `tableview-column-autoresizing-style` | libs-gui | test | [#982](https://github.com/gnustep/libs-gui/pull/982) | gnustep-coredata |
 | `xib-date-picker` | libs-gui | none | [#984](https://github.com/gnustep/libs-gui/pull/984) | gnustep-coredata |
