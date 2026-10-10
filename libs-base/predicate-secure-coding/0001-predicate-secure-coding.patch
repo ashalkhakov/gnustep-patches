@@ -1,0 +1,1015 @@
+From b79628659c8e498934b5890c70ab304581aa5c7e Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Sat, 10 Oct 2026 21:21:36 +0500
+Subject: [PATCH] NSPredicate and NSExpression support secure coding and
+ -allowEvaluation
+
+NSPredicate and NSExpression did not adopt NSSecureCoding, so a
+predicate could not be archived with requiringSecureCoding: or read
+with +unarchivedObjectOfClass:fromData:error:, and -allowEvaluation,
+which code portable to OS X sends to a predicate it has read, did not
+exist (#766).
+
+Both now support secure coding, as on OS X since 10.13, and a predicate
+or expression read with secure coding raises
+NSInternalInconsistencyException when it is evaluated, until
+-allowEvaluation is sent to it; sent to a predicate, that allows its
+subpredicates and expressions as well.  A copy evaluates, as on OS X,
+and so does anything read without secure coding.
+
+The unarchiver checks every object in a secure decode against the
+classes allowed at that point, so each predicate and expression now
+names what may be in it: expressions, subpredicates, its operator,
+strings, and for a constant the classes OS X reads there without being
+told (the property list classes, NSNull, NSOrderedSet, NSURL and
+NSUUID), as well as anything the caller allowed.  NSCoder gains
+-allowedClasses (OS X 10.13) for that, and NSNull supports secure
+coding, since a comparison with nil holds one.  NSOrderedSet, NSURL and
+NSUUID do not support secure coding here yet, so a constant of one of
+those is refused until they do.
+
+The objects that may not evaluate are kept in a table rather than
+flagged in an instance variable, so that the public classes keep their
+layout; evaluation takes the table's lock only while it holds
+something.  SELF reads back as the shared expression, which is never
+disabled.
+
+Tests/base/NSPredicate/secureCoding.m checks each of these against what
+Apple's Foundation does with the same calls.  Without the change 32 of
+its 35 checks fail; with it they pass, and so do the NSPredicate,
+NSKeyedArchiver, NSArchiver, NSArray, NSDictionary and NSSet tests.
+---
+ Headers/Foundation/NSCoder.h          |   7 +
+ Headers/Foundation/NSExpression.h     |   9 +-
+ Headers/Foundation/NSNull.h           |   2 +-
+ Headers/Foundation/NSPredicate.h      |   9 +-
+ Source/NSCoder.m                      |   5 +
+ Source/NSKeyedUnarchiver.m            |   5 +
+ Source/NSNull.m                       |   5 +
+ Source/NSPredicate.m                  | 286 +++++++++++++++++++++++---
+ Tests/base/NSPredicate/secureCoding.m | 210 +++++++++++++++++++
+ 9 files changed, 506 insertions(+), 32 deletions(-)
+ create mode 100644 Tests/base/NSPredicate/secureCoding.m
+
+diff --git a/Headers/Foundation/NSCoder.h b/Headers/Foundation/NSCoder.h
+index 41805bbfb..454019e6c 100644
+--- a/Headers/Foundation/NSCoder.h
++++ b/Headers/Foundation/NSCoder.h
+@@ -380,6 +380,13 @@ GS_EXPORT_CLASS
+ - (id) decodeObjectOfClass: (Class)cls forKey: (NSString *)key;
+ - (id) decodeObjectOfClasses: (NSSet *)classes forKey: (NSString *)key;
+ 
++#endif
++
++#if OS_API_VERSION(MAC_OS_X_VERSION_10_13, GS_API_LATEST)
++/** The classes an object decoded now may be a kind of, when secure coding
++ * is required, or nil.
++ */
++- (NSSet *) allowedClasses;
+ #endif
+ @end
+ 
+diff --git a/Headers/Foundation/NSExpression.h b/Headers/Foundation/NSExpression.h
+index 087c9e76f..d16094311 100644
+--- a/Headers/Foundation/NSExpression.h
++++ b/Headers/Foundation/NSExpression.h
+@@ -65,7 +65,7 @@ enum
+ typedef NSUInteger NSExpressionType;
+ 
+ GS_EXPORT_CLASS
+-@interface NSExpression : NSObject <NSCoding, NSCopying>
++@interface NSExpression : NSObject <NSCopying, NSSecureCoding>
+ {
+ #if	GS_EXPOSE(NSExpression)
+   NSExpressionType _type;
+@@ -110,6 +110,13 @@ GS_EXPORT_CLASS
+ - (NSString *) keyPath;
+ - (NSExpression *) operand;
+ - (NSString *) variable;
++#if OS_API_VERSION(MAC_OS_X_VERSION_10_9, GS_API_LATEST)
++/** An expression read with secure coding raises if it is evaluated before
++ * this is sent to it.  Sending it allows evaluation of the expressions it
++ * is made of as well.
++ */
++- (void) allowEvaluation;
++#endif
+ 
+ #if OS_API_VERSION(MAC_OS_X_VERSION_10_5, GS_API_LATEST)
+ - (id) collection;
+diff --git a/Headers/Foundation/NSNull.h b/Headers/Foundation/NSNull.h
+index 4570a200a..004008ffa 100644
+--- a/Headers/Foundation/NSNull.h
++++ b/Headers/Foundation/NSNull.h
+@@ -37,7 +37,7 @@ extern "C" {
+  * An object to use as a placeholder - in collections for instance.
+  */
+ GS_EXPORT_CLASS
+-@interface	NSNull : NSObject <NSCoding, NSCopying>
++@interface	NSNull : NSObject <NSCopying, NSSecureCoding>
+ + (NSNull*) null;
+ @end
+ 
+diff --git a/Headers/Foundation/NSPredicate.h b/Headers/Foundation/NSPredicate.h
+index 324ae37f4..14ab3e377 100644
+--- a/Headers/Foundation/NSPredicate.h
++++ b/Headers/Foundation/NSPredicate.h
+@@ -42,7 +42,7 @@ DEFINE_BLOCK_TYPE(GSBlockPredicateBlock, BOOL, id, GS_GENERIC_CLASS(NSDictionary
+ #endif
+ 
+ GS_EXPORT_CLASS
+-@interface NSPredicate : NSObject <NSCoding, NSCopying>
++@interface NSPredicate : NSObject <NSCopying, NSSecureCoding>
+ 
+ + (NSPredicate *) predicateWithFormat: (NSString *)format, ...;
+ + (NSPredicate *) predicateWithFormat: (NSString *)format
+@@ -62,6 +62,13 @@ GS_EXPORT_CLASS
+ 	  substitutionVariables: 
+ 	  (GS_GENERIC_CLASS(NSDictionary,NSString*,id)*)variables;
+ #endif
++#if OS_API_VERSION(MAC_OS_X_VERSION_10_9, GS_API_LATEST)
++/** A predicate read with secure coding raises if it is evaluated before
++ * this is sent to it.  Sending it to a predicate allows evaluation of its
++ * subpredicates and expressions as well.
++ */
++- (void) allowEvaluation;
++#endif
+ @end
+ 
+ @interface GS_GENERIC_CLASS(NSArray, ElementT) (NSPredicate)
+diff --git a/Source/NSCoder.m b/Source/NSCoder.m
+index 1ec53130a..3ff7adb5d 100644
+--- a/Source/NSCoder.m
++++ b/Source/NSCoder.m
+@@ -421,6 +421,11 @@ - (id) decodeObjectOfClasses: (NSSet *)classes forKey: (NSString *)aKey
+   return nil;
+ }
+ 
++- (NSSet *) allowedClasses
++{
++  return nil;
++}
++
+ - (void) encodeBool: (BOOL) aBool forKey: (NSString*)aKey
+ {
+   [self subclassResponsibility: _cmd];
+diff --git a/Source/NSKeyedUnarchiver.m b/Source/NSKeyedUnarchiver.m
+index b09e3f89c..0c3105cd5 100644
+--- a/Source/NSKeyedUnarchiver.m
++++ b/Source/NSKeyedUnarchiver.m
+@@ -856,6 +856,11 @@ - (id) decodeObjectForKey: (NSString*)aKey
+   return nil;
+ }
+ 
++- (NSSet *) allowedClasses
++{
++  return AUTORELEASE([_allowedClasses copy]);
++}
++
+ - (id) decodeObjectOfClasses: (NSSet *)classes forKey: (NSString *)key
+ {
+   NSSet	*saved = _allowedClasses;
+diff --git a/Source/NSNull.m b/Source/NSNull.m
+index bb4b30131..a4a5303fa 100644
+--- a/Source/NSNull.m
++++ b/Source/NSNull.m
+@@ -90,6 +90,11 @@ - (id) valueForUndefinedKey: (NSString*)aKey
+   return null;
+ }
+ 
+++ (BOOL) supportsSecureCoding
++{
++  return YES;
++}
++
+ - (void) encodeWithCoder: (NSCoder*)aCoder
+ {
+ }
+diff --git a/Source/NSPredicate.m b/Source/NSPredicate.m
+index d027cea1d..46ccf0998 100644
+--- a/Source/NSPredicate.m
++++ b/Source/NSPredicate.m
+@@ -38,6 +38,7 @@
+ 
+ #import "Foundation/NSArray.h"
+ #import "Foundation/NSDate.h"
++#import "Foundation/NSHashTable.h"
+ #import "Foundation/NSKeyedArchiver.h"
+ #import "Foundation/NSDictionary.h"
+ #import "Foundation/NSEnumerator.h"
+@@ -46,8 +47,13 @@
+ #import "Foundation/NSNull.h"
+ #import "Foundation/NSScanner.h"
+ #import "Foundation/NSValue.h"
++#import "Foundation/NSData.h"
++#import "Foundation/NSOrderedSet.h"
++#import "Foundation/NSURL.h"
++#import "Foundation/NSUUID.h"
+ 
+ #import "GSPrivate.h"
++#import "GSPThread.h"
+ 
+ // For pow()
+ #include <math.h>
+@@ -62,6 +68,81 @@
+  */
+ static NSExpression	*evaluatedObjectExpression = nil;
+ 
++/* Predicates and expressions read with secure coding, which do not evaluate
++ * until -allowEvaluation is sent to them.  They are held here rather than
++ * flagged in an instance variable so that the public classes keep their
++ * layout; the count lets evaluation skip the lock when there are none.
++ */
++static gs_mutex_t	evaluationLock = GS_MUTEX_INIT_STATIC;
++static NSHashTable	*evaluationDisabled = 0;
++static NSUInteger	evaluationDisabledCount = 0;
++
++static void
++disableEvaluation(id object)
++{
++  GS_MUTEX_LOCK(evaluationLock);
++  if (0 == evaluationDisabled)
++    {
++      evaluationDisabled
++	= NSCreateHashTable(NSNonOwnedPointerHashCallBacks, 0);
++    }
++  NSHashInsertIfAbsent(evaluationDisabled, object);
++  evaluationDisabledCount = NSCountHashTable(evaluationDisabled);
++  GS_MUTEX_UNLOCK(evaluationLock);
++}
++
++static void
++enableEvaluation(id object)
++{
++  if (evaluationDisabledCount > 0)
++    {
++      GS_MUTEX_LOCK(evaluationLock);
++      NSHashRemove(evaluationDisabled, object);
++      evaluationDisabledCount = NSCountHashTable(evaluationDisabled);
++      GS_MUTEX_UNLOCK(evaluationLock);
++    }
++}
++
++static void
++checkEvaluation(id object, NSString *kind)
++{
++  if (evaluationDisabledCount > 0)
++    {
++      BOOL	disabled;
++
++      GS_MUTEX_LOCK(evaluationLock);
++      disabled = (NSHashGet(evaluationDisabled, object) != 0);
++      GS_MUTEX_UNLOCK(evaluationLock);
++      if (disabled)
++	{
++	  [NSException raise: NSInternalInconsistencyException
++		      format: @"This %@ has evaluation disabled", kind];
++	}
++    }
++}
++
++/* Decodes the object for key, which may be a kind of one of classes, or of
++ * a class the caller of the unarchiver allowed.
++ */
++static id
++decodeAllowing(NSCoder *coder, NSString *key, NSSet *classes)
++{
++  NSSet	*allowed;
++
++  if (NO == [coder requiresSecureCoding])
++    {
++      return [coder decodeObjectForKey: key];
++    }
++  allowed = [coder allowedClasses];
++  if (allowed != nil)
++    {
++      classes = [classes setByAddingObjectsFromSet: allowed];
++    }
++  return [coder decodeObjectOfClasses: classes forKey: key];
++}
++
++#define	ALLOW(...)	[NSSet setWithObjects: __VA_ARGS__, nil]
++
+ extern void     GSPropertyListMake(id,NSDictionary*,BOOL,BOOL,unsigned,id*);
+ 
+ @interface GSPredicateScanner : NSScanner
+@@ -109,7 +190,7 @@ @interface GSNotCompoundPredicate : NSCompoundPredicate
+  * OS X archives it, with a class for each family of operators.  It exists
+  * for archiving alone and holds what the predicate holds.
+  */
+-@interface GSPredicateOperator : NSObject
++@interface GSPredicateOperator : NSObject <NSSecureCoding>
+ {
+   @public
+   NSPredicateOperatorType	_type;
+@@ -529,6 +610,7 @@ - (NSPredicate *) predicateWithSubstitutionVariables: (NSDictionary *)variables
+ - (BOOL) evaluateWithObject: (id)object
+       substitutionVariables: (GS_GENERIC_CLASS(NSDictionary, NSString*, id)*)variables
+ {
++  checkEvaluation(self, @"predicate");
+   return [[self predicateWithSubstitutionVariables: variables]
+                                 evaluateWithObject: object];
+ }
+@@ -551,6 +633,31 @@ - (id) initWithCoder: (NSCoder *) coder
+   return self;
+ }
+ 
+++ (BOOL) supportsSecureCoding
++{
++  return YES;
++}
++
++- (id) awakeAfterUsingCoder: (NSCoder *)coder
++{
++  if ([coder requiresSecureCoding])
++    {
++      disableEvaluation(self);
++    }
++  return self;
++}
++
++- (void) allowEvaluation
++{
++  enableEvaluation(self);
++}
++
++- (void) dealloc
++{
++  enableEvaluation(self);
++  [super dealloc];
++}
++
+ #if OS_API_VERSION(MAC_OS_X_VERSION_10_6, GS_API_LATEST)
+ + (NSPredicate*)predicateWithBlock: (GSBlockPredicateBlock)block
+ {
+@@ -578,6 +685,7 @@ - (id) copyWithZone: (NSZone *)z
+ 
+ - (BOOL) evaluateWithObject: (id)object
+ {
++  checkEvaluation(self, @"predicate");
+   return YES;
+ }
+ 
+@@ -624,6 +732,7 @@ - (id) copyWithZone: (NSZone *)z
+ 
+ - (BOOL) evaluateWithObject: (id)object
+ {
++  checkEvaluation(self, @"predicate");
+   return NO;
+ }
+ 
+@@ -804,7 +913,8 @@ - (id) initWithCoder: (NSCoder *)coder
+     {
+       type = (NSCompoundPredicateType)
+ 	[coder decodeIntForKey: @"NSCompoundPredicateType"];
+-      subs = [coder decodeObjectForKey: @"NSSubpredicates"];
++      subs = decodeAllowing(coder, @"NSSubpredicates",
++	ALLOW([NSArray class], [NSPredicate class]));
+     }
+   else
+     {
+@@ -818,6 +928,12 @@ - (id) initWithCoder: (NSCoder *)coder
+   return [self initWithType: type subpredicates: subs];
+ }
+ 
++- (void) allowEvaluation
++{
++  [super allowEvaluation];
++  [_subs makeObjectsPerformSelector: @selector(allowEvaluation)];
++}
++
+ @end
+ 
+ @implementation GSAndCompoundPredicate
+@@ -827,6 +943,7 @@ - (BOOL) evaluateWithObject: (id) object
+   NSEnumerator	*e = [_subs objectEnumerator];
+   NSPredicate	*p;
+ 
++  checkEvaluation(self, @"predicate");
+   while ((p = [e nextObject]) != nil)
+     {
+       if ([p evaluateWithObject: object] == NO)
+@@ -890,6 +1007,7 @@ - (BOOL) evaluateWithObject: (id)object
+   NSEnumerator	*e = [_subs objectEnumerator];
+   NSPredicate	*p;
+ 
++  checkEvaluation(self, @"predicate");
+   while ((p = [e nextObject]) != nil)
+     {
+       if ([p evaluateWithObject: object] == YES)
+@@ -929,6 +1047,7 @@ - (BOOL) evaluateWithObject: (id)object
+ {
+   NSPredicate *sub = [_subs objectAtIndex: 0];
+ 
++  checkEvaluation(self, @"predicate");
+   return ![sub evaluateWithObject: object];
+ }
+ 
+@@ -949,6 +1068,11 @@ - (NSString *) predicateFormat
+ 
+ @implementation GSPredicateOperator
+ 
+++ (BOOL) supportsSecureCoding
++{
++  return YES;
++}
++
+ + (id) operatorForType: (NSPredicateOperatorType)type
+ 	      modifier: (NSComparisonPredicateModifier)modifier
+ 	       options: (NSUInteger)options
+@@ -1098,8 +1222,8 @@ - (id) initWithCoder: (NSCoder *)coder
+     }
+   if ([coder containsValueForKey: @"NSSelectorName"])
+     {
+-      _selector
+-	= NSSelectorFromString([coder decodeObjectForKey: @"NSSelectorName"]);
++      _selector = NSSelectorFromString(decodeAllowing(coder,
++	@"NSSelectorName", ALLOW([NSString class])));
+     }
+ 
+   return self;
+@@ -1707,8 +1831,12 @@ - (BOOL) _evaluateLeftValue: (id)leftResult
+ 
+ - (BOOL) evaluateWithObject: (id)object
+ {
+-  id leftValue = [_left expressionValueWithObject: object context: nil];
+-  id rightValue = [_right expressionValueWithObject: object context: nil];
++  id leftValue;
++  id rightValue;
++
++  checkEvaluation(self, @"predicate");
++  leftValue = [_left expressionValueWithObject: object context: nil];
++  rightValue = [_right expressionValueWithObject: object context: nil];
+ 
+   if (_modifier == NSDirectPredicateModifier)
+     {
+@@ -1797,9 +1925,12 @@ - (id) initWithCoder: (NSCoder *)coder
+     {
+       GSPredicateOperator	*op;
+ 
+-      left = [coder decodeObjectForKey: @"NSLeftExpression"];
+-      right = [coder decodeObjectForKey: @"NSRightExpression"];
+-      op = [coder decodeObjectForKey: @"NSPredicateOperator"];
++      left = decodeAllowing(coder, @"NSLeftExpression",
++	ALLOW([NSExpression class]));
++      right = decodeAllowing(coder, @"NSRightExpression",
++	ALLOW([NSExpression class]));
++      op = decodeAllowing(coder, @"NSPredicateOperator",
++	ALLOW([GSPredicateOperator class]));
+       if (NO == [op isKindOfClass: [GSPredicateOperator class]])
+ 	{
+ 	  DESTROY(self);
+@@ -1843,6 +1974,13 @@ - (id) initWithCoder: (NSCoder *)coder
+ 			      options: options];
+ }
+ 
++- (void) allowEvaluation
++{
++  [super allowEvaluation];
++  [_left allowEvaluation];
++  [_right allowEvaluation];
++}
++
+ @end
+ 
+ 
+@@ -2266,6 +2404,31 @@ - (id) initWithCoder: (NSCoder *)coder
+   return nil;
+ }
+ 
+++ (BOOL) supportsSecureCoding
++{
++  return YES;
++}
++
++- (id) awakeAfterUsingCoder: (NSCoder *)coder
++{
++  if ([coder requiresSecureCoding])
++    {
++      disableEvaluation(self);
++    }
++  return self;
++}
++
++- (void) allowEvaluation
++{
++  enableEvaluation(self);
++}
++
++- (void) dealloc
++{
++  enableEvaluation(self);
++  [super dealloc];
++}
++
+ - (id) _expressionWithSubstitutionVariables: (NSDictionary *)variables
+ {
+   [self subclassResponsibility: _cmd];
+@@ -2326,13 +2489,18 @@ - (id) initWithCoder: (NSCoder *)coder
+ 	{
+ 	  NSString	*name;
+ 
+-	  name = [coder decodeObjectForKey: @"NSConstantValueClassName"];
++	  name = decodeAllowing(coder, @"NSConstantValueClassName",
++	    ALLOW([NSString class]));
+ 	  ASSIGN(_className, name);
+ 	  ASSIGN(_obj, (id)NSClassFromString(name));
+ 	}
+       else
+ 	{
+-	  ASSIGN(_obj, [coder decodeObjectForKey: @"NSConstantValue"]);
++	  ASSIGN(_obj, decodeAllowing(coder, @"NSConstantValue",
++	    ALLOW([NSString class], [NSNumber class], [NSDate class],
++	      [NSData class], [NSArray class], [NSDictionary class],
++	      [NSSet class], [NSOrderedSet class], [NSNull class],
++	      [NSURL class], [NSUUID class])));
+ 	}
+     }
+   else
+@@ -2389,6 +2557,7 @@ - (NSString *) description
+ - (id) expressionValueWithObject: (id)object
+ 			 context: (NSMutableDictionary *)context
+ {
++  checkEvaluation(self, @"expression");
+   if ([_obj isKindOfClass: [NSArray class]])
+     {
+       NSUInteger	count = [(NSArray*)_obj count];
+@@ -2470,6 +2639,12 @@ - (id) initWithCoder: (NSCoder *)coder
+   return RETAIN([NSExpression expressionForEvaluatedObject]);
+ }
+ 
++/* What is read is the shared expression, which evaluates to its argument. */
++- (id) awakeAfterUsingCoder: (NSCoder *)coder
++{
++  return self;
++}
++
+ - (id) expressionValueWithObject: (id)object
+ 			 context: (NSMutableDictionary *)context
+ {
+@@ -2514,7 +2689,8 @@ - (id) initWithCoder: (NSCoder *)coder
+     {
+       if ([coder allowsKeyedCoding])
+ 	{
+-	  ASSIGN(_variable, [coder decodeObjectForKey: @"NSVariable"]);
++	  ASSIGN(_variable, decodeAllowing(coder, @"NSVariable",
++	    ALLOW([NSString class])));
+ 	}
+       else
+ 	{
+@@ -2546,6 +2722,7 @@ - (NSUInteger) hash
+ - (id) expressionValueWithObject: (id)object
+ 			 context: (NSMutableDictionary *)context
+ {
++  checkEvaluation(self, @"expression");
+   return [context objectForKey: _variable];
+ }
+ 
+@@ -2634,7 +2811,8 @@ - (id) initWithCoder: (NSCoder *)coder
+ 
+   if ([coder allowsKeyedCoding])
+     {
+-      NSArray	*arguments = [coder decodeObjectForKey: @"NSArguments"];
++      NSArray	*arguments = decodeAllowing(coder, @"NSArguments",
++	ALLOW([NSArray class], [NSExpression class]));
+       id	first = ([arguments count] > 0
+ 	? [arguments objectAtIndex: 0] : nil);
+ 
+@@ -2644,7 +2822,8 @@ - (id) initWithCoder: (NSCoder *)coder
+ 	}
+       else if ([coder containsValueForKey: @"NSKeyPath"])
+ 	{
+-	  ASSIGN(_keyPath, [coder decodeObjectForKey: @"NSKeyPath"]);
++	  ASSIGN(_keyPath, decodeAllowing(coder, @"NSKeyPath",
++	    ALLOW([NSString class])));
+ 	}
+     }
+   else
+@@ -2676,6 +2855,7 @@ - (NSUInteger) hash
+ - (id) expressionValueWithObject: (id)object
+ 			 context: (NSMutableDictionary *)context
+ {
++  checkEvaluation(self, @"expression");
+   return [object valueForKeyPath: _keyPath];
+ }
+ 
+@@ -2747,7 +2927,8 @@ - (id) initWithCoder: (NSCoder *)coder
+     {
+       if ([coder allowsKeyedCoding])
+ 	{
+-	  ASSIGN(_keyPath, [coder decodeObjectForKey: @"NSKeyPath"]);
++	  ASSIGN(_keyPath, decodeAllowing(coder, @"NSKeyPath",
++	    ALLOW([NSString class])));
+ 	}
+       else
+ 	{
+@@ -2762,6 +2943,13 @@ - (id) initWithCoder: (NSCoder *)coder
+ 
+ @implementation GSBinaryExpression
+ 
++- (void) allowEvaluation
++{
++  [super allowEvaluation];
++  [_left allowEvaluation];
++  [_right allowEvaluation];
++}
++
+ - (void) encodeWithCoder: (NSCoder *)coder
+ {
+   if ([coder allowsKeyedCoding])
+@@ -2788,8 +2976,10 @@ - (id) initWithCoder: (NSCoder *)coder
+ 	[coder decodeIntForKey: @"NSExpressionType"]];
+       if (self != nil)
+ 	{
+-	  ASSIGN(_left, [coder decodeObjectForKey: @"NSLeftExpression"]);
+-	  ASSIGN(_right, [coder decodeObjectForKey: @"NSRightExpression"]);
++	  ASSIGN(_left, decodeAllowing(coder, @"NSLeftExpression",
++	    ALLOW([NSExpression class])));
++	  ASSIGN(_right, decodeAllowing(coder, @"NSRightExpression",
++	    ALLOW([NSExpression class])));
+ 	}
+     }
+   else
+@@ -2867,6 +3057,7 @@ - (NSString *) description
+ - (id) expressionValueWithObject: (id)object
+                          context: (NSMutableDictionary *)context
+ {
++  checkEvaluation(self, @"expression");
+   object = [_left expressionValueWithObject: object context: context];
+   return [_right expressionValueWithObject: object context: context];
+ }
+@@ -2922,12 +3113,15 @@ - (NSString *) description
+ - (id) expressionValueWithObject: (id)object
+ 			 context: (NSMutableDictionary *)context
+ {
+-  id leftValue = [_left expressionValueWithObject: object context: context];
+-  id rightValue = [_right expressionValueWithObject: object context: context];
++  id leftValue;
++  id rightValue;
+   NSSet *leftSet = nil;
+   NSSet *rightSet = nil;
+   NSMutableSet *result = nil;
+ 
++  checkEvaluation(self, @"expression");
++  leftValue = [_left expressionValueWithObject: object context: context];
++  rightValue = [_right expressionValueWithObject: object context: context];
+   CHECK_SETS;
+     
+   result = [NSMutableSet setWithSet: leftSet];
+@@ -2948,12 +3142,15 @@ - (NSString *) description
+ - (id) expressionValueWithObject: (id)object
+ 			 context: (NSMutableDictionary *)context
+ {
+-  id leftValue = [_left expressionValueWithObject: object context: context];
+-  id rightValue = [_right expressionValueWithObject: object context: context];
++  id leftValue;
++  id rightValue;
+   NSSet *leftSet = nil;
+   NSSet *rightSet = nil;
+   NSMutableSet *result = nil;
+ 
++  checkEvaluation(self, @"expression");
++  leftValue = [_left expressionValueWithObject: object context: context];
++  rightValue = [_right expressionValueWithObject: object context: context];
+   CHECK_SETS;
+   
+   result = [NSMutableSet setWithSet: leftSet];
+@@ -2974,12 +3171,15 @@ - (NSString *) description
+ - (id) expressionValueWithObject: (id)object
+ 			 context: (NSMutableDictionary *)context
+ {
+-  id leftValue = [_left expressionValueWithObject: object context: context];
+-  id rightValue = [_right expressionValueWithObject: object context: context];
++  id leftValue;
++  id rightValue;
+   NSSet *leftSet = nil;
+   NSSet *rightSet = nil;
+   NSMutableSet *result = nil;
+ 
++  checkEvaluation(self, @"expression");
++  leftValue = [_left expressionValueWithObject: object context: context];
++  rightValue = [_right expressionValueWithObject: object context: context];
+   CHECK_SETS;
+   
+   result = [NSMutableSet setWithSet: leftSet];
+@@ -2992,6 +3192,13 @@ - (id) expressionValueWithObject: (id)object
+ 
+ @implementation GSSubqueryExpression
+ 
++- (void) allowEvaluation
++{
++  [super allowEvaluation];
++  [_collection allowEvaluation];
++  [_subpredicate allowEvaluation];
++}
++
+ - (void) encodeWithCoder: (NSCoder *)coder
+ {
+   if ([coder allowsKeyedCoding])
+@@ -3016,9 +3223,12 @@ - (id) initWithCoder: (NSCoder *)coder
+     {
+       if ([coder allowsKeyedCoding])
+ 	{
+-	  ASSIGN(_collection, [coder decodeObjectForKey: @"NSCollection"]);
+-	  ASSIGN(_variable, [coder decodeObjectForKey: @"NSVariable"]);
+-	  ASSIGN(_subpredicate, [coder decodeObjectForKey: @"NSSubpredicate"]);
++	  ASSIGN(_collection, decodeAllowing(coder, @"NSCollection",
++	    ALLOW([NSExpression class])));
++	  ASSIGN(_variable, decodeAllowing(coder, @"NSVariable",
++	    ALLOW([NSString class], [NSExpression class])));
++	  ASSIGN(_subpredicate, decodeAllowing(coder, @"NSSubpredicate",
++	    ALLOW([NSPredicate class])));
+ 	}
+       else
+ 	{
+@@ -3099,6 +3309,7 @@ - (id) expressionValueWithObject: (id)object
+   id			collection;
+   NSMutableArray	*result;
+ 
++  checkEvaluation(self, @"expression");
+   collection = [_collection expressionValueWithObject: object context: context];
+   if (nil == collection)
+     {
+@@ -3151,6 +3362,12 @@ - (id) _expressionWithSubstitutionVariables: (NSDictionary *)variables
+ 
+ @implementation GSAggregateExpression
+ 
++- (void) allowEvaluation
++{
++  [super allowEvaluation];
++  [_collection makeObjectsPerformSelector: @selector(allowEvaluation)];
++}
++
+ - (void) encodeWithCoder: (NSCoder *)coder
+ {
+   if ([coder allowsKeyedCoding])
+@@ -3171,7 +3388,8 @@ - (id) initWithCoder: (NSCoder *)coder
+     {
+       if ([coder allowsKeyedCoding])
+ 	{
+-	  ASSIGN(_collection, [coder decodeObjectForKey: @"NSCollection"]);
++	  ASSIGN(_collection, decodeAllowing(coder, @"NSCollection",
++	    ALLOW([NSArray class], [NSExpression class])));
+ 	}
+       else
+ 	{
+@@ -3231,6 +3449,7 @@ - (id) expressionValueWithObject: (id)object
+   NSMutableArray	*result = [NSMutableArray arrayWithCapacity:
+ 						    [_collection count]];
+ 
++  checkEvaluation(self, @"expression");
+   GS_FOR_IN(NSExpression*, exp, _collection)
+     {
+       NSExpression *value;
+@@ -3246,6 +3465,12 @@ - (id) expressionValueWithObject: (id)object
+ 
+ @implementation GSFunctionExpression
+ 
++- (void) allowEvaluation
++{
++  [super allowEvaluation];
++  [_args makeObjectsPerformSelector: @selector(allowEvaluation)];
++}
++
+ - (NSArray *) arguments
+ {
+   return _args;
+@@ -3292,8 +3517,10 @@ - (id) initWithCoder: (NSCoder *)coder
+ 
+   if ([coder allowsKeyedCoding])
+     {
+-      name = [coder decodeObjectForKey: @"NSSelectorName"];
+-      args = [coder decodeObjectForKey: @"NSArguments"];
++      name = decodeAllowing(coder, @"NSSelectorName",
++	ALLOW([NSString class]));
++      args = decodeAllowing(coder, @"NSArguments",
++	ALLOW([NSArray class], [NSExpression class]));
+     }
+   else
+     {
+@@ -3388,6 +3615,7 @@ - (id) expressionValueWithObject: (id)object
+   NSMutableArray	*eargs = [NSMutableArray arrayWithCapacity: _argc];
+   unsigned int i;
+ 
++  checkEvaluation(self, @"expression");
+   for (i = 0; i < _argc; i++)
+     {
+       [eargs addObject: [[_args objectAtIndex: i] 
+diff --git a/Tests/base/NSPredicate/secureCoding.m b/Tests/base/NSPredicate/secureCoding.m
+new file mode 100644
+index 000000000..34d866653
+--- /dev/null
++++ b/Tests/base/NSPredicate/secureCoding.m
+@@ -0,0 +1,210 @@
++/* A predicate and an expression can be archived and read back with secure
++   coding, as on OS X since 10.13, and one read that way does not evaluate
++   until -allowEvaluation is sent to it.  The expectations are what Apple's
++   Foundation does with the same calls.
++*/
++#import <Foundation/NSArray.h>
++#import <Foundation/NSAutoreleasePool.h>
++#import <Foundation/NSComparisonPredicate.h>
++#import <Foundation/NSCompoundPredicate.h>
++#import <Foundation/NSData.h>
++#import <Foundation/NSDate.h>
++#import <Foundation/NSDictionary.h>
++#import <Foundation/NSException.h>
++#import <Foundation/NSExpression.h>
++#import <Foundation/NSKeyedArchiver.h>
++#import <Foundation/NSPredicate.h>
++#import <Foundation/NSSet.h>
++#import <Foundation/NSString.h>
++#import <Foundation/NSValue.h>
++#import "ObjectTesting.h"
++
++@interface Thing : NSObject <NSSecureCoding>
++@end
++
++@implementation Thing
+++ (BOOL) supportsSecureCoding
++{
++  return YES;
++}
++- (void) encodeWithCoder: (NSCoder *)coder
++{
++}
++- (id) initWithCoder: (NSCoder *)coder
++{
++  return [super init];
++}
++- (BOOL) isEqual: (id)other
++{
++  return [other isKindOfClass: [Thing class]];
++}
++- (NSUInteger) hash
++{
++  return 1;
++}
++@end
++
++static NSData *
++secureArchive(id object)
++{
++  return [NSKeyedArchiver archivedDataWithRootObject: object
++			       requiringSecureCoding: YES
++					       error: NULL];
++}
++
++static id
++secureRead(NSData *data, NSSet *classes)
++{
++  id	object = nil;
++
++  NS_DURING
++    {
++      object = [NSKeyedUnarchiver unarchivedObjectOfClasses: classes
++						    fromData: data
++						       error: NULL];
++    }
++  NS_HANDLER
++    {
++      object = nil;
++    }
++  NS_ENDHANDLER
++  return object;
++}
++
++static NSPredicate *
++securePredicate(NSPredicate *predicate)
++{
++  return secureRead(secureArchive(predicate),
++    [NSSet setWithObject: [NSPredicate class]]);
++}
++
++int main(void)
++{
++  NSAutoreleasePool	*arp = [NSAutoreleasePool new];
++  NSDictionary		*ann;
++  NSPredicate		*p;
++  NSPredicate		*back;
++  NSPredicate		*sub;
++  NSPredicate		*copy;
++  NSExpression		*e;
++  NSArray		*formats;
++  NSUInteger		i;
++
++  ann = [NSDictionary dictionaryWithObjectsAndKeys:
++    [NSNumber numberWithInt: 50], @"age", @"Ann", @"name", nil];
++
++  START_SET("NSPredicate secure coding conformance")
++  PASS([NSPredicate conformsToProtocol: @protocol(NSSecureCoding)]
++    && [NSPredicate supportsSecureCoding],
++    "NSPredicate supports secure coding")
++  PASS([NSExpression conformsToProtocol: @protocol(NSSecureCoding)]
++    && [NSExpression supportsSecureCoding],
++    "NSExpression supports secure coding")
++  PASS([NSComparisonPredicate supportsSecureCoding]
++    && [NSCompoundPredicate supportsSecureCoding],
++    "NSComparisonPredicate and NSCompoundPredicate support secure coding")
++  PASS([[NSPredicate predicateWithValue: YES]
++    respondsToSelector: @selector(allowEvaluation)],
++    "a predicate responds to -allowEvaluation")
++  PASS([[NSExpression expressionForKeyPath: @"age"]
++    respondsToSelector: @selector(allowEvaluation)],
++    "an expression responds to -allowEvaluation")
++  END_SET("NSPredicate secure coding conformance")
++
++  START_SET("NSPredicate secure coding round trip")
++  formats = [NSArray arrayWithObjects:
++    @"name == 'x' AND age > 3",
++    @"age IN {1, 2}",
++    @"name == nil",
++    @"uppercase:(name) == 'X'",
++    @"age > $limit",
++    @"SELF == 'x'",
++    @"NOT (a == 1 OR b == 2)",
++    @"SUBQUERY(kids, $k, $k.age > 3).@count > 0",
++    @"ANY kids.age > 3",
++    @"$x.age > 3",
++    @"TRUEPREDICATE",
++    nil];
++  for (i = 0; i < [formats count]; i++)
++    {
++      NSString	*f = [formats objectAtIndex: i];
++
++      p = [NSPredicate predicateWithFormat: f];
++      back = securePredicate(p);
++      PASS_EQUAL([back predicateFormat], [p predicateFormat],
++	"%s is read back allowing only NSPredicate", [f UTF8String])
++    }
++  p = [NSPredicate predicateWithFormat: @"born < %@",
++    [NSDate dateWithTimeIntervalSinceReferenceDate: 0]];
++  PASS_EQUAL(securePredicate(p), p, "a date constant is read back")
++  p = [NSPredicate predicateWithFormat: @"age IN %@",
++    [NSSet setWithObject: [NSNumber numberWithInt: 1]]];
++  PASS_EQUAL(securePredicate(p), p, "a set constant is read back")
++  END_SET("NSPredicate secure coding round trip")
++
++  START_SET("NSPredicate secure coding evaluation")
++  p = [NSPredicate predicateWithFormat: @"age > 40 AND name BEGINSWITH 'A'"];
++  back = securePredicate(p);
++  PASS(back != nil, "a compound predicate is read back")
++  sub = [[(NSCompoundPredicate *)back subpredicates] objectAtIndex: 0];
++  e = [(NSComparisonPredicate *)sub leftExpression];
++  copy = AUTORELEASE([sub copy]);
++
++  PASS_EQUAL([back predicateFormat], [p predicateFormat],
++    "its format can be read before -allowEvaluation")
++  PASS_EXCEPTION([back evaluateWithObject: ann],
++    NSInternalInconsistencyException,
++    "it does not evaluate before -allowEvaluation")
++  PASS_EXCEPTION([back evaluateWithObject: ann substitutionVariables: nil],
++    NSInternalInconsistencyException,
++    "nor with substitution variables")
++  PASS_EXCEPTION([sub evaluateWithObject: ann],
++    NSInternalInconsistencyException,
++    "nor does a subpredicate")
++  PASS_EXCEPTION([e expressionValueWithObject: ann context: nil],
++    NSInternalInconsistencyException,
++    "nor does an expression in it")
++  PASS([copy evaluateWithObject: ann], "but a copy does")
++
++  [back allowEvaluation];
++  PASS([back evaluateWithObject: ann], "it evaluates after -allowEvaluation")
++  PASS([sub evaluateWithObject: ann], "and so do its subpredicates")
++  PASS_EQUAL([e expressionValueWithObject: ann context: nil],
++    [NSNumber numberWithInt: 50], "and its expressions")
++
++  back = [NSKeyedUnarchiver unarchiveObjectWithData:
++    [NSKeyedArchiver archivedDataWithRootObject: p]];
++  PASS([back evaluateWithObject: ann],
++    "a predicate read without secure coding evaluates at once")
++
++  back = securePredicate([NSPredicate predicateWithFormat: @"SELF == 'x'"]);
++  PASS([[NSPredicate predicateWithFormat: @"SELF == 'x'"]
++    evaluateWithObject: @"x"],
++    "reading SELF securely leaves other predicates using SELF alone")
++  END_SET("NSPredicate secure coding evaluation")
++
++  START_SET("NSExpression secure coding")
++  e = secureRead(secureArchive([NSExpression expressionWithFormat: @"age + 1"]),
++    [NSSet setWithObject: [NSExpression class]]);
++  PASS(e != nil, "an expression is read back on its own")
++  PASS_EXCEPTION([e expressionValueWithObject: ann context: nil],
++    NSInternalInconsistencyException,
++    "it does not evaluate before -allowEvaluation")
++  [e allowEvaluation];
++  PASS_EQUAL([e expressionValueWithObject: ann context: nil],
++    [NSNumber numberWithInt: 51], "it evaluates after -allowEvaluation")
++  END_SET("NSExpression secure coding")
++
++  START_SET("NSPredicate secure coding of other classes")
++  p = [NSPredicate predicateWithFormat: @"x == %@", AUTORELEASE([Thing new])];
++  PASS(secureRead(secureArchive(p),
++    [NSSet setWithObject: [NSPredicate class]]) == nil,
++    "a constant of a class that was not allowed is not read")
++  PASS_EQUAL(secureRead(secureArchive(p),
++    [NSSet setWithObjects: [NSPredicate class], [Thing class], nil]), p,
++    "it is read when its class is allowed too")
++  END_SET("NSPredicate secure coding of other classes")
++
++  [arp release];
++  return 0;
++}
+-- 
+2.50.1 (Apple Git-155)
+

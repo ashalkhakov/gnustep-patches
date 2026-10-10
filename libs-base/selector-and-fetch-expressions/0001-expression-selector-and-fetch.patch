@@ -1,4 +1,4 @@
-From 13278a64c34d91815b5a397f22f8abc1ba396b40 Mon Sep 17 00:00:00 2001
+From 1eae5e814fd31b8c6adabd73edfe443750dbae8a Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Tue, 6 Oct 2026 14:57:16 +0000
 Subject: [PATCH] libs-base: NSExpression's selector functions, fetch requests
@@ -54,7 +54,7 @@ new methods, so it fails to compile rather than to pass.
  create mode 100644 Tests/base/NSPredicate/functionAndFetch.m
 
 diff --git a/Headers/Foundation/NSExpression.h b/Headers/Foundation/NSExpression.h
-index 087c9e76f..5fd82b068 100644
+index d16094311..1952994c3 100644
 --- a/Headers/Foundation/NSExpression.h
 +++ b/Headers/Foundation/NSExpression.h
 @@ -90,6 +90,12 @@ GS_EXPORT_CLASS
@@ -70,7 +70,7 @@ index 087c9e76f..5fd82b068 100644
  #endif
  
  #if OS_API_VERSION(MAC_OS_X_VERSION_10_6, GS_API_LATEST)
-@@ -116,6 +122,9 @@ GS_EXPORT_CLASS
+@@ -123,6 +129,9 @@ GS_EXPORT_CLASS
  - (NSExpression *) leftExpression;
  - (NSPredicate *) predicate;
  - (NSExpression *) rightExpression;
@@ -81,10 +81,10 @@ index 087c9e76f..5fd82b068 100644
  @end
  
 diff --git a/Source/NSPredicate.m b/Source/NSPredicate.m
-index 6b4bb0343..fa8479789 100644
+index 3c23162ff..311d23cc4 100644
 --- a/Source/NSPredicate.m
 +++ b/Source/NSPredicate.m
-@@ -42,7 +42,9 @@
+@@ -43,7 +43,9 @@
  #import "Foundation/NSDictionary.h"
  #import "Foundation/NSEnumerator.h"
  #import "Foundation/NSException.h"
@@ -94,7 +94,7 @@ index 6b4bb0343..fa8479789 100644
  #import "Foundation/NSNull.h"
  #import "Foundation/NSScanner.h"
  #import "Foundation/NSValue.h"
-@@ -238,6 +240,29 @@ extern void     GSPropertyListMake(id,NSDictionary*,BOOL,BOOL,unsigned,id*);
+@@ -318,6 +320,29 @@ @interface GSFunctionExpression : NSExpression
  }
  @end
  
@@ -124,7 +124,7 @@ index 6b4bb0343..fa8479789 100644
  #if OS_API_VERSION(MAC_OS_X_VERSION_10_6, GS_API_LATEST)
  @interface GSBlockPredicate : NSPredicate
  {
-@@ -1867,6 +1892,8 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
+@@ -2008,6 +2033,8 @@ + (void) initialize
  			   forClass: [GSVariableExpression class]];
        [NSKeyedArchiver setClassName: @"NSKeyPathExpression"
  			   forClass: [GSKeyPathExpression class]];
@@ -133,7 +133,7 @@ index 6b4bb0343..fa8479789 100644
        [NSKeyedArchiver setClassName: @"NSKeyPathSpecifierExpression"
  			   forClass: [GSKeyPathSpecifierExpression class]];
        [NSKeyedArchiver setClassName: @"NSFunctionExpression"
-@@ -1875,6 +1902,8 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
+@@ -2016,6 +2043,8 @@ + (void) initialize
  			   forClass: [GSAggregateExpression class]];
        [NSKeyedArchiver setClassName: @"NSSubqueryExpression"
  			   forClass: [GSSubqueryExpression class]];
@@ -142,7 +142,7 @@ index 6b4bb0343..fa8479789 100644
  
        [NSKeyedUnarchiver setClass: [GSSubqueryExpression class]
  		     forClassName: @"NSSubqueryExpression"];
-@@ -1892,6 +1921,8 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
+@@ -2033,6 +2062,8 @@ + (void) initialize
  		     forClassName: @"NSFunctionExpression"];
        [NSKeyedUnarchiver setClass: [GSAggregateExpression class]
  		     forClassName: @"NSAggregateExpression"];
@@ -151,7 +151,7 @@ index 6b4bb0343..fa8479789 100644
      }
  }
  
-@@ -2008,6 +2039,40 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
+@@ -2149,6 +2180,40 @@ + (NSExpression *) expressionForFunction: (NSString *)name
    return e;
  }
  
@@ -192,7 +192,7 @@ index 6b4bb0343..fa8479789 100644
  + (NSExpression *) expressionForKeyPath: (NSString *)path
  {
    GSKeyPathExpression *e;
-@@ -2220,6 +2285,24 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
+@@ -2361,6 +2426,24 @@ - (NSExpression *) operand
    return nil;
  }
  
@@ -217,22 +217,23 @@ index 6b4bb0343..fa8479789 100644
  - (NSString *) variable
  {
    [self subclassResponsibility: _cmd];
-@@ -2631,9 +2714,10 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
+@@ -2818,10 +2901,11 @@ - (id) initWithCoder: (NSCoder *)coder
  
    if ([coder allowsKeyedCoding])
      {
--      NSArray	*arguments = [coder decodeObjectForKey: @"NSArguments"];
+-      NSArray	*arguments = decodeAllowing(coder, @"NSArguments",
++      NSArray		*arguments = decodeAllowing(coder, @"NSArguments",
+ 	ALLOW([NSArray class], [NSExpression class]));
 -      id	first = ([arguments count] > 0
-+      NSArray		*arguments = [coder decodeObjectForKey: @"NSArguments"];
 +      id		first = ([arguments count] > 0
  	? [arguments objectAtIndex: 0] : nil);
 +      NSExpression	*operand = [coder decodeObjectForKey: @"NSOperand"];
  
        if ([first isKindOfClass: [GSKeyPathSpecifierExpression class]])
  	{
-@@ -2643,6 +2727,23 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
- 	{
- 	  ASSIGN(_keyPath, [coder decodeObjectForKey: @"NSKeyPath"]);
+@@ -2832,6 +2916,23 @@ - (id) initWithCoder: (NSCoder *)coder
+ 	  ASSIGN(_keyPath, decodeAllowing(coder, @"NSKeyPath",
+ 	    ALLOW([NSString class])));
  	}
 +
 +      /* A key path reached through something else - $source.author, which
@@ -254,7 +255,7 @@ index 6b4bb0343..fa8479789 100644
      }
    else
      {
-@@ -2861,6 +2962,36 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
+@@ -3061,6 +3162,36 @@ - (NSString *) description
    return [NSString stringWithFormat: @"%@.%@", _left, _right];
  }
  
@@ -291,7 +292,7 @@ index 6b4bb0343..fa8479789 100644
  - (id) expressionValueWithObject: (id)object
                           context: (NSMutableDictionary *)context
  {
-@@ -3286,11 +3417,13 @@ do { \
+@@ -3521,6 +3652,7 @@ - (id) initWithCoder: (NSCoder *)coder
  {
    NSString	*name;
    NSArray	*args;
@@ -299,13 +300,15 @@ index 6b4bb0343..fa8479789 100644
  
    if ([coder allowsKeyedCoding])
      {
-       name = [coder decodeObjectForKey: @"NSSelectorName"];
-       args = [coder decodeObjectForKey: @"NSArguments"];
+@@ -3528,6 +3660,7 @@ - (id) initWithCoder: (NSCoder *)coder
+ 	ALLOW([NSString class]));
+       args = decodeAllowing(coder, @"NSArguments",
+ 	ALLOW([NSArray class], [NSExpression class]));
 +      operand = [coder decodeObjectForKey: @"NSOperand"];
      }
    else
      {
-@@ -3300,6 +3433,25 @@ do { \
+@@ -3537,6 +3670,25 @@ - (id) initWithCoder: (NSCoder *)coder
  
    DESTROY(self);
  
@@ -331,7 +334,7 @@ index 6b4bb0343..fa8479789 100644
    return RETAIN([NSExpression expressionForFunction: name arguments: args]);
  }
  
-@@ -3632,6 +3784,408 @@ do { \
+@@ -3870,6 +4022,408 @@ - (id) _eval_now: (NSArray *)expressions
  
  
  
@@ -740,7 +743,7 @@ index 6b4bb0343..fa8479789 100644
  @implementation NSArray (NSPredicate)
  
  - (NSArray *) filteredArrayUsingPredicate: (NSPredicate *)predicate
-@@ -4448,8 +5002,81 @@ GSKeyPathIfKeyPath(NSExpression *expression)
+@@ -4698,8 +5252,81 @@ - (NSExpression *) parseFunctionalExpression
                                format: @"Missing ) in function arguments"];
                  }
              }
@@ -1016,5 +1019,5 @@ index 000000000..9cb9561fe
 +  return 0;
 +}
 -- 
-2.43.0
+2.50.1 (Apple Git-155)
 

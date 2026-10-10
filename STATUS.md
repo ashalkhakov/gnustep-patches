@@ -109,6 +109,17 @@ action, a `replace="all"` submission, and is
 XFormsKit should fix that before moving its gnustep-patches pin past the
 commit that removes this patch.
 
+`predicate-subquery` ([#829](https://github.com/gnustep/libs-base/pull/829))
+was merged on 2026-10-10 (aac55d9) and has left; gnustep-coredata, listed
+for it, holds no copy.  The same day `predicate-secure-coding` was added
+for [#766](https://github.com/gnustep/libs-base/issues/766): NSSecureCoding
+and -allowEvaluation for predicates and expressions, matched against what
+macOS does.  It and `selector-and-fetch-expressions` both edit how a key
+path and a function are decoded, so the latter was rebased onto it, with
+only those lines changed.  The selector-function and fetch expressions it
+adds are not yet readable with secure coding (their strings are not in
+an allowed set), which wants doing before that patch goes upstream.
+
 Gershwin merges only into `dev`, never `main`, so its patches here are made
 against `dev` and `Scripts/build-gnustep.sh` builds Eau from it, at a pinned
 commit (`EAU_REF`, 01be00b since 2026-10-08): a change on `dev` broke every
@@ -134,8 +145,8 @@ in use.
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
 | `autoreleased-return-value` | libobjc2 | test | [#426](https://github.com/gnustep/libobjc2/pull/426) closed unmerged | (none: ODataStore works around it) |
+| `predicate-secure-coding` | libs-base | test | not sent yet ([#766](https://github.com/gnustep/libs-base/issues/766)) | (none: FreeCoreData will use it from here) |
 | `addnamespace-duplicate-prefix-leak` | libs-base | program | [#838](https://github.com/gnustep/libs-base/pull/838) | (none) |
-| `predicate-subquery` | libs-base | test | [#829](https://github.com/gnustep/libs-base/pull/829) | gnustep-coredata |
 | `selector-and-fetch-expressions` | libs-base | test | not sent yet | gnustep-coredata |
 | `predicate-format-expression-arguments` | libs-base | test | not sent yet | gnustep-coredata |
 | `predicate-nil-constant-format` | libs-base | test | not sent yet | gnustep-coredata |
