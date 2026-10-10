@@ -120,6 +120,7 @@ in use.
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
 | `autoreleased-return-value` | libobjc2 | test | [#426](https://github.com/gnustep/libobjc2/pull/426) closed unmerged | (none: ODataStore works around it) |
+| `addnamespace-duplicate-prefix-leak` | libs-base | program | [#838](https://github.com/gnustep/libs-base/pull/838) | (none) |
 | `expression-binary-coding` | libs-base | test | [#815](https://github.com/gnustep/libs-base/pull/815) | gnustep-coredata |
 | `predicate-subquery` | libs-base | test | [#829](https://github.com/gnustep/libs-base/pull/829) | gnustep-coredata |
 | `selector-and-fetch-expressions` | libs-base | test | not sent yet | gnustep-coredata |

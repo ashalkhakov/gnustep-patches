@@ -1,0 +1,49 @@
+From c4cd34f8f6bda0a6dde37837456d1f25c7c29be2 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Sat, 10 Oct 2026 20:08:26 +0500
+Subject: [PATCH] Free the namespace copy -addNamespace: does not keep
+
+-addNamespace: works on a copy of the namespace it is given.  When the
+element already declares a namespace with the same prefix, the copy
+replaces it only if that declaration is a placeholder; for a real one
+the copy is linked nowhere and is never freed.  The element keeps its
+first declaration, as before.
+
+This has leaked since the method began copying (7e995ff2a, 2012), for
+any prefix.  It surfaced in the test added by #820, which adds a second
+default namespace to an element that already declares one: valgrind
+reports the copy made at the start of -addNamespace: as definitely lost.
+
+Free the copy and go on with the declaration the element has, so that
+everything after the search refers to a namespace the element owns.
+
+There is no test in the suite: the fault is a leak, which only a leak
+checker sees.  Under valgrind, Tests/base/NSXMLNode/defaultNamespace.m
+loses one block without the change and none with it; adding a
+namespace twice, with an empty prefix and with a non-empty one, loses
+96 bytes in two blocks without it and none with it.  The NSXMLNode,
+NSXMLElement and NSXMLDocument tests are unaffected.
+---
+ Source/NSXMLElement.m | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/Source/NSXMLElement.m b/Source/NSXMLElement.m
+index b1f048532..9cb9b3627 100644
+--- a/Source/NSXMLElement.m
++++ b/Source/NSXMLElement.m
+@@ -564,6 +564,12 @@ - (void) addNamespace: (NSXMLNode*)aNamespace
+           ns->next = cur->next;
+           cur->next = NULL;
+         }
++      else
++        {
++          xmlFreeNs(ns);
++          ns = cur;
++          prefix = ns->prefix;
++        }
+     }
+ 
+   // Are we setting a default namespace?
+-- 
+2.50.1 (Apple Git-155)
+
