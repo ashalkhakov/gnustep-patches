@@ -99,6 +99,16 @@ without the fix and passes 9 of 9 with it alone (NSPredicate 289 of
 left: #977 reverse-applies, and #815 stopped reverse-applying at the
 commit after it.  gnustep-coredata, listed for both, holds no copy.
 
+`action-sender-lifetime` ([#976](https://github.com/gnustep/libs-gui/pull/976))
+was withdrawn on 2026-10-10.  Fred agreed the change was correct but asked
+for a specific reason to retain at those two places, and XFormsKit, which
+needed it, has kept retired controls alive until the event ends since
+ad30625.  One path there still frees the sending control during its own
+action, a `replace="all"` submission, and is
+[XFormsKit#30](https://github.com/ashalkhakov/XFormsKit/issues/30).
+XFormsKit should fix that before moving its gnustep-patches pin past the
+commit that removes this patch.
+
 Gershwin merges only into `dev`, never `main`, so its patches here are made
 against `dev` and `Scripts/build-gnustep.sh` builds Eau from it, at a pinned
 commit (`EAU_REF`, 01be00b since 2026-10-08): a change on `dev` broke every
@@ -135,8 +145,7 @@ in use.
 | `nsxmlelement-attribute-private-doc` | libs-base | program | [#823](https://github.com/gnustep/libs-base/pull/823) | (none: WorkflowKit uses it from here) |
 | `tableview-column-autoresizing-style` | libs-gui | test | [#982](https://github.com/gnustep/libs-gui/pull/982) | gnustep-coredata |
 | `xib-date-picker` | libs-gui | test | [#984](https://github.com/gnustep/libs-gui/pull/984) | gnustep-coredata |
-| `action-sender-lifetime` | libs-gui | test | [#976](https://github.com/gnustep/libs-gui/pull/976) | GSXFormsKit, HomeRow |
-| `tracking-walk-retains-subviews` | libs-gui | program | [#983](https://github.com/gnustep/libs-gui/pull/983) | GSXFormsKit, HomeRow |
+| `tracking-walk-retains-subviews` | libs-gui | program | [#983](https://github.com/gnustep/libs-gui/pull/983) | (none: no copies remain) |
 | `graphicscontext-backend-recursion` | libs-gui | program | [#978](https://github.com/gnustep/libs-gui/pull/978) | RDLKit |
 | `tableview-bound-value-transform` | libs-gui | test | [#981](https://github.com/gnustep/libs-gui/pull/981) | (none: WorkflowKit uses it from here) |
 | `cgrectunion-size` | libs-opal | none | [#71](https://github.com/gnustep/libs-opal/pull/71) | GSXFormsKit |
@@ -366,8 +375,6 @@ along with the lines that apply them.
 
 ## Duplicates to retire
 
-`action-sender-lifetime` and `tracking-walk-retains-subviews` exist
-byte-for-byte in both `GSXFormsKit` and `HomeRow` (as did
-`gscstableau-removerow-use-after-free`, now superseded upstream).  HomeRow's README says they were copied unchanged and that it
-does not knowingly depend on them.  Both should consume this repository
-instead of holding copies.
+None remain.  `action-sender-lifetime` and `tracking-walk-retains-subviews`
+used to exist byte-for-byte in XFormsKit (GSXFormsKit) and HomeRow; as of
+2026-10-10 neither repository holds a copy of either.
