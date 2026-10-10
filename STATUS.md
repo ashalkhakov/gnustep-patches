@@ -42,6 +42,44 @@ every build of libs-base from master; the other five reverse-apply.
 gnustep-coredata, which the table listed as carrying two of them, has no
 copy of its own either.
 
+Fifteen more left on 2026-10-10, merged on 2026-10-09 and -10.  From
+libs-base: `predicate-equality-options`
+([#826](https://github.com/gnustep/libs-base/pull/826), 441eabe),
+`dateformatter-cell-behavior`
+([#813](https://github.com/gnustep/libs-base/pull/813), b7e4f0c),
+`nsxmlelement-addattribute-value-doc`
+([#822](https://github.com/gnustep/libs-base/pull/822), de027d0),
+`nsxmlnode-string-value-escaping`
+([#825](https://github.com/gnustep/libs-base/pull/825), b51b670),
+`nsxmlnode-attribute-prefix`
+([#824](https://github.com/gnustep/libs-base/pull/824), 2933c29),
+`sortdescriptor-nil-first`
+([#831](https://github.com/gnustep/libs-base/pull/831), 29a6a76),
+`nsxml-default-namespace`
+([#820](https://github.com/gnustep/libs-base/pull/820), fda167a),
+`nsxml-default-namespace-descendants`
+([#819](https://github.com/gnustep/libs-base/pull/819), bd71b3b),
+`decimal-plain-notation`
+([#814](https://github.com/gnustep/libs-base/pull/814), 810b3e9),
+`keyedunarchiver-non-archive`
+([#818](https://github.com/gnustep/libs-base/pull/818), b779502),
+`urlprotocol-relative-redirect`
+([#834](https://github.com/gnustep/libs-base/pull/834), fd35e3a),
+`predicate-matches-line-anchors`
+([#828](https://github.com/gnustep/libs-base/pull/828), edefd35) and
+`predicate-like-wildcards`
+([#827](https://github.com/gnustep/libs-base/pull/827), 337ab07).  From
+libs-gui: `tableau-expression-lifetime-test`
+([#980](https://github.com/gnustep/libs-gui/pull/980), 1615b4e) and
+`pdf-print-operation` ([#979](https://github.com/gnustep/libs-gui/pull/979),
+2c1f6a2).  `nsxml-default-namespace` neither applied nor reverse-applied
+after rfm's cleanup 075fae9b4, so it stopped every build of libs-base from
+master; the other fourteen reverse-apply.  The same cleanup reformatted a
+context line of `xmlns-attribute`, which was rebased onto master 6bf26da5b
+with its diff otherwise unchanged.  gnustep-coredata, GSXFormsKit
+(XFormsKit) and RDLKit, which the table listed as carrying some of them,
+apply this repository at a pinned commit and hold no copy.
+
 Gershwin merges only into `dev`, never `main`, so its patches here are made
 against `dev` and `Scripts/build-gnustep.sh` builds Eau from it, at a pinned
 commit (`EAU_REF`, 01be00b since 2026-10-08): a change on `dev` broke every
@@ -67,37 +105,22 @@ in use.
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
 | `autoreleased-return-value` | libobjc2 | test | [#426](https://github.com/gnustep/libobjc2/pull/426) closed unmerged | (none: ODataStore works around it) |
-| `predicate-equality-options` | libs-base | test | [#826](https://github.com/gnustep/libs-base/pull/826) | gnustep-coredata |
-| `expression-binary-coding` | libs-base | test | [#815](https://github.com/gnustep/libs-base/pull/815) | gnustep-coredata |
+| `expression-binary-coding` | libs-base | test | [#815](https://github.com/gnustep/libs-base/pull/815) changes requested | gnustep-coredata |
 | `predicate-subquery` | libs-base | test | [#829](https://github.com/gnustep/libs-base/pull/829) | gnustep-coredata |
 | `selector-and-fetch-expressions` | libs-base | test | not sent yet | gnustep-coredata |
 | `predicate-format-expression-arguments` | libs-base | test | not sent yet | gnustep-coredata |
 | `predicate-nil-constant-format` | libs-base | test | not sent yet | gnustep-coredata |
 | `predicate-format-nil-arguments` | libs-base | test | not sent yet | (none) |
 | `plist-read-binary` | libs-base | test | not sent yet | TopoText (SimpleNotes' SNSecretStore reads through NSPropertyListSerialization) |
-| `dateformatter-cell-behavior` | libs-base | test | [#813](https://github.com/gnustep/libs-base/pull/813) | gnustep-coredata |
-| `nsxmlelement-addattribute-value-doc` | libs-base | program | [#822](https://github.com/gnustep/libs-base/pull/822) | GSXFormsKit |
 | `xmlns-attribute` | libs-base | test | [#835](https://github.com/gnustep/libs-base/pull/835) | RDLKit |
-| `nsxmlnode-string-value-escaping` | libs-base | test | [#825](https://github.com/gnustep/libs-base/pull/825) | (none: ODataStore uses it from here) |
-| `nsxmlnode-attribute-prefix` | libs-base | test | [#824](https://github.com/gnustep/libs-base/pull/824) | (none: WorkflowKit's designer reads an attribute's URI instead) |
-| `sortdescriptor-nil-first` | libs-base | test | [#831](https://github.com/gnustep/libs-base/pull/831) | (none: FreeCoreData's in-memory sorts and ORMKit's paging rely on it from here) |
-| `nsxml-default-namespace` | libs-base | test | [#820](https://github.com/gnustep/libs-base/pull/820) | (none: ODataStore uses it from here) |
 | `nsxml-prefixed-descendants` | libs-base | test | [#821](https://github.com/gnustep/libs-base/pull/821) | (none: WorkflowKit uses it from here) |
-| `nsxml-default-namespace-descendants` | libs-base | test | [#819](https://github.com/gnustep/libs-base/pull/819) | (none: WorkflowKit uses it from here) |
 | `nsxmlelement-attribute-private-doc` | libs-base | program | [#823](https://github.com/gnustep/libs-base/pull/823) | (none: WorkflowKit uses it from here) |
-| `decimal-plain-notation` | libs-base | test | [#814](https://github.com/gnustep/libs-base/pull/814) | (none: WorkflowKit uses it from here) |
 | `string-diacritic-insensitive-search` | libs-base | test | [#832](https://github.com/gnustep/libs-base/pull/832) | (none: ODataStore uses it from here) |
-| `keyedunarchiver-non-archive` | libs-base | test | [#818](https://github.com/gnustep/libs-base/pull/818) | (none: ODataStore uses it from here) |
-| `urlprotocol-relative-redirect` | libs-base | test | [#834](https://github.com/gnustep/libs-base/pull/834) | (none: ODataStore uses it from here) |
-| `predicate-matches-line-anchors` | libs-base | test | [#828](https://github.com/gnustep/libs-base/pull/828) | (none) |
-| `predicate-like-wildcards` | libs-base | test | [#827](https://github.com/gnustep/libs-base/pull/827) | (none) |
-| `arraycontroller-selection-kvo` | libs-gui | test | [#977](https://github.com/gnustep/libs-gui/pull/977) | gnustep-coredata |
+| `arraycontroller-selection-kvo` | libs-gui | test | [#977](https://github.com/gnustep/libs-gui/pull/977) review comment | gnustep-coredata |
 | `tableview-column-autoresizing-style` | libs-gui | test | [#982](https://github.com/gnustep/libs-gui/pull/982) | gnustep-coredata |
 | `xib-date-picker` | libs-gui | none | [#984](https://github.com/gnustep/libs-gui/pull/984) | gnustep-coredata |
 | `action-sender-lifetime` | libs-gui | test | [#976](https://github.com/gnustep/libs-gui/pull/976) | GSXFormsKit, HomeRow |
-| `tableau-expression-lifetime-test` | libs-gui | test only | [#980](https://github.com/gnustep/libs-gui/pull/980) | (new: the fix is already upstream) |
 | `tracking-walk-retains-subviews` | libs-gui | program | [#983](https://github.com/gnustep/libs-gui/pull/983) | GSXFormsKit, HomeRow |
-| `pdf-print-operation` | libs-gui | program | [#979](https://github.com/gnustep/libs-gui/pull/979) | RDLKit |
 | `graphicscontext-backend-recursion` | libs-gui | program | [#978](https://github.com/gnustep/libs-gui/pull/978) | RDLKit |
 | `tableview-bound-value-transform` | libs-gui | test | [#981](https://github.com/gnustep/libs-gui/pull/981) | (none: WorkflowKit uses it from here) |
 | `cgrectunion-size` | libs-opal | none | [#71](https://github.com/gnustep/libs-opal/pull/71) | GSXFormsKit |

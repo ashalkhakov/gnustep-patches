@@ -1,4 +1,4 @@
-From 1113ba564459f36610bc0bf9c2fcdeb03b512e20 Mon Sep 17 00:00:00 2001
+From 3f966703f4cc80018ff43b4d7e31329c7b1f4ba3 Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Thu, 24 Sep 2026 12:00:00 +0500
 Subject: [PATCH] Treat an xmlns:prefix attribute as a namespace declaration
@@ -62,10 +62,10 @@ which is what used to hide the fault and made it look intermittent.
  create mode 100644 Tests/base/NSXMLElement/xmlnsAttribute.m
 
 diff --git a/Source/NSXMLElement.m b/Source/NSXMLElement.m
-index 74842090a..473d65088 100644
+index f11d9f11d..13f8ad680 100644
 --- a/Source/NSXMLElement.m
 +++ b/Source/NSXMLElement.m
-@@ -253,6 +253,18 @@ GS_PRIVATE_INTERNAL(NSXMLElement)
+@@ -261,6 +261,18 @@ - (void) addAttribute: (NSXMLNode*)attribute
  		  format: @"Tried to add attribute to multiple parents."];
      }
  
@@ -83,12 +83,12 @@ index 74842090a..473d65088 100644
 +
    if (attr->ns != NULL)
      {
-       xmlNsPtr ns = attr->ns;
+       xmlNsPtr	ns = attr->ns;
 diff --git a/Source/NSXMLNode.m b/Source/NSXMLNode.m
-index e8300f8c5..c42cf5ac8 100644
+index ef611238c..97759c5b0 100644
 --- a/Source/NSXMLNode.m
 +++ b/Source/NSXMLNode.m
-@@ -2132,7 +2132,15 @@ execute_xpath(xmlNodePtr node, NSString *xpath_exp, NSDictionary *constants,
+@@ -2240,7 +2240,15 @@ - (void) setName: (NSString *)name
          }
        
        localName = xmlSplitQName2(xmlName, &prefix);
@@ -228,5 +228,5 @@ index 000000000..fd0f74959
 +  return 0;
 +}
 -- 
-2.43.0
+2.50.1 (Apple Git-155)
 
