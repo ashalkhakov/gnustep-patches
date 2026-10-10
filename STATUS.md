@@ -120,6 +120,10 @@ only those lines changed.  The selector-function and fetch expressions it
 adds are not yet readable with secure coding (their strings are not in
 an allowed set), which wants doing before that patch goes upstream.
 
+`addnamespace-duplicate-prefix-leak`
+([#838](https://github.com/gnustep/libs-base/pull/838)) was merged on
+2026-10-10 as 85d1ada, unchanged, and has left.
+
 Gershwin merges only into `dev`, never `main`, so its patches here are made
 against `dev` and `Scripts/build-gnustep.sh` builds Eau from it, at a pinned
 commit (`EAU_REF`, 01be00b since 2026-10-08): a change on `dev` broke every
@@ -146,7 +150,6 @@ in use.
 | --- | --- | --- | --- | --- |
 | `autoreleased-return-value` | libobjc2 | test | [#426](https://github.com/gnustep/libobjc2/pull/426) closed unmerged | (none: ODataStore works around it) |
 | `predicate-secure-coding` | libs-base | test | not sent yet ([#766](https://github.com/gnustep/libs-base/issues/766)) | (none: FreeCoreData will use it from here) |
-| `addnamespace-duplicate-prefix-leak` | libs-base | program | [#838](https://github.com/gnustep/libs-base/pull/838) | (none) |
 | `selector-and-fetch-expressions` | libs-base | test | not sent yet | gnustep-coredata |
 | `predicate-format-expression-arguments` | libs-base | test | not sent yet | gnustep-coredata |
 | `predicate-nil-constant-format` | libs-base | test | not sent yet | gnustep-coredata |
