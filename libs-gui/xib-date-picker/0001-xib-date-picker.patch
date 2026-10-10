@@ -1,4 +1,4 @@
-From 2b3fdb402df58ea830745bcd77c05dedbbfd5db2 Mon Sep 17 00:00:00 2001
+From de63cf0788fbe2f2edd8013adc0974be24143e79 Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Thu, 24 Sep 2026 12:00:00 +0500
 Subject: [PATCH] Decode date pickers from a xib
@@ -15,16 +15,22 @@ Add decoders for NSDatePickerElements, NSDatePickerType,
 NSDatePickerMode, NSDateValue (the current date when the xib says
 useCurrentDate), NSMinDate and NSMaxDate.
 
-There is no test here: the suite's xib tests read fixtures that
-Interface Builder produced, and a hand-written fixture does not
-instantiate through the same path. A xib saved from Interface Builder
-with a date picker in it would make this testable.
+Tests/gui/GSXib5KeyedUnarchiver/DatePicker.xib has a date picker for
+each style, the date and time element combinations, range mode, minimum
+and maximum dates and useCurrentDate, in the form Interface Builder
+writes them; ibtool compiles it without a warning. datePicker.m checks
+the values AppKit gives each of them when the compiled nib is loaded on
+macOS. Without the change 11 of its 14 checks fail.
 ---
- Source/GSXib5KeyedUnarchiver.m | 86 ++++++++++++++++++++++++++++++++++
- 1 file changed, 86 insertions(+)
+ Source/GSXib5KeyedUnarchiver.m                |  86 +++++++++++++++
+ .../gui/GSXib5KeyedUnarchiver/DatePicker.xib  |  80 ++++++++++++++
+ Tests/gui/GSXib5KeyedUnarchiver/datePicker.m  | 102 ++++++++++++++++++
+ 3 files changed, 268 insertions(+)
+ create mode 100644 Tests/gui/GSXib5KeyedUnarchiver/DatePicker.xib
+ create mode 100644 Tests/gui/GSXib5KeyedUnarchiver/datePicker.m
 
 diff --git a/Source/GSXib5KeyedUnarchiver.m b/Source/GSXib5KeyedUnarchiver.m
-index 0a3fc50da..0edf56fa6 100644
+index 0a3fc50d..0edf56fa 100644
 --- a/Source/GSXib5KeyedUnarchiver.m
 +++ b/Source/GSXib5KeyedUnarchiver.m
 @@ -42,6 +42,7 @@
@@ -35,7 +41,7 @@ index 0a3fc50da..0edf56fa6 100644
  #import "AppKit/NSCell.h"
  #import "AppKit/NSClipView.h"
  #import "AppKit/NSFormCell.h"
-@@ -357,6 +358,7 @@ static NSArray      *XmlBoolDefaultYes  = nil;
+@@ -357,6 +358,7 @@ + (void) initialize
                                      @"NSCellPrototype", @"NSBrFlags", @"NSNumberOfVisibleColumns",
                                      @"NSWhite", @"NSRGB", @"NSCYMK",
                                      @"NSCellFlags", @"NSCellFlags2",
@@ -43,7 +49,7 @@ index 0a3fc50da..0edf56fa6 100644
                                      @"NSButtonFlags", @"NSButtonFlags2",
                                      @"NSUsesItemFromMenu",
                                      @"NSNormalImage", @"NSAlternateImage",
-@@ -456,6 +458,12 @@ static NSArray      *XmlBoolDefaultYes  = nil;
+@@ -456,6 +458,12 @@ + (void) initialize
                 @"decodeTransitionStyle:", @"NSTransitionStyle",
  	       @"decodeShadowOffsetHoriz:", @"NSShadowHoriz",
  	       @"decodeShadowOffsetVert:", @"NSShadowVert",
@@ -56,7 +62,7 @@ index 0a3fc50da..0edf56fa6 100644
                   nil];
            RETAIN(XmlKeyToDecoderSelectorMap);
  
-@@ -2566,6 +2574,84 @@ didStartElement: (NSString*)elementName
+@@ -2566,6 +2574,84 @@ - (id) decodeSegmentItemImageForElement: (GSXibElement*)element
    return object;
  }
  
@@ -141,6 +147,200 @@ index 0a3fc50da..0edf56fa6 100644
  - (id) decodeButtonFlags1ForElement: (GSXibElement*)element
  {
    NSNumber *value = nil;
+diff --git a/Tests/gui/GSXib5KeyedUnarchiver/DatePicker.xib b/Tests/gui/GSXib5KeyedUnarchiver/DatePicker.xib
+new file mode 100644
+index 00000000..b0a2380f
+--- /dev/null
++++ b/Tests/gui/GSXib5KeyedUnarchiver/DatePicker.xib
+@@ -0,0 +1,80 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<document type="com.apple.InterfaceBuilder3.Cocoa.XIB" version="3.0" toolsVersion="21507" targetRuntime="MacOSX.Cocoa" propertyAccessControl="none" useAutolayout="YES" customObjectInstantitationMethod="direct">
++    <dependencies>
++        <deployment identifier="macosx"/>
++        <plugIn identifier="com.apple.InterfaceBuilder.CocoaPlugin" version="21507"/>
++    </dependencies>
++    <objects>
++        <customObject id="-2" userLabel="File's Owner" customClass="NSApplication"/>
++        <customObject id="-1" userLabel="First Responder" customClass="FirstResponder"/>
++        <customObject id="-3" userLabel="Application" customClass="NSObject"/>
++
++        <!-- Interface Builder writes the default style (text field and
++             stepper) by leaving datePickerStyle out.  Year, month and day. -->
++        <datePicker id="ymd">
++            <rect key="frame" x="20" y="10" width="160" height="28"/>
++            <datePickerCell key="cell" borderStyle="bezel" alignment="left" id="ymd-cell">
++                <font key="font" metaFont="system"/>
++                <date key="date" timeIntervalSinceReferenceDate="-595929600">
++                    <!--1982-02-12 16:00:00 +0000-->
++                </date>
++                <datePickerElements key="datePickerElements" year="YES" month="YES" day="YES"/>
++            </datePickerCell>
++        </datePicker>
++
++        <!-- Year and month, without the day. -->
++        <datePicker id="ym">
++            <rect key="frame" x="20" y="50" width="160" height="28"/>
++            <datePickerCell key="cell" borderStyle="bezel" alignment="left" id="ym-cell">
++                <font key="font" metaFont="system"/>
++                <date key="date" timeIntervalSinceReferenceDate="-595929600">
++                    <!--1982-02-12 16:00:00 +0000-->
++                </date>
++                <datePickerElements key="datePickerElements" year="YES" month="YES"/>
++            </datePickerCell>
++        </datePicker>
++
++        <!-- Text field style; hour and minute, without seconds. -->
++        <datePicker id="hm">
++            <rect key="frame" x="20" y="90" width="160" height="28"/>
++            <datePickerCell key="cell" borderStyle="bezel" alignment="left" datePickerStyle="textField" id="hm-cell">
++                <font key="font" metaFont="system"/>
++                <date key="date" timeIntervalSinceReferenceDate="-595929600">
++                    <!--1982-02-12 16:00:00 +0000-->
++                </date>
++                <datePickerElements key="datePickerElements" hour="YES" minute="YES"/>
++            </datePickerCell>
++        </datePicker>
++
++        <!-- Clock and calendar style, limited to a range of dates. -->
++        <datePicker id="bounded">
++            <rect key="frame" x="20" y="130" width="278" height="148"/>
++            <datePickerCell key="cell" alignment="left" datePickerStyle="clockAndCalendar" id="bounded-cell">
++                <font key="font" metaFont="system"/>
++                <date key="date" timeIntervalSinceReferenceDate="-595929600">
++                    <!--1982-02-12 16:00:00 +0000-->
++                </date>
++                <date key="minDate" timeIntervalSinceReferenceDate="-631152000">
++                    <!--1981-01-01 00:00:00 +0000-->
++                </date>
++                <date key="maxDate" timeIntervalSinceReferenceDate="-568080000">
++                    <!--1983-01-01 00:00:00 +0000-->
++                </date>
++                <datePickerElements key="datePickerElements" year="YES" month="YES" day="YES"/>
++            </datePickerCell>
++        </datePicker>
++
++        <!-- Date, time with seconds and time zone; range selection; the
++             current date, which wins over the saved <date>. -->
++        <datePicker id="range">
++            <rect key="frame" x="20" y="290" width="278" height="148"/>
++            <datePickerCell key="cell" alignment="left" useCurrentDate="YES" datePickerStyle="clockAndCalendar" datePickerMode="range" id="range-cell">
++                <font key="font" metaFont="system"/>
++                <date key="date" timeIntervalSinceReferenceDate="809700481">
++                    <!--2026-08-29 12:48:01 +0000-->
++                </date>
++                <datePickerElements key="datePickerElements" year="YES" month="YES" day="YES" hour="YES" minute="YES" second="YES" timeZone="YES"/>
++            </datePickerCell>
++        </datePicker>
++    </objects>
++</document>
+diff --git a/Tests/gui/GSXib5KeyedUnarchiver/datePicker.m b/Tests/gui/GSXib5KeyedUnarchiver/datePicker.m
+new file mode 100644
+index 00000000..1d6f7b3f
+--- /dev/null
++++ b/Tests/gui/GSXib5KeyedUnarchiver/datePicker.m
+@@ -0,0 +1,102 @@
++#import "ObjectTesting.h"
++
++#import <Foundation/NSData.h>
++#import <Foundation/NSDate.h>
++#import <AppKit/NSApplication.h>
++#import <AppKit/NSDatePicker.h>
++#import <AppKit/NSDatePickerCell.h>
++#import <Additions/GNUstepGUI/GSXibKeyedUnarchiver.h>
++
++/* The values checked here are the ones AppKit gives for DatePicker.xib
++ * when it is compiled by ibtool and loaded on macOS.
++ */
++static NSDatePicker *
++pickerAt(NSArray *rootObjects, CGFloat y)
++{
++  NSEnumerator	*enumerator = [rootObjects objectEnumerator];
++  id		element;
++
++  while ((element = [enumerator nextObject]) != nil)
++    {
++      if ([element isKindOfClass: [NSDatePicker class]]
++	&& [element frame].origin.y == y)
++	{
++	  return element;
++	}
++    }
++  return nil;
++}
++
++int main()
++{
++  START_SET("GSXib5KeyedUnarchiver NSDatePicker tests")
++
++  NS_DURING
++    {
++      [NSApplication sharedApplication];
++    }
++  NS_HANDLER
++    {
++      if ([[localException name]
++	isEqualToString: NSInternalInconsistencyException ])
++	{
++	  SKIP("It looks like GNUstep backend is not yet installed")
++	}
++    }
++  NS_ENDHANDLER
++
++  NSData		*data;
++  GSXibKeyedUnarchiver	*unarchiver;
++  NSArray		*rootObjects;
++  NSDatePicker		*picker;
++  NSDate		*saved;
++
++  data = [NSData dataWithContentsOfFile: @"DatePicker.xib"];
++  unarchiver = [GSXibKeyedUnarchiver unarchiverForReadingWithData: data];
++  rootObjects = [unarchiver decodeObjectForKey: @"IBDocument.RootObjects"];
++  saved = [NSDate dateWithTimeIntervalSinceReferenceDate: -595929600];
++
++  picker = pickerAt(rootObjects, 10);
++  PASS(picker != nil, "the year-month-day picker was found")
++  PASS([picker datePickerStyle] == NSTextFieldAndStepperDatePickerStyle,
++    "no datePickerStyle is the text field and stepper style")
++  PASS([picker datePickerMode] == NSSingleDateMode,
++    "no datePickerMode is single date mode")
++  PASS([picker datePickerElements] == NSYearMonthDayDatePickerElementFlag,
++    "year, month and day are year-month-day")
++  PASS_EQUAL([picker dateValue], saved, "the saved date is the date")
++
++  picker = pickerAt(rootObjects, 50);
++  PASS([picker datePickerElements] == NSYearMonthDatePickerElementFlag,
++    "year and month are year-month")
++
++  picker = pickerAt(rootObjects, 90);
++  PASS([picker datePickerStyle] == NSTextFieldDatePickerStyle,
++    "datePickerStyle textField is the text field style")
++  PASS([picker datePickerElements] == NSHourMinuteDatePickerElementFlag,
++    "hour and minute are hour-minute")
++
++  picker = pickerAt(rootObjects, 130);
++  PASS([picker datePickerStyle] == NSClockAndCalendarDatePickerStyle,
++    "datePickerStyle clockAndCalendar is the clock and calendar style")
++  PASS_EQUAL([picker minDate],
++    [NSDate dateWithTimeIntervalSinceReferenceDate: -631152000],
++    "minDate is the earliest date")
++  PASS_EQUAL([picker maxDate],
++    [NSDate dateWithTimeIntervalSinceReferenceDate: -568080000],
++    "maxDate is the latest date")
++
++  picker = pickerAt(rootObjects, 290);
++  PASS([picker datePickerMode] == NSRangeDateMode,
++    "datePickerMode range is range mode")
++  PASS([picker datePickerElements]
++    == (NSYearMonthDayDatePickerElementFlag
++      | NSHourMinuteSecondDatePickerElementFlag
++      | NSTimeZoneDatePickerElementFlag),
++    "every element with seconds and the time zone")
++  PASS(fabs([[picker dateValue] timeIntervalSinceNow]) < 60,
++    "useCurrentDate takes the current date over the saved one")
++
++  END_SET("GSXib5KeyedUnarchiver NSDatePicker tests")
++  return 0;
++}
 -- 
-2.43.0
+2.50.1 (Apple Git-155)
 

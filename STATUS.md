@@ -132,7 +132,7 @@ in use.
 | `nsxmlelement-attribute-private-doc` | libs-base | program | [#823](https://github.com/gnustep/libs-base/pull/823) | (none: WorkflowKit uses it from here) |
 | `arraycontroller-selection-kvo` | libs-gui | test | [#977](https://github.com/gnustep/libs-gui/pull/977) | gnustep-coredata |
 | `tableview-column-autoresizing-style` | libs-gui | test | [#982](https://github.com/gnustep/libs-gui/pull/982) | gnustep-coredata |
-| `xib-date-picker` | libs-gui | none | [#984](https://github.com/gnustep/libs-gui/pull/984) | gnustep-coredata |
+| `xib-date-picker` | libs-gui | test | [#984](https://github.com/gnustep/libs-gui/pull/984) | gnustep-coredata |
 | `action-sender-lifetime` | libs-gui | test | [#976](https://github.com/gnustep/libs-gui/pull/976) | GSXFormsKit, HomeRow |
 | `tracking-walk-retains-subviews` | libs-gui | program | [#983](https://github.com/gnustep/libs-gui/pull/983) | GSXFormsKit, HomeRow |
 | `graphicscontext-backend-recursion` | libs-gui | program | [#978](https://github.com/gnustep/libs-gui/pull/978) | RDLKit |
