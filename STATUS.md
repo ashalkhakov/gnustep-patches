@@ -80,6 +80,21 @@ with its diff otherwise unchanged.  gnustep-coredata, GSXFormsKit
 (XFormsKit) and RDLKit, which the table listed as carrying some of them,
 apply this repository at a pinned commit and hold no copy.
 
+Two more left later on 2026-10-10: `xmlns-attribute`
+([#835](https://github.com/gnustep/libs-base/pull/835), 0d5151b) and
+`string-diacritic-insensitive-search`
+([#832](https://github.com/gnustep/libs-base/pull/832), 2f74d2e), both
+tidied by rfm on the way in (f308d3c, 2ec74fe), so neither patch applied
+or reverse-applied any longer.  RDLKit, listed for `xmlns-attribute`,
+holds no copy.  The same day #815 and #977 were revised for their
+reviews: #815's test now builds its predicate in code, since the parser
+reads `$x.age` only with #829, and #977 names its keys with
+`NSSelectionIndexesBinding` and `NSContentBinding`.  Both were checked
+both ways in a fresh container: #815's test aborts at the first archive
+without the fix and passes 9 of 9 with it alone (NSPredicate 289 of
+289); #977's fails 8 of 9 without and passes with it (NSArrayController
+38 of 38).
+
 Gershwin merges only into `dev`, never `main`, so its patches here are made
 against `dev` and `Scripts/build-gnustep.sh` builds Eau from it, at a pinned
 commit (`EAU_REF`, 01be00b since 2026-10-08): a change on `dev` broke every
@@ -105,18 +120,16 @@ in use.
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
 | `autoreleased-return-value` | libobjc2 | test | [#426](https://github.com/gnustep/libobjc2/pull/426) closed unmerged | (none: ODataStore works around it) |
-| `expression-binary-coding` | libs-base | test | [#815](https://github.com/gnustep/libs-base/pull/815) changes requested | gnustep-coredata |
+| `expression-binary-coding` | libs-base | test | [#815](https://github.com/gnustep/libs-base/pull/815) | gnustep-coredata |
 | `predicate-subquery` | libs-base | test | [#829](https://github.com/gnustep/libs-base/pull/829) | gnustep-coredata |
 | `selector-and-fetch-expressions` | libs-base | test | not sent yet | gnustep-coredata |
 | `predicate-format-expression-arguments` | libs-base | test | not sent yet | gnustep-coredata |
 | `predicate-nil-constant-format` | libs-base | test | not sent yet | gnustep-coredata |
 | `predicate-format-nil-arguments` | libs-base | test | not sent yet | (none) |
 | `plist-read-binary` | libs-base | test | not sent yet | TopoText (SimpleNotes' SNSecretStore reads through NSPropertyListSerialization) |
-| `xmlns-attribute` | libs-base | test | [#835](https://github.com/gnustep/libs-base/pull/835) | RDLKit |
 | `nsxml-prefixed-descendants` | libs-base | test | [#821](https://github.com/gnustep/libs-base/pull/821) | (none: WorkflowKit uses it from here) |
 | `nsxmlelement-attribute-private-doc` | libs-base | program | [#823](https://github.com/gnustep/libs-base/pull/823) | (none: WorkflowKit uses it from here) |
-| `string-diacritic-insensitive-search` | libs-base | test | [#832](https://github.com/gnustep/libs-base/pull/832) | (none: ODataStore uses it from here) |
-| `arraycontroller-selection-kvo` | libs-gui | test | [#977](https://github.com/gnustep/libs-gui/pull/977) review comment | gnustep-coredata |
+| `arraycontroller-selection-kvo` | libs-gui | test | [#977](https://github.com/gnustep/libs-gui/pull/977) | gnustep-coredata |
 | `tableview-column-autoresizing-style` | libs-gui | test | [#982](https://github.com/gnustep/libs-gui/pull/982) | gnustep-coredata |
 | `xib-date-picker` | libs-gui | none | [#984](https://github.com/gnustep/libs-gui/pull/984) | gnustep-coredata |
 | `action-sender-lifetime` | libs-gui | test | [#976](https://github.com/gnustep/libs-gui/pull/976) | GSXFormsKit, HomeRow |
@@ -327,6 +340,14 @@ for, so it is a spurious warning rather than a wrong border.  And
 `NSInvalidArgumentException` ("Tried to add nil value for key 'NSOwner'") for
 a nil owner, which Cocoa accepts; that one wants checking against Cocoa with
 a compiled nib before it is called a bug.
+
+A third, still open on libs-base 2ec74fecb: `XMLStringCopy` in
+`Source/NSXMLPrivate.h` allocates with plain `malloc` the strings it hands
+to libxml2 (a document's version and encoding, a DTD's ids, an entity's
+name), and libxml2 frees them with `xmlFree`.  Harmless while `xmlFree` is
+`free`; it corrupts the heap of any program that installs its own allocator
+with `xmlMemSetup`.  `xmlMalloc`/`xmlStrdup` would be the fix.  The analysis
+is in `libs-base/xmlns-attribute/NOTES.md` as of 34b5f2b, retired with that fix.
 
 ## Done, and still carried somewhere
 

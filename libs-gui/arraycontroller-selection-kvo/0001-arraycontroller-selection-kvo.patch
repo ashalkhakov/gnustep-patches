@@ -1,4 +1,4 @@
-From b356b918e55af9d8383928fbc000fc47bc0b735c Mon Sep 17 00:00:00 2001
+From 302f0aac4f9b42ef6aa863e703b20d179681625e Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Thu, 24 Sep 2026 12:00:00 +0500
 Subject: [PATCH] Notify observers of the keys an array controller selection
@@ -29,47 +29,51 @@ for the seven selection-dependent key paths, changes the selection and
 reports which of them heard about it - exit 0 with the change, 1
 without.
 ---
- Source/NSArrayController.m                 |  41 +++++++
+ Source/NSArrayController.m                 |  45 ++++++++
  Tests/gui/NSArrayController/selectionKVO.m | 127 +++++++++++++++++++++
- 2 files changed, 168 insertions(+)
+ 2 files changed, 172 insertions(+)
  create mode 100644 Tests/gui/NSArrayController/selectionKVO.m
 
 diff --git a/Source/NSArrayController.m b/Source/NSArrayController.m
-index 471dee42c..68a7c76f9 100644
+index 471dee42..682b4a38 100644
 --- a/Source/NSArrayController.m
 +++ b/Source/NSArrayController.m
-@@ -397,6 +397,47 @@
+@@ -397,6 +397,51 @@ - (NSArray*) selectedObjects
    return [[self arrangedObjects] objectsAtIndexes: _selection_indexes];
  }
  
 ++ (NSSet*) keyPathsForValuesAffectingSelection
 +{
-+  return [NSSet setWithObjects: @"selectionIndexes", @"content", nil];
++  return [NSSet setWithObjects: NSSelectionIndexesBinding,
++    NSContentBinding, nil];
 +}
 +
 ++ (NSSet*) keyPathsForValuesAffectingSelectedObjects
 +{
-+  return [NSSet setWithObjects: @"selectionIndexes", @"content", nil];
++  return [NSSet setWithObjects: NSSelectionIndexesBinding,
++    NSContentBinding, nil];
 +}
 +
 ++ (NSSet*) keyPathsForValuesAffectingSelectionIndex
 +{
-+  return [NSSet setWithObject: @"selectionIndexes"];
++  return [NSSet setWithObject: NSSelectionIndexesBinding];
 +}
 +
 ++ (NSSet*) keyPathsForValuesAffectingCanRemove
 +{
-+  return [NSSet setWithObject: @"selectionIndexes"];
++  return [NSSet setWithObject: NSSelectionIndexesBinding];
 +}
 +
 ++ (NSSet*) keyPathsForValuesAffectingCanSelectNext
 +{
-+  return [NSSet setWithObjects: @"selectionIndexes", @"content", nil];
++  return [NSSet setWithObjects: NSSelectionIndexesBinding,
++    NSContentBinding, nil];
 +}
 +
 ++ (NSSet*) keyPathsForValuesAffectingCanSelectPrevious
 +{
-+  return [NSSet setWithObjects: @"selectionIndexes", @"content", nil];
++  return [NSSet setWithObjects: NSSelectionIndexesBinding,
++    NSContentBinding, nil];
 +}
 +
 +- (id) selection
@@ -88,7 +92,7 @@ index 471dee42c..68a7c76f9 100644
    return [_selection_indexes firstIndex];
 diff --git a/Tests/gui/NSArrayController/selectionKVO.m b/Tests/gui/NSArrayController/selectionKVO.m
 new file mode 100644
-index 000000000..74952f703
+index 00000000..74952f70
 --- /dev/null
 +++ b/Tests/gui/NSArrayController/selectionKVO.m
 @@ -0,0 +1,127 @@
@@ -220,5 +224,5 @@ index 000000000..74952f703
 +  return 0;
 +}
 -- 
-2.43.0
+2.50.1 (Apple Git-155)
 

@@ -1,4 +1,4 @@
-From e502fa27458be241623f27c7155261d704e0cbb2 Mon Sep 17 00:00:00 2001
+From 8bef4266add1684eb644a2d9fae19a388f7e8f5d Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Thu, 24 Sep 2026 12:00:00 +0500
 Subject: [PATCH] Encode and decode the binary expressions
@@ -20,16 +20,16 @@ initialiser reads all four kinds back.
 The test added here cannot even run on an unpatched library: the first
 archive raises "should be overridden by subclass".
 ---
- Source/NSPredicate.m                          | 46 +++++++++++++++
- .../base/NSPredicate/binaryExpressionCoding.m | 58 +++++++++++++++++++
- 2 files changed, 104 insertions(+)
+ Source/NSPredicate.m                          | 46 ++++++++++++
+ .../base/NSPredicate/binaryExpressionCoding.m | 73 +++++++++++++++++++
+ 2 files changed, 119 insertions(+)
  create mode 100644 Tests/base/NSPredicate/binaryExpressionCoding.m
 
 diff --git a/Source/NSPredicate.m b/Source/NSPredicate.m
-index dabf91d1c..20a64e26e 100644
+index 1dff712a0..dd81eb90d 100644
 --- a/Source/NSPredicate.m
 +++ b/Source/NSPredicate.m
-@@ -2655,6 +2655,52 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
+@@ -2731,6 +2731,52 @@ - (id) initWithCoder: (NSCoder *)coder
  
  @implementation GSBinaryExpression
  
@@ -84,16 +84,23 @@ index dabf91d1c..20a64e26e 100644
    GSBinaryExpression	*o = other;
 diff --git a/Tests/base/NSPredicate/binaryExpressionCoding.m b/Tests/base/NSPredicate/binaryExpressionCoding.m
 new file mode 100644
-index 000000000..b25c8315e
+index 000000000..3e5cbddeb
 --- /dev/null
 +++ b/Tests/base/NSPredicate/binaryExpressionCoding.m
-@@ -0,0 +1,58 @@
+@@ -0,0 +1,73 @@
 +#import "ObjectTesting.h"
 +#import "Foundation/NSAutoreleasePool.h"
++#import "Foundation/NSComparisonPredicate.h"
 +#import "Foundation/NSExpression.h"
 +#import "Foundation/NSKeyedArchiver.h"
 +#import "Foundation/NSPredicate.h"
 +#import "Foundation/NSString.h"
++#import "Foundation/NSValue.h"
++
++@interface NSExpression (KeyPathComposition)
+++ (NSExpression *) expressionForKeyPathCompositionWithLeft: (NSExpression*)left
++  right: (NSExpression*)right;
++@end
 +
 +/* A key path composition, a union, an intersection and a difference all
 + * share one class, which had no -encodeWithCoder: of its own and so
@@ -120,6 +127,7 @@ index 000000000..b25c8315e
 +  NSExpression		*keyPath;
 +  NSExpression		*friends;
 +  NSExpression		*colleagues;
++  NSExpression		*composition;
 +  NSPredicate		*predicate;
 +  NSPredicate		*back;
 +
@@ -128,8 +136,9 @@ index 000000000..b25c8315e
 +  friends = [NSExpression expressionForKeyPath: @"friends"];
 +  colleagues = [NSExpression expressionForKeyPath: @"colleagues"];
 +
-+  testRoundTrip([NSExpression expressionForKeyPathCompositionWithLeft: variable
-+    right: keyPath], "a key path composition");
++  composition = [NSExpression expressionForKeyPathCompositionWithLeft: variable
++    right: keyPath];
++  testRoundTrip(composition, "a key path composition");
 +  testRoundTrip([NSExpression expressionForUnionSet: friends with: colleagues],
 +    "a union");
 +  testRoundTrip([NSExpression expressionForIntersectSet: friends
@@ -137,7 +146,13 @@ index 000000000..b25c8315e
 +  testRoundTrip([NSExpression expressionForMinusSet: friends with: colleagues],
 +    "a difference");
 +
-+  predicate = [NSPredicate predicateWithFormat: @"$x.age > %d", 40];
++  predicate = [NSComparisonPredicate
++    predicateWithLeftExpression: composition
++    rightExpression: [NSExpression expressionForConstantValue:
++      [NSNumber numberWithInt: 40]]
++    modifier: NSDirectPredicateModifier
++    type: NSGreaterThanPredicateOperatorType
++    options: 0];
 +  back = [NSKeyedUnarchiver unarchiveObjectWithData:
 +    [NSKeyedArchiver archivedDataWithRootObject: predicate]];
 +  PASS_EQUAL([back predicateFormat], [predicate predicateFormat],
@@ -147,5 +162,5 @@ index 000000000..b25c8315e
 +  return 0;
 +}
 -- 
-2.43.0
+2.50.1 (Apple Git-155)
 
