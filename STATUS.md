@@ -93,7 +93,11 @@ reads `$x.age` only with #829, and #977 names its keys with
 both ways in a fresh container: #815's test aborts at the first archive
 without the fix and passes 9 of 9 with it alone (NSPredicate 289 of
 289); #977's fails 8 of 9 without and passes with it (NSArrayController
-38 of 38).
+38 of 38).  Both were merged that afternoon,
+[#815](https://github.com/gnustep/libs-base/pull/815) (e18f0be) and
+[#977](https://github.com/gnustep/libs-gui/pull/977) (19f2bbf), and have
+left: #977 reverse-applies, and #815 stopped reverse-applying at the
+commit after it.  gnustep-coredata, listed for both, holds no copy.
 
 Gershwin merges only into `dev`, never `main`, so its patches here are made
 against `dev` and `Scripts/build-gnustep.sh` builds Eau from it, at a pinned
@@ -121,7 +125,6 @@ in use.
 | --- | --- | --- | --- | --- |
 | `autoreleased-return-value` | libobjc2 | test | [#426](https://github.com/gnustep/libobjc2/pull/426) closed unmerged | (none: ODataStore works around it) |
 | `addnamespace-duplicate-prefix-leak` | libs-base | program | [#838](https://github.com/gnustep/libs-base/pull/838) | (none) |
-| `expression-binary-coding` | libs-base | test | [#815](https://github.com/gnustep/libs-base/pull/815) | gnustep-coredata |
 | `predicate-subquery` | libs-base | test | [#829](https://github.com/gnustep/libs-base/pull/829) | gnustep-coredata |
 | `selector-and-fetch-expressions` | libs-base | test | not sent yet | gnustep-coredata |
 | `predicate-format-expression-arguments` | libs-base | test | not sent yet | gnustep-coredata |
@@ -130,7 +133,6 @@ in use.
 | `plist-read-binary` | libs-base | test | not sent yet | TopoText (SimpleNotes' SNSecretStore reads through NSPropertyListSerialization) |
 | `nsxml-prefixed-descendants` | libs-base | test | [#821](https://github.com/gnustep/libs-base/pull/821) | (none: WorkflowKit uses it from here) |
 | `nsxmlelement-attribute-private-doc` | libs-base | program | [#823](https://github.com/gnustep/libs-base/pull/823) | (none: WorkflowKit uses it from here) |
-| `arraycontroller-selection-kvo` | libs-gui | test | [#977](https://github.com/gnustep/libs-gui/pull/977) | gnustep-coredata |
 | `tableview-column-autoresizing-style` | libs-gui | test | [#982](https://github.com/gnustep/libs-gui/pull/982) | gnustep-coredata |
 | `xib-date-picker` | libs-gui | test | [#984](https://github.com/gnustep/libs-gui/pull/984) | gnustep-coredata |
 | `action-sender-lifetime` | libs-gui | test | [#976](https://github.com/gnustep/libs-gui/pull/976) | GSXFormsKit, HomeRow |
