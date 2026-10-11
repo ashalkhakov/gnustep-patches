@@ -1,4 +1,4 @@
-From 72ce6194c5aae75a1af431481695cdb10156256e Mon Sep 17 00:00:00 2001
+From 7b8baaa15f668ee458b9094039189e4450875f3b Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Sun, 11 Oct 2026 18:48:18 +0000
 Subject: [PATCH] NSCollectionViewFlowLayout: lay items out in lines
@@ -26,19 +26,31 @@ Make the layout attributes the class methods promise, with their
 category, kind and index path; retain the index path, release what is
 held, and have -copyWithZone: return the copy it makes rather than
 itself.
+
+Mark NSCollectionViewDelegateFlowLayout's methods @optional, as AppKit's
+are: a delegate that answers one of them (the item size, say) was
+warned of every other one it did not implement.
 ---
- Headers/AppKit/NSCollectionViewFlowLayout.h  |   4 +-
+ Headers/AppKit/NSCollectionViewFlowLayout.h  |   5 +-
  Source/NSCollectionViewFlowLayout.m          | 181 ++++++++++++-------
  Source/NSCollectionViewLayout.m              |  47 ++++-
  Tests/gui/NSCollectionViewFlowLayout/lines.m |  96 ++++++++++
- 4 files changed, 249 insertions(+), 79 deletions(-)
+ 4 files changed, 250 insertions(+), 79 deletions(-)
  create mode 100644 Tests/gui/NSCollectionViewFlowLayout/lines.m
 
 diff --git a/Headers/AppKit/NSCollectionViewFlowLayout.h b/Headers/AppKit/NSCollectionViewFlowLayout.h
-index e559463..08a02c5 100644
+index e559463..9b4e064 100644
 --- a/Headers/AppKit/NSCollectionViewFlowLayout.h
 +++ b/Headers/AppKit/NSCollectionViewFlowLayout.h
-@@ -151,8 +151,8 @@ APPKIT_EXPORT_CLASS
+@@ -99,6 +99,7 @@ APPKIT_EXPORT_CLASS
+ @end
+ 
+ @protocol NSCollectionViewDelegateFlowLayout <NSCollectionViewDelegate>
++@optional
+ 
+ - (NSSize) collectionView: (NSCollectionView *)collectionView
+                    layout: (NSCollectionViewLayout*)collectionViewLayout
+@@ -151,8 +152,8 @@ APPKIT_EXPORT_CLASS
    BOOL _sectionFootersPinToVisibleBounds;
    NSMutableIndexSet *_collapsedSections;
  
