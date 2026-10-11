@@ -129,7 +129,12 @@ an allowed set), which wants doing before that patch goes upstream.
 3bd9327).  rfm merged #821 with its second case (two attributes with the
 same prefix on a grandchild) failing on his system, and marked it hopeful
 in 96fd936, so that patch neither applied nor reverse-applied any longer
-and stopped every build of libs-base from master.
+and stopped every build of libs-base from master.  The failing case is
+real with libxml2 2.15.4, which Debian testing ships, and not with 2.9.14,
+which our images use: adoption declares a second href-less placeholder
+under a made-up prefix (b_1).  `nsxml-placeholder-attributes`
+([#839](https://github.com/gnustep/libs-base/pull/839)) fixes it and makes
+the case count again.
 
 Gershwin merges only into `dev`, never `main`, so its patches here are made
 against `dev` and `Scripts/build-gnustep.sh` builds Eau from it, at a pinned
@@ -156,6 +161,7 @@ in use.
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
 | `autoreleased-return-value` | libobjc2 | test | [#426](https://github.com/gnustep/libobjc2/pull/426) closed unmerged | (none: ODataStore works around it) |
+| `nsxml-placeholder-attributes` | libs-base | test | [#839](https://github.com/gnustep/libs-base/pull/839) | (none) |
 | `predicate-secure-coding` | libs-base | test | not sent yet ([#766](https://github.com/gnustep/libs-base/issues/766)) | (none: FreeCoreData will use it from here) |
 | `selector-and-fetch-expressions` | libs-base | test | not sent yet | gnustep-coredata |
 | `predicate-format-expression-arguments` | libs-base | test | not sent yet | gnustep-coredata |
