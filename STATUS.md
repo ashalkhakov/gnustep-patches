@@ -122,7 +122,14 @@ an allowed set), which wants doing before that patch goes upstream.
 
 `addnamespace-duplicate-prefix-leak`
 ([#838](https://github.com/gnustep/libs-base/pull/838)) was merged on
-2026-10-10 as 85d1ada, unchanged, and has left.
+2026-10-10 as 85d1ada, unchanged, and has left.  On 2026-10-11 two more left:
+`nsxmlelement-attribute-private-doc`
+([#823](https://github.com/gnustep/libs-base/pull/823), d1498c1) and
+`nsxml-prefixed-descendants` ([#821](https://github.com/gnustep/libs-base/pull/821),
+3bd9327).  rfm merged #821 with its second case (two attributes with the
+same prefix on a grandchild) failing on his system, and marked it hopeful
+in 96fd936, so that patch neither applied nor reverse-applied any longer
+and stopped every build of libs-base from master.
 
 Gershwin merges only into `dev`, never `main`, so its patches here are made
 against `dev` and `Scripts/build-gnustep.sh` builds Eau from it, at a pinned
@@ -155,8 +162,6 @@ in use.
 | `predicate-nil-constant-format` | libs-base | test | not sent yet | gnustep-coredata |
 | `predicate-format-nil-arguments` | libs-base | test | not sent yet | (none) |
 | `plist-read-binary` | libs-base | test | not sent yet | TopoText (SimpleNotes' SNSecretStore reads through NSPropertyListSerialization) |
-| `nsxml-prefixed-descendants` | libs-base | test | [#821](https://github.com/gnustep/libs-base/pull/821) | (none: WorkflowKit uses it from here) |
-| `nsxmlelement-attribute-private-doc` | libs-base | program | [#823](https://github.com/gnustep/libs-base/pull/823) | (none: WorkflowKit uses it from here) |
 | `tableview-column-autoresizing-style` | libs-gui | test | [#982](https://github.com/gnustep/libs-gui/pull/982) | gnustep-coredata |
 | `xib-date-picker` | libs-gui | test | [#984](https://github.com/gnustep/libs-gui/pull/984) | gnustep-coredata |
 | `tracking-walk-retains-subviews` | libs-gui | program | [#983](https://github.com/gnustep/libs-gui/pull/983) | (none: no copies remain) |
