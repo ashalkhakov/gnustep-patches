@@ -1,0 +1,273 @@
+From d2b39107122190e38cb20f6f3a64b00fe8889442 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Sun, 11 Oct 2026 18:48:18 +0000
+Subject: [PATCH] NSCollectionView: -makeItemWithIdentifier:forIndexPath: makes
+ an item
+
+-makeItemWithIdentifier:forIndexPath: asked the data source for the item
+at the index path instead of making one. A data source does what AppKit
+documents - registers an item class (or nib) and returns
+[collectionView makeItemWithIdentifier:forIndexPath:] from
+-collectionView:itemForRepresentedObjectAtIndexPath: - so loading the
+first item recursed until the stack ran out.
+
+Make an item of the class registered for the identifier, its view
+loaded as before (the item's -loadView, else a nib named after its
+class), or the first item among a registered nib's top-level objects;
+raise, as AppKit does, when neither is registered. Loading an item for
+display asks the data source itself, as it always meant to, and records
+the item's index path there.
+
+The classes and nibs registered were kept in weak map tables, so a nib
+the caller did not keep could go away; keep them strongly, and do not
+leak the identifier copied for the key.
+---
+ Source/NSCollectionView.m             |  77 +++++++++++++-----
+ Tests/gui/NSCollectionView/makeItem.m | 108 ++++++++++++++++++++++++++
+ 2 files changed, 164 insertions(+), 21 deletions(-)
+ create mode 100644 Tests/gui/NSCollectionView/makeItem.m
+
+diff --git a/Source/NSCollectionView.m b/Source/NSCollectionView.m
+index f21a26c..9238419 100644
+--- a/Source/NSCollectionView.m
++++ b/Source/NSCollectionView.m
+@@ -1658,29 +1658,40 @@ static NSString *_placeholderItem = nil;
+ - (NSCollectionViewItem *) makeItemWithIdentifier: (NSUserInterfaceItemIdentifier)identifier
+ 				     forIndexPath: (NSIndexPath *)indexPath
+ {
+-  NSCollectionViewItem *item = [_dataSource collectionView: self
+-					    itemForRepresentedObjectAtIndexPath: indexPath];
++  Class cls = [[_registeredClasses objectForKey: GSNoSupplementaryElement]
++		objectForKey: identifier];
++  NSNib *nib = [[_registeredNibs objectForKey: GSNoSupplementaryElement]
++		 objectForKey: identifier];
++  NSCollectionViewItem *item = nil;
+ 
+-  if (item != nil)
++  if (cls != Nil)
+     {
++      item = AUTORELEASE([[cls alloc] init]);
+       [self _instantiateWithItem: item];
+     }
+-  else
++  else if (nib != nil)
+     {
+-      NSView *view = [[NSView alloc] initWithFrame: NSZeroRect];
++      NSArray *objects = nil;
+ 
+-      item = AUTORELEASE([[NSCollectionViewItem alloc] init]);
+-      [item setView: view];
+-      RELEASE(view);
+-    }
++      if ([nib instantiateWithOwner: nil topLevelObjects: &objects])
++	{
++	  NSEnumerator *en = [objects objectEnumerator];
++	  id o;
+ 
+-  if (item != nil)
++	  while ((o = [en nextObject]) != nil && item == nil)
++	    {
++	      if ([o isKindOfClass: [NSCollectionViewItem class]])
++		{
++		  item = o;
++		}
++	    }
++	}
++    }
++  else
+     {
+-      // Add to maps...
+-      [_itemsToIndexPaths setObject: indexPath
+-			     forKey: item];
+-      [_indexPathsToItems setObject: item
+-			     forKey: indexPath];
++      [NSException raise: NSInternalInconsistencyException
++		  format: @"No class or nib is registered for the item identifier %@",
++	identifier];
+     }
+ 
+   return item;
+@@ -1718,12 +1729,12 @@ static NSString *_placeholderItem = nil;
+   t = [_registeredClasses objectForKey: kind];
+   if (t == nil)
+     {
+-      t = [NSMapTable weakToWeakObjectsMapTable];
++      t = [NSMapTable strongToStrongObjectsMapTable];
+       [_registeredClasses setObject: t
+ 			     forKey: kind];
+     }
+ 
+-  [t setObject: viewClass forKey: [identifier copy]];
++  [t setObject: viewClass forKey: AUTORELEASE([identifier copy])];
+ }
+ 
+ - (void) registerNib: (NSNib *)nib
+@@ -1735,12 +1746,12 @@ static NSString *_placeholderItem = nil;
+   t = [_registeredNibs objectForKey: kind];
+   if (t == nil)
+     {
+-      t = [NSMapTable weakToWeakObjectsMapTable];
++      t = [NSMapTable strongToStrongObjectsMapTable];
+       [_registeredNibs setObject: t
+ 			  forKey: kind];
+     }
+ 
+-  [t setObject: nib forKey: [identifier copy]];
++  [t setObject: nib forKey: AUTORELEASE([identifier copy])];
+ }
+ 
+ /* Providing the collection view's data */
+@@ -1793,10 +1804,34 @@ static NSString *_placeholderItem = nil;
+ }
+ 
+ /* Reloading Content */
++- (NSCollectionViewItem *) _itemFromDataSourceAtIndexPath: (NSIndexPath *)path
++{
++  NSCollectionViewItem *item = [_dataSource collectionView: self
++					    itemForRepresentedObjectAtIndexPath: path];
++
++  if (item != nil)
++    {
++      [self _instantiateWithItem: item];
++    }
++  else
++    {
++      NSView *view = [[NSView alloc] initWithFrame: NSZeroRect];
++
++      item = AUTORELEASE([[NSCollectionViewItem alloc] init]);
++      [item setView: view];
++      RELEASE(view);
++    }
++
++  [_itemsToIndexPaths setObject: path
++			 forKey: item];
++  [_indexPathsToItems setObject: item
++			 forKey: path];
++  return item;
++}
++
+ - (void) _loadItemAtIndexPath: (NSIndexPath *)path
+ {
+-  NSCollectionViewItem *item = [self makeItemWithIdentifier: nil
+-					       forIndexPath: path];
++  NSCollectionViewItem *item = [self _itemFromDataSourceAtIndexPath: path];
+ 
+   NSDebugLog(@"NSCollectionView _loadItemAtIndexPath:%@ item=%@ view=%@", path, item, [item view]);
+ 
+diff --git a/Tests/gui/NSCollectionView/makeItem.m b/Tests/gui/NSCollectionView/makeItem.m
+new file mode 100644
+index 0000000..a76c30b
+--- /dev/null
++++ b/Tests/gui/NSCollectionView/makeItem.m
+@@ -0,0 +1,108 @@
++/* NSCollectionView's -makeItemWithIdentifier:forIndexPath: makes an item of
++   the class registered for the identifier, as AppKit's does; it does not ask
++   the data source, which calls it to make the items it returns.
++*/
++#include "Testing.h"
++
++#include <Foundation/NSAutoreleasePool.h>
++#include <Foundation/NSGeometry.h>
++#include <Foundation/NSIndexPath.h>
++
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSCollectionView.h>
++#include <AppKit/NSCollectionViewFlowLayout.h>
++#include <AppKit/NSCollectionViewItem.h>
++#include <AppKit/NSView.h>
++
++@interface Card : NSCollectionViewItem
++@end
++@implementation Card
++- (void) loadView
++{
++  [self setView: AUTORELEASE([[NSView alloc] initWithFrame: NSMakeRect(0, 0, 40, 30)])];
++}
++@end
++
++@interface Other : NSCollectionViewItem
++@end
++@implementation Other
++@end
++
++/* Its own items, made without the collection view. */
++@interface MakesItsOwn : NSObject <NSCollectionViewDataSource>
++@end
++@implementation MakesItsOwn
++- (NSInteger) collectionView: (NSCollectionView *)cv
++       numberOfItemsInSection: (NSInteger)section
++{
++  return 3;
++}
++- (NSCollectionViewItem *) collectionView: (NSCollectionView *)cv
++        itemForRepresentedObjectAtIndexPath: (NSIndexPath *)indexPath
++{
++  return AUTORELEASE([[Other alloc] init]);
++}
++@end
++
++/* Its items made by the collection view, of the class registered. */
++@interface MakesThemThere : NSObject <NSCollectionViewDataSource>
++@end
++@implementation MakesThemThere
++- (NSInteger) collectionView: (NSCollectionView *)cv
++       numberOfItemsInSection: (NSInteger)section
++{
++  return 3;
++}
++- (NSCollectionViewItem *) collectionView: (NSCollectionView *)cv
++        itemForRepresentedObjectAtIndexPath: (NSIndexPath *)indexPath
++{
++  return [cv makeItemWithIdentifier: @"card" forIndexPath: indexPath];
++}
++@end
++
++int
++main(int argc, char **argv)
++{
++  NSCollectionView *cv;
++  NSCollectionViewItem *made;
++  NSIndexPath *first;
++
++  START_SET("NSCollectionView makeItemWithIdentifier:forIndexPath:")
++
++  NS_DURING
++    {
++      [NSApplication sharedApplication];
++    }
++  NS_HANDLER
++    {
++      if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++        SKIP("It looks like GNUstep backend is not yet installed")
++    }
++  NS_ENDHANDLER
++
++  first = [NSIndexPath indexPathForItem: 0 inSection: 0];
++  cv = AUTORELEASE([[NSCollectionView alloc]
++    initWithFrame: NSMakeRect(0, 0, 400, 300)]);
++  [cv setCollectionViewLayout: AUTORELEASE([[NSCollectionViewFlowLayout alloc] init])];
++  [cv registerClass: [Card class] forItemWithIdentifier: @"card"];
++  [cv setDataSource: AUTORELEASE([MakesItsOwn new])];
++
++  made = [cv makeItemWithIdentifier: @"card" forIndexPath: first];
++  PASS([made isKindOfClass: [Card class]],
++       "an item of the class registered for the identifier is made");
++  PASS([made view] != nil, "with its view loaded");
++  PASS(made != [cv makeItemWithIdentifier: @"card" forIndexPath: first],
++       "a new one each time");
++
++  if ([made isKindOfClass: [Card class]])
++    {
++      [cv setDataSource: AUTORELEASE([MakesThemThere new])];
++      [cv reloadData];
++      [cv layoutSubtreeIfNeeded];
++      PASS([[cv itemAtIndexPath: first] isKindOfClass: [Card class]],
++           "a data source that makes its items so has them shown");
++    }
++
++  END_SET("NSCollectionView makeItemWithIdentifier:forIndexPath:")
++  return 0;
++}
+-- 
+2.43.0
+

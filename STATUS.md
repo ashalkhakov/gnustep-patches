@@ -136,6 +136,23 @@ under a made-up prefix (b_1).  `nsxml-placeholder-attributes`
 ([#839](https://github.com/gnustep/libs-base/pull/839)) fixes it and makes
 the case count again.
 
+Later on 2026-10-11 `tracking-walk-retains-subviews`
+([#983](https://github.com/gnustep/libs-gui/pull/983), a8bdf74) left: it
+was merged, and `apply-patches.sh` was already skipping it as upstream.  The
+same day two NSCollectionView fixes were added, found by SimpleNotes
+(TopoText), whose gallery and attachments browser are collection views with
+a data source and a flow layout.  `collectionview-make-item`:
+`-makeItemWithIdentifier:forIndexPath:` asked the data source instead of
+making an item, so a data source that calls it, as AppKit documents,
+recursed until the stack ran out.  `collectionview-flow-layout`: the flow
+layout put items a width apart with no spacing, gave every item past the
+first line a line of its own, and reported the view's frame as the content
+size; and the layout attributes' factory methods returned nil.  Each test
+was run both ways on libs-gui master 94a07bf in a container: `makeItem.m`
+fails 2 of 4 without its fix, `lines.m` fails 10 of 10 without its; with
+both, the NSCollectionView, NSCollectionViewItem and
+NSCollectionViewFlowLayout suites pass 75 of 75.
+
 Gershwin merges only into `dev`, never `main`, so its patches here are made
 against `dev` and `Scripts/build-gnustep.sh` builds Eau from it, at a pinned
 commit (`EAU_REF`, 01be00b since 2026-10-08): a change on `dev` broke every
@@ -170,7 +187,8 @@ in use.
 | `plist-read-binary` | libs-base | test | not sent yet | TopoText (SimpleNotes' SNSecretStore reads through NSPropertyListSerialization) |
 | `tableview-column-autoresizing-style` | libs-gui | test | [#982](https://github.com/gnustep/libs-gui/pull/982) | gnustep-coredata |
 | `xib-date-picker` | libs-gui | test | [#984](https://github.com/gnustep/libs-gui/pull/984) | gnustep-coredata |
-| `tracking-walk-retains-subviews` | libs-gui | program | [#983](https://github.com/gnustep/libs-gui/pull/983) | (none: no copies remain) |
+| `collectionview-make-item` | libs-gui | test | not sent yet | (none: TopoText uses it from here) |
+| `collectionview-flow-layout` | libs-gui | test | not sent yet | (none: TopoText uses it from here) |
 | `graphicscontext-backend-recursion` | libs-gui | program | [#978](https://github.com/gnustep/libs-gui/pull/978) | RDLKit |
 | `tableview-bound-value-transform` | libs-gui | test | [#981](https://github.com/gnustep/libs-gui/pull/981) | (none: WorkflowKit uses it from here) |
 | `cgrectunion-size` | libs-opal | none | [#71](https://github.com/gnustep/libs-opal/pull/71) | GSXFormsKit |
