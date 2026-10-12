@@ -1,0 +1,171 @@
+From aba2168d4a1eef3cb666b2c751e8bb91ce11340b Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Mon, 12 Oct 2026 14:20:40 +0500
+Subject: [PATCH] Stop scroller autohiding from recursing on a resizing
+ document
+
+An autohiding NSScrollView whose document view follows the width of
+the clip view can recurse until the stack is gone. A view-based
+NSTableView with columnAutoresizingStyle "lastColumnOnly" in such a
+scroll view, loaded from a xib, does it with the default theme: it
+sizes itself 2 points wider than its clip view, whatever that width is.
+
+-_autohideScrollers decides which scrollers to show and sets them; each
+change re-tiles, which resizes the clip view, which calls
+-reflectScrolledClipView:, which calls -_autohideScrollers again
+before the first call has returned. With no scrollers, the 2 points
+do not fit, so both scrollers are shown; the clip view narrows, the
+document follows, and now it fits, so both are hidden - in the nested
+call, which re-tiles and recurses again.
+
+Decide once per change: a call made while one is already running for
+the same scroll view returns, and the outer call's decision stands.
+
+Tests/gui/NSScrollView/autohideResizingDocument.m uses a document view
+that follows the clip view's width plus 2 points. Without the change
+the decision recurses until the test's own bound stops the document
+from following (402 resizes, the check fails); with it the decision
+settles. The existing NSScrollView tests still pass.
+---
+ Source/NSScrollView.m                         | 21 +++++
+ .../NSScrollView/autohideResizingDocument.m   | 82 +++++++++++++++++++
+ 2 files changed, 103 insertions(+)
+ create mode 100644 Tests/gui/NSScrollView/autohideResizingDocument.m
+
+diff --git a/Source/NSScrollView.m b/Source/NSScrollView.m
+index 7f71dbfe..e043e355 100644
+--- a/Source/NSScrollView.m
++++ b/Source/NSScrollView.m
+@@ -30,6 +30,7 @@
+    Boston, MA 02110-1301, USA.
+ */
+ 
++#import <Foundation/NSHashTable.h>
+ #import <Foundation/NSDebug.h>
+ #import <Foundation/NSException.h>
+ #import <Foundation/NSNotification.h>
+@@ -107,6 +108,7 @@ typedef struct _scrollViewFlags
+ - (void) _synchronizeHeaderAndCornerView;
+ - (void) _themeDidActivate: (NSNotification*)notification;
+ - (void) _autohideScrollers;
++- (void) _autohideScrollersOnce;
+ - (void) _setHasHorizScroller: (BOOL)flag;
+ - (void) _setHasVertScroller: (BOOL)flag;
+ @end
+@@ -1893,6 +1895,25 @@ GSOppositeEdge(NSRectEdge edge)
+  * result, where it changes nothing further.
+  */
+ - (void) _autohideScrollers
++{
++  static NSHashTable *deciding = nil;
++
++  /* Re-tiling for a decision comes back here; let the outer call decide. */
++  if (deciding == nil)
++    {
++      deciding = [[NSHashTable alloc]
++        initWithOptions: NSHashTableObjectPointerPersonality capacity: 4];
++    }
++  if ([deciding containsObject: self])
++    {
++      return;
++    }
++  [deciding addObject: self];
++  [self _autohideScrollersOnce];
++  [deciding removeObject: self];
++}
++
++- (void) _autohideScrollersOnce
+ {
+   NSView *documentView = [_contentView documentView];
+   NSSize documentSize;
+diff --git a/Tests/gui/NSScrollView/autohideResizingDocument.m b/Tests/gui/NSScrollView/autohideResizingDocument.m
+new file mode 100644
+index 00000000..3c1d814a
+--- /dev/null
++++ b/Tests/gui/NSScrollView/autohideResizingDocument.m
+@@ -0,0 +1,82 @@
++#import "Testing.h"
++#import <Foundation/NSAutoreleasePool.h>
++#import <Foundation/NSGeometry.h>
++#import <AppKit/NSApplication.h>
++#import <AppKit/NSClipView.h>
++#import <AppKit/NSScrollView.h>
++#import <AppKit/NSView.h>
++
++/* A document view that, like a table view sizing its last column to fit,
++   follows the width of the clip view it is shown in but comes out a couple
++   of points wider, and is exactly as tall as the clip view without a
++   horizontal scroller.  Without a scroller it does not fit across, which
++   shows both scrollers; that narrows the clip view, the document follows,
++   and now it fits, which hides both again.  Each change re-tiles and comes
++   back to the autohide decision from inside the previous one. */
++@interface FollowingView : NSView
++{
++@public
++  CGFloat overhang;
++  CGFloat height;
++  int resizes;
++}
++@end
++
++@implementation FollowingView
++- (void) resizeWithOldSuperviewSize: (NSSize)oldSize
++{
++  NSSize clip = [[self superview] bounds].size;
++
++  /* Bound the test rather than the stack: stop following after a while so
++     an unfixed build fails here instead of crashing. */
++  if (++resizes > 200)
++    return;
++  [self setFrameSize: NSMakeSize(clip.width + overhang, height)];
++}
++@end
++
++int main()
++{
++  NSAutoreleasePool *arp = [NSAutoreleasePool new];
++
++  START_SET("NSScrollView autohiding with a document that follows the clip view")
++
++  NS_DURING
++    {
++      [NSApplication sharedApplication];
++    }
++  NS_HANDLER
++    {
++      if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++        SKIP("It looks like GNUstep backend is not yet installed")
++    }
++  NS_ENDHANDLER
++
++  NSScrollView *sv = AUTORELEASE([[NSScrollView alloc]
++    initWithFrame: NSMakeRect(0, 0, 300, 100)]);
++  FollowingView *doc = AUTORELEASE([[FollowingView alloc]
++    initWithFrame: NSMakeRect(0, 0, 300, 100)]);
++
++  [sv setBorderType: NSNoBorder];
++  [sv setHasVerticalScroller: YES];
++  [sv setHasHorizontalScroller: YES];
++  [sv setAutohidesScrollers: YES];
++  [sv setDocumentView: doc];
++  [sv tile];
++
++  doc->overhang = 2;
++  doc->height = [[sv contentView] bounds].size.height;
++  doc->resizes = 0;
++  [doc setFrameSize: NSMakeSize([[sv contentView] bounds].size.width + 2,
++                                doc->height)];
++  [sv reflectScrolledClipView: [sv contentView]];
++
++  PASS(doc->resizes < 20,
++    "Showing or hiding scrollers settles (document resized %d times)",
++    doc->resizes)
++
++  END_SET("NSScrollView autohiding with a document that follows the clip view")
++
++  [arp release];
++  return 0;
++}
+-- 
+2.43.0
+

@@ -1,0 +1,234 @@
+From 0f5ad184fa110e8a652cbf8f7f074b64651f4fce Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Mon, 12 Oct 2026 14:17:49 +0500
+Subject: [PATCH] Load view-based table prototypes from a xib
+
+A xib that holds a view-based NSTableView with prototype cell views
+(<prototypeCellViews> under a <tableColumn>) fails to load: the whole
+nib is abandoned with "Tried to add nil key to dictionary".
+
+-[NSTableView addTableColumn:] registers each prototype in
+_registeredViews keyed by the prototype's identifier, but
+-[NSView initWithCoder:] never decodes NSIdentifier, so every
+prototype arrives with a nil identifier. And a prototype whose
+identifier is left on "Automatic" in Interface Builder has none in the
+xib at all: AppKit gives it its column's identifier, which is why
+-makeViewWithIdentifier: is customarily called with
+[tableColumn identifier].
+
+Decode NSIdentifier in -[NSView initWithCoder:], give a prototype
+without an identifier its column's, and skip (with a warning) one that
+still has none rather than abandoning the nib.
+
+Tests/gui/GSXib5KeyedUnarchiver/tableCellView.m loads a xib with a
+named prototype, an "Automatic" one and a view with an identifier of
+its own. Without the change all 4 checks fail (the decode raises);
+with it they pass.
+---
+ Source/NSTableView.m                          | 17 ++++
+ Source/NSView.m                               |  5 ++
+ .../GSXib5KeyedUnarchiver/TableCellView.xib   | 55 +++++++++++++
+ .../gui/GSXib5KeyedUnarchiver/tableCellView.m | 78 +++++++++++++++++++
+ 4 files changed, 155 insertions(+)
+ create mode 100644 Tests/gui/GSXib5KeyedUnarchiver/TableCellView.xib
+ create mode 100644 Tests/gui/GSXib5KeyedUnarchiver/tableCellView.m
+
+diff --git a/Source/NSTableView.m b/Source/NSTableView.m
+index f1c47dfd..66754b64 100644
+--- a/Source/NSTableView.m
++++ b/Source/NSTableView.m
+@@ -2211,6 +2211,17 @@ static void computeNewSelection
+   [aColumn setTableView: self];
+   if ([[aColumn _prototypeCellViews] count] > 0)
+     {
++      NSEnumerator *en = [[aColumn _prototypeCellViews] objectEnumerator];
++      NSView *view;
++
++      /* "Automatic" in Interface Builder: the column's identifier. */
++      while ((view = [en nextObject]) != nil)
++        {
++          if ([view identifier] == nil)
++            {
++              [view setIdentifier: [aColumn identifier]];
++            }
++        }
+       [self _registerPrototypeViews: [aColumn _prototypeCellViews]];
+     }
+   [_tableColumns addObject: aColumn];
+@@ -7513,6 +7524,12 @@ For a more detailed explanation, -setSortDescriptors:. */
+   while ((view = [en nextObject]) != nil)
+     {
+       NSUserInterfaceItemIdentifier identifier = [view identifier];
++
++      if (identifier == nil)
++        {
++          NSWarnMLog(@"Ignoring a cell view prototype without an identifier");
++          continue;
++        }
+       [_registeredViews setObject: view
+ 			   forKey: identifier];
+     }
+diff --git a/Source/NSView.m b/Source/NSView.m
+index abacebcd..fcc2cc4e 100644
+--- a/Source/NSView.m
++++ b/Source/NSView.m
+@@ -4864,6 +4864,11 @@ static NSView* findByTag(NSView *view, NSInteger aTag, NSUInteger *level)
+        * _previousKeyView = 0;
+        */
+       
++      if ([aDecoder containsValueForKey: @"NSIdentifier"])
++        {
++          [self setIdentifier: [aDecoder decodeObjectForKey: @"NSIdentifier"]];
++        }
++
+       // previous and next key views...
+       prevKeyView = [aDecoder decodeObjectForKey: @"NSPreviousKeyView"];
+       nextKeyView = [aDecoder decodeObjectForKey: @"NSNextKeyView"];
+diff --git a/Tests/gui/GSXib5KeyedUnarchiver/TableCellView.xib b/Tests/gui/GSXib5KeyedUnarchiver/TableCellView.xib
+new file mode 100644
+index 00000000..f29a0493
+--- /dev/null
++++ b/Tests/gui/GSXib5KeyedUnarchiver/TableCellView.xib
+@@ -0,0 +1,55 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<document type="com.apple.InterfaceBuilder3.Cocoa.XIB" version="3.0" toolsVersion="21507" targetRuntime="MacOSX.Cocoa" propertyAccessControl="none" useAutolayout="YES" customObjectInstantitationMethod="direct">
++    <dependencies>
++        <deployment identifier="macosx"/>
++        <plugIn identifier="com.apple.InterfaceBuilder.CocoaPlugin" version="21507"/>
++    </dependencies>
++    <objects>
++        <customObject id="-2" userLabel="File's Owner" customClass="NSApplication"/>
++        <customObject id="-1" userLabel="First Responder" customClass="FirstResponder"/>
++        <customObject id="-3" userLabel="Application" customClass="NSObject"/>
++        <textField identifier="PlainView" horizontalHuggingPriority="251" verticalHuggingPriority="750" id="plain">
++            <rect key="frame" x="0.0" y="0.0" width="50" height="20"/>
++            <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMinY="YES"/>
++            <textFieldCell key="cell" lineBreakMode="clipping" title="Label" id="plainCell">
++                <font key="font" metaFont="system"/>
++            </textFieldCell>
++        </textField>
++        <tableView verticalHuggingPriority="750" allowsExpansionToolTips="YES" columnAutoresizingStyle="lastColumnOnly" columnReordering="NO" columnResizing="NO" multipleSelection="NO" autosaveColumns="NO" rowSizeStyle="automatic" viewBased="YES" id="table">
++            <rect key="frame" x="0.0" y="0.0" width="200" height="100"/>
++            <autoresizingMask key="autoresizingMask"/>
++            <tableColumns>
++                <tableColumn identifier="NamedColumn" width="100" minWidth="40" maxWidth="1000" id="namedColumn">
++                    <tableHeaderCell key="headerCell" lineBreakMode="truncatingTail" borderStyle="border" title="Named">
++                        <color key="textColor" name="headerTextColor" catalog="System" colorSpace="catalog"/>
++                        <color key="backgroundColor" name="headerColor" catalog="System" colorSpace="catalog"/>
++                    </tableHeaderCell>
++                    <textFieldCell key="dataCell" lineBreakMode="truncatingTail" selectable="YES" editable="YES" title="Text Cell" id="namedDataCell">
++                        <font key="font" metaFont="system"/>
++                    </textFieldCell>
++                    <prototypeCellViews>
++                        <tableCellView identifier="NamedCell" id="namedCellView">
++                            <rect key="frame" x="0.0" y="0.0" width="100" height="17"/>
++                            <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
++                        </tableCellView>
++                    </prototypeCellViews>
++                </tableColumn>
++                <tableColumn identifier="AutomaticColumn" width="100" minWidth="40" maxWidth="1000" id="automaticColumn">
++                    <tableHeaderCell key="headerCell" lineBreakMode="truncatingTail" borderStyle="border" title="Automatic">
++                        <color key="textColor" name="headerTextColor" catalog="System" colorSpace="catalog"/>
++                        <color key="backgroundColor" name="headerColor" catalog="System" colorSpace="catalog"/>
++                    </tableHeaderCell>
++                    <textFieldCell key="dataCell" lineBreakMode="truncatingTail" selectable="YES" editable="YES" title="Text Cell" id="automaticDataCell">
++                        <font key="font" metaFont="system"/>
++                    </textFieldCell>
++                    <prototypeCellViews>
++                        <tableCellView id="automaticCellView">
++                            <rect key="frame" x="0.0" y="0.0" width="100" height="17"/>
++                            <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
++                        </tableCellView>
++                    </prototypeCellViews>
++                </tableColumn>
++            </tableColumns>
++        </tableView>
++    </objects>
++</document>
+diff --git a/Tests/gui/GSXib5KeyedUnarchiver/tableCellView.m b/Tests/gui/GSXib5KeyedUnarchiver/tableCellView.m
+new file mode 100644
+index 00000000..4f365dbd
+--- /dev/null
++++ b/Tests/gui/GSXib5KeyedUnarchiver/tableCellView.m
+@@ -0,0 +1,78 @@
++#import "ObjectTesting.h"
++
++#import <Foundation/NSData.h>
++#import <AppKit/NSApplication.h>
++#import <AppKit/NSTableView.h>
++#import <AppKit/NSTableCellView.h>
++#import <AppKit/NSTextField.h>
++#import <Additions/GNUstepGUI/GSXibKeyedUnarchiver.h>
++
++int main()
++{
++  START_SET("GSXib5KeyedUnarchiver view-based NSTableView prototype tests")
++
++  NS_DURING
++    {
++      [NSApplication sharedApplication];
++    }
++  NS_HANDLER
++    {
++      if ([[localException name]
++	isEqualToString: NSInternalInconsistencyException ])
++	{
++	  SKIP("It looks like GNUstep backend is not yet installed")
++	}
++    }
++  NS_ENDHANDLER
++
++  NSData		*data;
++  GSXibKeyedUnarchiver	*unarchiver;
++  NSArray		*rootObjects = nil;
++  NSEnumerator		*enumerator;
++  NSTableView		*table = nil;
++  NSView		*plain = nil;
++  NSView		*cell;
++  id			element;
++
++  data = [NSData dataWithContentsOfFile: @"TableCellView.xib"];
++  unarchiver = [GSXibKeyedUnarchiver unarchiverForReadingWithData: data];
++  NS_DURING
++    {
++      rootObjects = [unarchiver decodeObjectForKey: @"IBDocument.RootObjects"];
++    }
++  NS_HANDLER
++    {
++      rootObjects = nil;
++    }
++  NS_ENDHANDLER
++  PASS(rootObjects != nil,
++    "A xib with a prototype cell view on Automatic identifier loads")
++
++  enumerator = [rootObjects objectEnumerator];
++  while ((element = [enumerator nextObject]) != nil)
++    {
++      if ([element isKindOfClass: [NSTableView class]])
++	{
++	  table = element;
++	}
++      else if ([element isKindOfClass: [NSTextField class]])
++	{
++	  plain = element;
++	}
++    }
++
++  PASS_EQUAL([plain identifier], @"PlainView",
++    "A view's identifier is decoded from the xib")
++
++  cell = [table makeViewWithIdentifier: @"NamedCell" owner: nil];
++  PASS([cell isKindOfClass: [NSTableCellView class]],
++    "A prototype cell view is made by its own identifier")
++
++  cell = [table makeViewWithIdentifier: @"AutomaticColumn" owner: nil];
++  PASS([cell isKindOfClass: [NSTableCellView class]],
++    "A prototype cell view without an identifier is made by its column's identifier")
++
++  END_SET("GSXib5KeyedUnarchiver view-based NSTableView prototype tests")
++
++  return 0;
++}
+-- 
+2.43.0
+
