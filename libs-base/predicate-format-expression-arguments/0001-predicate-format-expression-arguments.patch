@@ -1,11 +1,11 @@
-From e5f9dee89b4bc5ac2b5fc140ea9f44f4d85b33a2 Mon Sep 17 00:00:00 2001
+From da648a4641b4838b7582d4820012978d91654a47 Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Wed, 7 Oct 2026 10:09:04 +0000
 Subject: [PATCH] NSPredicate: an expression given for %@ is that expression
 
 Given an NSExpression for %@, +expressionWithFormat: and
-+predicateWithFormat: wrapped it in a constant expression, so
-FUNCTION($manager, 'f:', %@) received the expression object itself
++predicateWithFormat: wrapped it in a constant expression, so a function
+given one, as in uppercase:(%@), received the expression object itself
 instead of its value, and "name IN %@" with a key path expression
 compared against an NSExpression.  Apple's Foundation uses the argument
 as the expression in its place, in an expression or a predicate, on
@@ -22,10 +22,10 @@ tests without the change and passes with it.
  create mode 100644 Tests/base/NSPredicate/expressionArguments.m
 
 diff --git a/Source/NSPredicate.m b/Source/NSPredicate.m
-index fa8479789..15fd99a62 100644
+index d027cea1d..fa84dd603 100644
 --- a/Source/NSPredicate.m
 +++ b/Source/NSPredicate.m
-@@ -4844,6 +4844,18 @@ GSKeyPathIfKeyPath(NSExpression *expression)
+@@ -4293,6 +4293,18 @@ - (NSExpression *) parseSimpleExpression
                    [self nextArg]];
  
                case '@':
@@ -46,7 +46,7 @@ index fa8479789..15fd99a62 100644
                case 'd':
 diff --git a/Tests/base/NSPredicate/expressionArguments.m b/Tests/base/NSPredicate/expressionArguments.m
 new file mode 100644
-index 000000000..2224183c7
+index 000000000..6ace1b5b2
 --- /dev/null
 +++ b/Tests/base/NSPredicate/expressionArguments.m
 @@ -0,0 +1,65 @@
@@ -75,10 +75,10 @@ index 000000000..2224183c7
 +  e = [NSExpression expressionWithFormat: @"%@", path];
 +  PASS(e == path, "a whole expression format is the argument itself")
 +
-+  e = [NSExpression expressionWithFormat: @"FUNCTION($m, 'f:', %@)", path];
++  e = [NSExpression expressionWithFormat: @"uppercase:(%@)", path];
 +  PASS([[e arguments] count] == 1 && [[e arguments] objectAtIndex: 0] == path,
 +    "a function argument is the argument itself")
-+  e = [NSExpression expressionWithFormat: @"FUNCTION(%@, 'uppercaseString')",
++  e = [NSExpression expressionWithFormat: @"uppercase:(%@)",
 +    [NSExpression expressionForKeyPath: @"name"]];
 +  PASS_EQUAL([e expressionValueWithObject: ada context: nil], @"ADA",
 +    "and is evaluated as one")
@@ -116,5 +116,5 @@ index 000000000..2224183c7
 +  return 0;
 +}
 -- 
-2.43.0
+2.50.1 (Apple Git-155)
 

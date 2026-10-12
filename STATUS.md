@@ -107,7 +107,9 @@ ad30625.  One path there still frees the sending control during its own
 action, a `replace="all"` submission, and is
 [XFormsKit#30](https://github.com/ashalkhakov/XFormsKit/issues/30).
 XFormsKit should fix that before moving its gnustep-patches pin past the
-commit that removes this patch.
+commit that removes this patch.  It did:
+[XFormsKit#31](https://github.com/ashalkhakov/XFormsKit/pull/31), merged on
+2026-10-12, closes #30.
 
 `predicate-subquery` ([#829](https://github.com/gnustep/libs-base/pull/829))
 was merged on 2026-10-10 (aac55d9) and has left; gnustep-coredata, listed
@@ -134,7 +136,19 @@ real with libxml2 2.15.4, which Debian testing ships, and not with 2.9.14,
 which our images use: adoption declares a second href-less placeholder
 under a made-up prefix (b_1).  `nsxml-placeholder-attributes`
 ([#839](https://github.com/gnustep/libs-base/pull/839)) fixes it and makes
-the case count again.
+the case count again.  rfm merged it on 2026-10-11 (d7cdfb0), unchanged,
+and it has left.
+
+Ten more were sent on 2026-10-12, each proven alone on that day's
+master (libs-base dd82338, libs-gui f4cb83f): its test fails without it
+and passes with it, with no other patch from here applied, and every
+pair applies in either order.  #843 is `selector-and-fetch-expressions`
+as it is against master; the copy here is rebased onto
+`predicate-secure-coding`, which is not being sent yet, and differs from
+it only in the two decoding lines they share.  The test of #844
+(`predicate-format-expression-arguments`) used FUNCTION(), which only
+#843 parses, so it now uses uppercase:() for the same check, which macOS
+answers the same way.
 
 Later on 2026-10-11 `tracking-walk-retains-subviews`
 ([#983](https://github.com/gnustep/libs-gui/pull/983), a8bdf74) left: it
@@ -200,22 +214,21 @@ in use.
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
 | `autoreleased-return-value` | libobjc2 | test | [#426](https://github.com/gnustep/libobjc2/pull/426) closed unmerged | (none: ODataStore works around it) |
-| `nsxml-placeholder-attributes` | libs-base | test | [#839](https://github.com/gnustep/libs-base/pull/839) | (none) |
 | `predicate-secure-coding` | libs-base | test | not sent yet ([#766](https://github.com/gnustep/libs-base/issues/766)) | (none: FreeCoreData will use it from here) |
-| `selector-and-fetch-expressions` | libs-base | test | not sent yet | gnustep-coredata |
-| `predicate-format-expression-arguments` | libs-base | test | not sent yet | gnustep-coredata |
-| `predicate-nil-constant-format` | libs-base | test | not sent yet | gnustep-coredata |
-| `predicate-format-nil-arguments` | libs-base | test | not sent yet | (none) |
-| `plist-read-binary` | libs-base | test | not sent yet | TopoText (SimpleNotes' SNSecretStore reads through NSPropertyListSerialization) |
+| `selector-and-fetch-expressions` | libs-base | test | [#843](https://github.com/gnustep/libs-base/pull/843) | gnustep-coredata |
+| `predicate-format-expression-arguments` | libs-base | test | [#844](https://github.com/gnustep/libs-base/pull/844) | gnustep-coredata |
+| `predicate-nil-constant-format` | libs-base | test | [#845](https://github.com/gnustep/libs-base/pull/845) | gnustep-coredata |
+| `predicate-format-nil-arguments` | libs-base | test | [#846](https://github.com/gnustep/libs-base/pull/846) | (none) |
+| `plist-read-binary` | libs-base | test | [#847](https://github.com/gnustep/libs-base/pull/847) | TopoText (SimpleNotes' SNSecretStore reads through NSPropertyListSerialization) |
 | `tableview-column-autoresizing-style` | libs-gui | test | [#982](https://github.com/gnustep/libs-gui/pull/982) | gnustep-coredata |
 | `xib-date-picker` | libs-gui | test | [#984](https://github.com/gnustep/libs-gui/pull/984) | gnustep-coredata |
-| `collectionview-make-item` | libs-gui | test | not sent yet | (none: TopoText uses it from here) |
-| `collectionview-flow-layout` | libs-gui | test | not sent yet | (none: TopoText uses it from here) |
-| `font-substitution-by-name` | libs-gui | test | not sent yet | (none: TopoText uses it from here) |
-| `textview-attachment-double-click` | libs-gui | test | not sent yet | (none: TopoText uses it from here) |
+| `collectionview-make-item` | libs-gui | test | [#1001](https://github.com/gnustep/libs-gui/pull/1001) | (none: TopoText uses it from here) |
+| `collectionview-flow-layout` | libs-gui | test | [#1002](https://github.com/gnustep/libs-gui/pull/1002) | (none: TopoText uses it from here) |
+| `font-substitution-by-name` | libs-gui | test | [#1003](https://github.com/gnustep/libs-gui/pull/1003) | (none: TopoText uses it from here) |
+| `textview-attachment-double-click` | libs-gui | test | [#1004](https://github.com/gnustep/libs-gui/pull/1004) | (none: TopoText uses it from here) |
 | `graphicscontext-backend-recursion` | libs-gui | program | [#978](https://github.com/gnustep/libs-gui/pull/978) | RDLKit |
 | `tableview-bound-value-transform` | libs-gui | test | [#981](https://github.com/gnustep/libs-gui/pull/981) | (none: WorkflowKit uses it from here) |
-| `tableview-prototype-identifier` | libs-gui | test | not sent yet | (none: UDCalc will use it from here) |
+| `tableview-prototype-identifier` | libs-gui | test | [#1005](https://github.com/gnustep/libs-gui/pull/1005) | (none: UDCalc will use it from here) |
 | `scrollview-autohide-reentrancy` | libs-gui | test | not sent yet | (none: UDCalc will use it from here; Gershwin needs its own copy, see NOTES.md) |
 | `cgrectunion-size` | libs-opal | none | [#71](https://github.com/gnustep/libs-opal/pull/71) | GSXFormsKit |
 | `freetype-advance-without-size` | libs-opal | test | [#72](https://github.com/gnustep/libs-opal/pull/72) | (none: XFormsKit uses it from here) |
