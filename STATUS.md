@@ -166,6 +166,15 @@ TopoText builds (libs-gui 94a07bf with this repository's patches):
 `fontSubstitution.m` fails 1 of 2 without the fix, passes 2 of 2 with it.
 Upstream master f4cb83f still has the bug.
 
+The same day `textview-attachment-double-click` was added, also found by
+SimpleNotes, whose file attachments open on a double click and did nothing
+on Linux. `-[NSTextView mouseDown:]` gives an attachment's cell only the
+first click, and the cell is what sends the delegate
+`-textView:doubleClickedOnCell:inRect:atIndex:`, on the second; a double
+click now reaches the cell when the delegate takes one. `attachmentDoubleClick.m`
+fails 1 of 2 without the fix; with it, the NSTextView suite passes 57 of 57
+(same stack as above). Upstream master f4cb83f still has the bug.
+
 Gershwin merges only into `dev`, never `main`, so its patches here are made
 against `dev` and `Scripts/build-gnustep.sh` builds Eau from it, at a pinned
 commit (`EAU_REF`, 01be00b since 2026-10-08): a change on `dev` broke every
@@ -203,6 +212,7 @@ in use.
 | `collectionview-make-item` | libs-gui | test | not sent yet | (none: TopoText uses it from here) |
 | `collectionview-flow-layout` | libs-gui | test | not sent yet | (none: TopoText uses it from here) |
 | `font-substitution-by-name` | libs-gui | test | not sent yet | (none: TopoText uses it from here) |
+| `textview-attachment-double-click` | libs-gui | test | not sent yet | (none: TopoText uses it from here) |
 | `graphicscontext-backend-recursion` | libs-gui | program | [#978](https://github.com/gnustep/libs-gui/pull/978) | RDLKit |
 | `tableview-bound-value-transform` | libs-gui | test | [#981](https://github.com/gnustep/libs-gui/pull/981) | (none: WorkflowKit uses it from here) |
 | `tableview-prototype-identifier` | libs-gui | test | not sent yet | (none: UDCalc will use it from here) |
