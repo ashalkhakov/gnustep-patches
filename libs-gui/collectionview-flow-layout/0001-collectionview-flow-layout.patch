@@ -1,0 +1,490 @@
+From 7b8baaa15f668ee458b9094039189e4450875f3b Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Sun, 11 Oct 2026 18:48:18 +0000
+Subject: [PATCH] NSCollectionViewFlowLayout: lay items out in lines
+
+The flow layout placed item n of a section at n item widths from the
+left, with no spacing between items, and an item that ran past the right
+edge began a line of its own - every later item too, each a line of its
+own, since the count of wrapped lines grew by one per item rather than
+per line. Its content size was the collection view's own frame, so
+nothing past the first screenful could be scrolled to. And
++[NSCollectionViewLayoutAttributes layoutAttributesForItemWithIndexPath:]
+and its siblings returned nil, so a layout that used them (as AppKit's
+subclasses do) gave its items no frame at all.
+
+In -prepareLayout, place each section's items in lines, as many as fit
+between the section's insets with the minimum interitem spacing between
+them, the lines the minimum line spacing apart, sections one after
+another; across instead of down when the scroll direction is horizontal.
+The width a line has is the enclosing scroll view's content width when
+there is one. Item frames and the content size are answered from that.
+The delegate's spacings were never asked for: the selectors checked
+were misspelt (minimim...).
+
+Make the layout attributes the class methods promise, with their
+category, kind and index path; retain the index path, release what is
+held, and have -copyWithZone: return the copy it makes rather than
+itself.
+
+Mark NSCollectionViewDelegateFlowLayout's methods @optional, as AppKit's
+are: a delegate that answers one of them (the item size, say) was
+warned of every other one it did not implement.
+---
+ Headers/AppKit/NSCollectionViewFlowLayout.h  |   5 +-
+ Source/NSCollectionViewFlowLayout.m          | 181 ++++++++++++-------
+ Source/NSCollectionViewLayout.m              |  47 ++++-
+ Tests/gui/NSCollectionViewFlowLayout/lines.m |  96 ++++++++++
+ 4 files changed, 250 insertions(+), 79 deletions(-)
+ create mode 100644 Tests/gui/NSCollectionViewFlowLayout/lines.m
+
+diff --git a/Headers/AppKit/NSCollectionViewFlowLayout.h b/Headers/AppKit/NSCollectionViewFlowLayout.h
+index e559463..9b4e064 100644
+--- a/Headers/AppKit/NSCollectionViewFlowLayout.h
++++ b/Headers/AppKit/NSCollectionViewFlowLayout.h
+@@ -99,6 +99,7 @@ APPKIT_EXPORT_CLASS
+ @end
+ 
+ @protocol NSCollectionViewDelegateFlowLayout <NSCollectionViewDelegate>
++@optional
+ 
+ - (NSSize) collectionView: (NSCollectionView *)collectionView
+                    layout: (NSCollectionViewLayout*)collectionViewLayout
+@@ -151,8 +152,8 @@ APPKIT_EXPORT_CLASS
+   BOOL _sectionFootersPinToVisibleBounds;
+   NSMutableIndexSet *_collapsedSections;
+ 
+-  NSInteger _ds; // deltas for when overflow happens...
+-  NSInteger _dr;
++  NSMutableArray *_itemFrames; // per section, the items' frames
++  NSSize _contentSize;
+ 
+ }
+ 
+diff --git a/Source/NSCollectionViewFlowLayout.m b/Source/NSCollectionViewFlowLayout.m
+index c019802..640a790 100644
+--- a/Source/NSCollectionViewFlowLayout.m
++++ b/Source/NSCollectionViewFlowLayout.m
+@@ -82,6 +82,7 @@
+ 
+ - (void) dealloc
+ {
++  RELEASE(_itemFrames);
+   RELEASE(_collapsedSections);
+   [super dealloc];
+ }
+@@ -358,92 +359,132 @@
+ }
+ 
+ // Methods to override for specific layouts...
+-- (void) prepareLayout
++- (NSSize) _sizeForItemAtIndexPath: (NSIndexPath *)indexPath
+ {
+-  [super prepareLayout];
+-  _ds = 0;
+-  _dr = 0;
+-}
+-
+-- (NSCollectionViewLayoutAttributes *) layoutAttributesForItemAtIndexPath: (NSIndexPath *)indexPath
+-{
+-  NSCollectionViewLayoutAttributes *attrs = AUTORELEASE([[NSCollectionViewLayoutAttributes alloc] init]);
+-  NSSize sz = NSZeroSize;
+   id <NSCollectionViewDelegateFlowLayout> delegate = (id <NSCollectionViewDelegateFlowLayout>)[_collectionView delegate];
+-  NSInteger section = [indexPath section];
+-  NSInteger row = [indexPath item];
+-  NSEdgeInsets insets;
+-  CGFloat mls = 0.0;
+-  CGFloat mis = 0.0;
+-  CGFloat h = 0.0, w = 0.0, x = 0.0, y = 0.0;
+-  NSRect f = NSZeroRect;
+-  NSRect vf = [_collectionView frame];  // needed for reflow...
+-  
+-  // Item size...
++
+   if ([delegate respondsToSelector: @selector(collectionView:layout:sizeForItemAtIndexPath:)])
+     {
+-      sz = [delegate collectionView: _collectionView
+-			     layout: self
+-	     sizeForItemAtIndexPath: indexPath];
++      return [delegate collectionView: _collectionView
++			       layout: self
++	       sizeForItemAtIndexPath: indexPath];
+     }
+-  else
+-    {
+-      sz = [self itemSize];
+-    }
+-  
+-  // Inset
++  return [self itemSize];
++}
++
++- (NSEdgeInsets) _insetForSection: (NSInteger)section
++{
++  id <NSCollectionViewDelegateFlowLayout> delegate = (id <NSCollectionViewDelegateFlowLayout>)[_collectionView delegate];
++
+   if ([delegate respondsToSelector: @selector(collectionView:layout:insetForSectionAtIndex:)])
+     {
+-      insets = [delegate collectionView: _collectionView
+-				 layout: self
+-		 insetForSectionAtIndex: section];
+-    }
+-  else
+-    {
+-      insets = [self sectionInset];
++      return [delegate collectionView: _collectionView
++			       layout: self
++	       insetForSectionAtIndex: section];
+     }
+-  
+-  // minimum line spacing
+-  if ([delegate respondsToSelector: @selector(collectionView:layout:minimimLineSpacingForSectionAtIndex:)])
+-    {
+-      mls = [delegate collectionView: _collectionView
+-			      layout: self
+-		      minimumLineSpacingForSectionAtIndex: section];
+-    }
+-  else
++  return [self sectionInset];
++}
++
++- (CGFloat) _lineSpacingForSection: (NSInteger)section
++{
++  id <NSCollectionViewDelegateFlowLayout> delegate = (id <NSCollectionViewDelegateFlowLayout>)[_collectionView delegate];
++
++  if ([delegate respondsToSelector: @selector(collectionView:layout:minimumLineSpacingForSectionAtIndex:)])
+     {
+-      mls = [self minimumLineSpacing];
++      return [delegate collectionView: _collectionView
++			       layout: self
++		    minimumLineSpacingForSectionAtIndex: section];
+     }
+-  
+-  // minimum interitem spacing
+-  if ([delegate respondsToSelector: @selector(collectionView:layout:minimimInteritemSpacingForSectionAtIndex:)])
++  return [self minimumLineSpacing];
++}
++
++- (CGFloat) _interitemSpacingForSection: (NSInteger)section
++{
++  id <NSCollectionViewDelegateFlowLayout> delegate = (id <NSCollectionViewDelegateFlowLayout>)[_collectionView delegate];
++
++  if ([delegate respondsToSelector: @selector(collectionView:layout:minimumInteritemSpacingForSectionAtIndex:)])
+     {
+-      mis = [delegate collectionView: _collectionView
+-			      layout: self
+-		      minimumInteritemSpacingForSectionAtIndex: section];
++      return [delegate collectionView: _collectionView
++			       layout: self
++	       minimumInteritemSpacingForSectionAtIndex: section];
+     }
+-  else
++  return [self minimumInteritemSpacing];
++}
++
++- (void) prepareLayout
++{
++  BOOL across = (_scrollDirection == NSCollectionViewScrollDirectionHorizontal);
++  NSScrollView *sv = [_collectionView enclosingScrollView];
++  NSSize visible = sv != nil ? [sv contentSize] : [_collectionView frame].size;
++  CGFloat room = across ? visible.height : visible.width;
++  NSInteger sections = [_collectionView numberOfSections];
++  NSInteger section;
++  CGFloat along = 0.0; // where the next section begins, in the scrolling direction
++
++  [super prepareLayout];
++  DESTROY(_itemFrames);
++  _itemFrames = [[NSMutableArray alloc] initWithCapacity: sections];
++
++  for (section = 0; section < sections; section++)
+     {
+-      mis = [self minimumInteritemSpacing];
++      NSInteger items = [_collectionView numberOfItemsInSection: section];
++      NSMutableArray *frames = [NSMutableArray arrayWithCapacity: items];
++      NSEdgeInsets in = [self _insetForSection: section];
++      CGFloat mls = [self _lineSpacingForSection: section];
++      CGFloat mis = [self _interitemSpacingForSection: section];
++      CGFloat start = across ? in.top : in.left;
++      CGFloat end = room - (across ? in.bottom : in.right);
++      CGFloat line = along + (across ? in.left : in.top); // the line's top (left, across)
++      CGFloat thickness = 0.0; // the line's height (width, across)
++      CGFloat at = start;
++      NSInteger item;
++
++      for (item = 0; item < items; item++)
++	{
++	  NSSize sz = [self _sizeForItemAtIndexPath:
++	    [NSIndexPath indexPathForItem: item inSection: section]];
++	  CGFloat length = across ? sz.height : sz.width;
++	  CGFloat depth = across ? sz.width : sz.height;
++
++	  if (at > start && at + length > end)
++	    {
++	      line += thickness + mls;
++	      thickness = 0.0;
++	      at = start;
++	    }
++	  [frames addObject: [NSValue valueWithRect: across
++	    ? NSMakeRect(line, at, sz.width, sz.height)
++	    : NSMakeRect(at, line, sz.width, sz.height)]];
++	  at += length + mis;
++	  thickness = MAX(thickness, depth);
++	}
++      [_itemFrames addObject: frames];
++      along = line + thickness + (across ? in.right : in.bottom);
+     }
+ 
+-  // Calculations...
+-  h = sz.height;
+-  w = sz.width;
+-  x = (row * w) + insets.left + mis;
+-  y = (section * h) + insets.top + mls;
+-  f = NSMakeRect(x, y, w, h);
++  _contentSize = across ? NSMakeSize(along, visible.height)
++    : NSMakeSize(visible.width, along);
++}
+ 
+-  // Determine if it is needed to reflow the given element...
+-  if ((x + w) > vf.size.width)
++- (NSCollectionViewLayoutAttributes *) layoutAttributesForItemAtIndexPath: (NSIndexPath *)indexPath
++{
++  NSCollectionViewLayoutAttributes *attrs;
++  NSInteger section = [indexPath section];
++  NSInteger item = [indexPath item];
++  NSRect f;
++
++  if (_itemFrames == nil)
++    {
++      [self prepareLayout];
++    }
++  if (section >= (NSInteger)[_itemFrames count]
++      || item >= (NSInteger)[[_itemFrames objectAtIndex: section] count])
+     {
+-      _ds += 1;
+-      x = insets.left + mis;
+-      y = ((section + _ds) * h) + insets.top + mls;
+-      f = NSMakeRect(x, y, w, h);
++      return nil;
+     }
++  f = [[[_itemFrames objectAtIndex: section] objectAtIndex: item] rectValue];
+ 
+-  // Build attrs object...
++  attrs = [NSCollectionViewLayoutAttributes layoutAttributesForItemWithIndexPath: indexPath];
+   [attrs setFrame: f];
+   [attrs setZIndex: 0];
+   [attrs setSize: f.size];
+@@ -513,7 +554,11 @@
+ 
+ - (NSSize) collectionViewContentSize
+ {
+-  return [_collectionView frame].size;
++  if (_itemFrames == nil)
++    {
++      [self prepareLayout];
++    }
++  return _contentSize;
+ }
+ // end subclassing hooks...
+ 
+diff --git a/Source/NSCollectionViewLayout.m b/Source/NSCollectionViewLayout.m
+index 18d9bc2..2b98e13 100644
+--- a/Source/NSCollectionViewLayout.m
++++ b/Source/NSCollectionViewLayout.m
+@@ -41,26 +41,47 @@
+ @implementation NSCollectionViewLayoutAttributes
+ 
+ // Initializers
+++ (instancetype) _attributesForCategory: (NSCollectionElementCategory)category
++				    kind: (NSString *)kind
++			       indexPath: (NSIndexPath *)indexPath
++{
++  NSCollectionViewLayoutAttributes *a = AUTORELEASE([[self alloc] init]);
++
++  a->_alpha = 1.0;
++  a->_representedElementCategory = category;
++  ASSIGN(a->_representedElementKind, kind);
++  [a setIndexPath: indexPath];
++  return a;
++}
++
+ + (instancetype) layoutAttributesForItemWithIndexPath: (NSIndexPath *)indexPath
+ {
+-  return nil;
++  return [self _attributesForCategory: NSCollectionElementCategoryItem
++				 kind: nil
++			    indexPath: indexPath];
+ }
+ 
+ + (instancetype) layoutAttributesForInterItemGapBeforeIndexPath: (NSIndexPath *)indexPath
+ {
+-  return nil;
++  return [self _attributesForCategory: NSCollectionElementCategoryInterItemGap
++				 kind: nil
++			    indexPath: indexPath];
+ }
+ 
+ + (instancetype) layoutAttributesForSupplementaryViewOfKind: (NSCollectionViewSupplementaryElementKind)elementKind
+                                               withIndexPath: (NSIndexPath *)indexPath
+ {
+-  return nil;
++  return [self _attributesForCategory: NSCollectionElementCategorySupplementaryView
++				 kind: elementKind
++			    indexPath: indexPath];
+ }
+ 
+ + (instancetype)layoutAttributesForDecorationViewOfKind: (NSCollectionViewDecorationElementKind)decorationViewKind
+                                           withIndexPath: (NSIndexPath*)indexPath
+ {
+-  return nil;
++  return [self _attributesForCategory: NSCollectionElementCategoryDecorationView
++				 kind: decorationViewKind
++			    indexPath: indexPath];
+ }
+ 
+ // Properties
+@@ -111,7 +132,7 @@
+ 
+ - (void) setIndexPath: (NSIndexPath *)indexPath
+ {
+-  _indexPath = indexPath;
++  ASSIGN(_indexPath, indexPath);
+ }
+ 
+ - (NSInteger) zIndex
+@@ -134,19 +155,27 @@
+   return _representedElementKind;
+ }
+ 
++- (void) dealloc
++{
++  RELEASE(_indexPath);
++  RELEASE(_representedElementKind);
++  [super dealloc];
++}
++
+ // Copying
+ - (id) copyWithZone: (NSZone *)z
+ {
+-  NSCollectionViewLayoutAttributes *a = [[NSCollectionViewLayoutAttributes allocWithZone: z] init];
++  NSCollectionViewLayoutAttributes *a = [[[self class] allocWithZone: z] init];
+ 
+   [a setFrame: [self frame]];
+-  [a setSize: [self size]];
+   [a setAlpha: [self alpha]];
+   [a setHidden: [self isHidden]];
+   [a setIndexPath: [self indexPath]];
+   [a setZIndex: [self zIndex]];
+-  
+-  return self;
++  a->_representedElementCategory = _representedElementCategory;
++  ASSIGN(a->_representedElementKind, _representedElementKind);
++
++  return a;
+ }
+ 
+ - (NSString *) description
+diff --git a/Tests/gui/NSCollectionViewFlowLayout/lines.m b/Tests/gui/NSCollectionViewFlowLayout/lines.m
+new file mode 100644
+index 0000000..ea1f6bb
+--- /dev/null
++++ b/Tests/gui/NSCollectionViewFlowLayout/lines.m
+@@ -0,0 +1,96 @@
++/* NSCollectionViewFlowLayout places items in lines: across, as many as fit
++   between the section's insets with the minimum spacing between them, then
++   the next line below, the minimum line spacing apart; the content is as
++   tall as the lines.
++*/
++#include "Testing.h"
++
++#include <Foundation/NSAutoreleasePool.h>
++#include <Foundation/NSGeometry.h>
++#include <Foundation/NSIndexPath.h>
++
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSCollectionView.h>
++#include <AppKit/NSCollectionViewFlowLayout.h>
++#include <AppKit/NSCollectionViewItem.h>
++
++@interface Seven : NSObject <NSCollectionViewDataSource>
++@end
++@implementation Seven
++- (NSInteger) collectionView: (NSCollectionView *)cv
++       numberOfItemsInSection: (NSInteger)section
++{
++  return 7;
++}
++- (NSCollectionViewItem *) collectionView: (NSCollectionView *)cv
++        itemForRepresentedObjectAtIndexPath: (NSIndexPath *)indexPath
++{
++  return AUTORELEASE([[NSCollectionViewItem alloc] init]);
++}
++@end
++
++static NSRect
++frameOf(NSCollectionViewFlowLayout *flow, NSInteger item)
++{
++  return [[flow layoutAttributesForItemAtIndexPath:
++    [NSIndexPath indexPathForItem: item inSection: 0]] frame];
++}
++
++int
++main(int argc, char **argv)
++{
++  NSCollectionView *cv;
++  NSCollectionViewFlowLayout *flow;
++
++  START_SET("NSCollectionViewFlowLayout lines")
++
++  NS_DURING
++    {
++      [NSApplication sharedApplication];
++    }
++  NS_HANDLER
++    {
++      if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++        SKIP("It looks like GNUstep backend is not yet installed")
++    }
++  NS_ENDHANDLER
++
++  cv = AUTORELEASE([[NSCollectionView alloc]
++    initWithFrame: NSMakeRect(0, 0, 340, 100)]);
++  flow = AUTORELEASE([[NSCollectionViewFlowLayout alloc] init]);
++  [flow setItemSize: NSMakeSize(100, 50)];
++  [flow setMinimumInteritemSpacing: 10];
++  [flow setMinimumLineSpacing: 10];
++  [flow setSectionInset: NSEdgeInsetsMake(5, 5, 5, 5)];
++  [cv setCollectionViewLayout: flow];
++  [cv setDataSource: AUTORELEASE([Seven new])];
++  [flow prepareLayout];
++
++  PASS(NSEqualRects(frameOf(flow, 0), NSMakeRect(5, 5, 100, 50)),
++       "the first item is inside the section's insets");
++  PASS(NSEqualRects(frameOf(flow, 1), NSMakeRect(115, 5, 100, 50)),
++       "the next is beside it, the minimum spacing away");
++  PASS(NSEqualRects(frameOf(flow, 2), NSMakeRect(225, 5, 100, 50)),
++       "as many in a line as fit");
++  PASS(NSEqualRects(frameOf(flow, 3), NSMakeRect(5, 65, 100, 50)),
++       "the one that does not fit begins the next line");
++  PASS(NSEqualRects(frameOf(flow, 5), NSMakeRect(225, 65, 100, 50)),
++       "which fills as the first did");
++  PASS(NSEqualRects(frameOf(flow, 6), NSMakeRect(5, 125, 100, 50)),
++       "and so on");
++  PASS(NSEqualSizes([flow collectionViewContentSize], NSMakeSize(340, 180)),
++       "the content is as tall as the lines and the insets");
++
++  [flow setScrollDirection: NSCollectionViewScrollDirectionHorizontal];
++  [cv setFrame: NSMakeRect(0, 0, 100, 180)];
++  [flow prepareLayout];
++  PASS(NSEqualRects(frameOf(flow, 1), NSMakeRect(5, 65, 100, 50)),
++       "scrolling across, a line goes down");
++  PASS(NSEqualRects(frameOf(flow, 3), NSMakeRect(115, 5, 100, 50)),
++       "and the next line is beside it");
++  PASS(NSEqualSizes([flow collectionViewContentSize], NSMakeSize(330, 180)),
++       "the content as wide as the lines");
++
++  END_SET("NSCollectionViewFlowLayout lines")
++  return 0;
++}
+-- 
+2.43.0
+
