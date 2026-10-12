@@ -1,0 +1,67 @@
+From 4d87612e12c3f6771d3557f0b6fb64951e613e95 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Mon, 12 Oct 2026 22:40:28 +0500
+Subject: [PATCH] NSSplitView: -setPosition:ofDividerAtIndex: posts the
+ did-resize notification
+
+-setPosition:ofDividerAtIndex: posted NSSplitViewWillResizeSubviewsNotification
+and resized the two subviews beside the divider, but never posted
+NSSplitViewDidResizeSubviewsNotification.  macOS posts both, and so does
+this class when the user drags a divider and in -adjustSubviews.  A
+delegate's -splitViewDidResizeSubviews: (which -setDelegate: subscribes
+to the notification) was therefore not told when a program moved a
+divider, so anything kept in step with the subviews' sizes, such as
+widths saved for the next launch, went stale.
+
+Post the notification once the subviews have their new frames.  The test
+moves a divider and checks that both notifications are posted once.
+---
+ Source/NSSplitView.m                       |  3 +++
+ Tests/gui/NSSplitView/resizeNotification.m | 12 +++++++++++-
+ 2 files changed, 14 insertions(+), 1 deletion(-)
+
+diff --git a/Source/NSSplitView.m b/Source/NSSplitView.m
+index a66e9a8b..7fc930b6 100644
+--- a/Source/NSSplitView.m
++++ b/Source/NSSplitView.m
+@@ -1285,6 +1285,9 @@ - (void) setPosition: (CGFloat)position
+   /* resize the subviews accordingly */
+   [prev setFrame: r];
+   [next setFrame: r1];
++
++  [nc postNotificationName: NSSplitViewDidResizeSubviewsNotification
++                    object: self];
+ }
+ 
+ 
+diff --git a/Tests/gui/NSSplitView/resizeNotification.m b/Tests/gui/NSSplitView/resizeNotification.m
+index b849bd0f..c95d5d1a 100644
+--- a/Tests/gui/NSSplitView/resizeNotification.m
++++ b/Tests/gui/NSSplitView/resizeNotification.m
+@@ -1,5 +1,6 @@
+ /* NSSplitView posts the will- and did-resize-subviews notifications around
+-   -adjustSubviews when it has subviews, with the split view as the object, and
++   -adjustSubviews and -setPosition:ofDividerAtIndex: when it has subviews,
++   with the split view as the object, and
+    posts nothing when it has no subviews.  structure.m covers the subview and
+    divider geometry; this covers the resize notifications.  The split view uses
+    the theme and font backend, so the set is skipped when the backend is
+@@ -89,6 +90,15 @@ - (void) didResize: (NSNotification *)n
+         "adjustSubviews posts the will and did resize notifications");
+       PASS(r->willObject == sv, "the notification object is the split view");
+ 
++      /* Moving a divider posts both too, as on macOS. */
++      [sv setPosition: 80 ofDividerAtIndex: 0];
++      r->willCount = 0;
++      r->didCount = 0;
++      [sv setPosition: 60 ofDividerAtIndex: 0];
++      PASS(r->willCount == 1 && r->didCount == 1,
++        "setPosition:ofDividerAtIndex: posts the will and did resize"
++        " notifications");
++
+       /* A split view with no subviews posts nothing. */
+       r2 = AUTORELEASE([[Recorder alloc] init]);
+       empty = AUTORELEASE([[NSSplitView alloc]
+-- 
+2.50.1 (Apple Git-155)
+
