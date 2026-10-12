@@ -153,6 +153,19 @@ fails 2 of 4 without its fix, `lines.m` fails 10 of 10 without its; with
 both, the NSCollectionView, NSCollectionViewItem and
 NSCollectionViewFlowLayout suites pass 75 of 75.
 
+On 2026-10-12 `font-substitution-by-name` was added, found by SimpleNotes'
+AppImage, whose menus were slow to open on a desktop with many fonts.
+`-fixFontAttributeInRange:` converted the assigned font to the family name
+of the descriptor fontconfig matched (`-convertFont:toFace:` takes a font
+name), so the conversion failed: characters the font lacks (Eau's ⌘ ⇧ ⌥ in
+Liberation Sans) were never substituted, and each one drawn ran the failed
+lookup again, a fontconfig sort over every installed font once
+GershwinBehaviors' `+fontWithName:size:` falls back to matching
+descriptors. The test was run both ways in a container on the stack
+TopoText builds (libs-gui 94a07bf with this repository's patches):
+`fontSubstitution.m` fails 1 of 2 without the fix, passes 2 of 2 with it.
+Upstream master f4cb83f still has the bug.
+
 Gershwin merges only into `dev`, never `main`, so its patches here are made
 against `dev` and `Scripts/build-gnustep.sh` builds Eau from it, at a pinned
 commit (`EAU_REF`, 01be00b since 2026-10-08): a change on `dev` broke every
@@ -189,6 +202,7 @@ in use.
 | `xib-date-picker` | libs-gui | test | [#984](https://github.com/gnustep/libs-gui/pull/984) | gnustep-coredata |
 | `collectionview-make-item` | libs-gui | test | not sent yet | (none: TopoText uses it from here) |
 | `collectionview-flow-layout` | libs-gui | test | not sent yet | (none: TopoText uses it from here) |
+| `font-substitution-by-name` | libs-gui | test | not sent yet | (none: TopoText uses it from here) |
 | `graphicscontext-backend-recursion` | libs-gui | program | [#978](https://github.com/gnustep/libs-gui/pull/978) | RDLKit |
 | `tableview-bound-value-transform` | libs-gui | test | [#981](https://github.com/gnustep/libs-gui/pull/981) | (none: WorkflowKit uses it from here) |
 | `tableview-prototype-identifier` | libs-gui | test | not sent yet | (none: UDCalc will use it from here) |
