@@ -189,6 +189,16 @@ click now reaches the cell when the delegate takes one. `attachmentDoubleClick.m
 fails 1 of 2 without the fix; with it, the NSTextView suite passes 57 of 57
 (same stack as above). Upstream master f4cb83f still has the bug.
 
+Later on 2026-10-12 `splitview-set-position-did-resize` was added, found
+by SimpleNotes, which keeps its window's pane widths for the next launch
+from its split view's `-splitViewDidResizeSubviews:`.
+`-setPosition:ofDividerAtIndex:` posted the will-resize notification but
+never the did-resize one (macOS posts both; so do a drag and
+`-adjustSubviews` here), so a divider moved by a program went unseen.
+`resizeNotification.m` gains a check that fails without the fix; with it,
+the NSSplitView suite passes 20 of 20 (same stack as above). Upstream
+master f4cb83f still has the bug.
+
 Gershwin merges only into `dev`, never `main`, so its patches here are made
 against `dev` and `Scripts/build-gnustep.sh` builds Eau from it, at a pinned
 commit (`EAU_REF`, 01be00b since 2026-10-08): a change on `dev` broke every
@@ -226,6 +236,7 @@ in use.
 | `collectionview-flow-layout` | libs-gui | test | [#1002](https://github.com/gnustep/libs-gui/pull/1002) | (none: TopoText uses it from here) |
 | `font-substitution-by-name` | libs-gui | test | [#1003](https://github.com/gnustep/libs-gui/pull/1003) | (none: TopoText uses it from here) |
 | `textview-attachment-double-click` | libs-gui | test | [#1004](https://github.com/gnustep/libs-gui/pull/1004) | (none: TopoText uses it from here) |
+| `splitview-set-position-did-resize` | libs-gui | test | not sent yet | (none: TopoText uses it from here) |
 | `graphicscontext-backend-recursion` | libs-gui | program | [#978](https://github.com/gnustep/libs-gui/pull/978) | RDLKit |
 | `tableview-bound-value-transform` | libs-gui | test | [#981](https://github.com/gnustep/libs-gui/pull/981) | (none: WorkflowKit uses it from here) |
 | `tableview-prototype-identifier` | libs-gui | test | [#1005](https://github.com/gnustep/libs-gui/pull/1005) | (none: UDCalc will use it from here) |
