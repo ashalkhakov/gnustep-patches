@@ -1,4 +1,4 @@
-From de63cf0788fbe2f2edd8013adc0974be24143e79 Mon Sep 17 00:00:00 2001
+From 3b6e8b3b28a3a8260a910bd7c39d8c24e09b326f Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Thu, 24 Sep 2026 12:00:00 +0500
 Subject: [PATCH] Decode date pickers from a xib
@@ -11,9 +11,12 @@ timeIntervalSinceReferenceDate, and none of those reach the archive keys
 NSDatePickerCell reads. Every date picker loaded from a xib comes up
 with no fields (elements 0) and a date two seconds into 2001.
 
-Add decoders for NSDatePickerElements, NSDatePickerType,
-NSDatePickerMode, NSDateValue (the current date when the xib says
-useCurrentDate), NSMinDate and NSMaxDate.
+Add decoders for NSDatePickerElements, NSDatePickerType and
+NSDatePickerMode, and for NSDateValue, which is the current date when
+the xib says useCurrentDate.  A <date> element is decoded as an NSDate
+like any other object, with its timeIntervalSinceReferenceDate standing
+for NSDate's NS.time, which is what reaches NSDateValue, NSMinDate and
+NSMaxDate.
 
 Tests/gui/GSXib5KeyedUnarchiver/DatePicker.xib has a date picker for
 each style, the date and time element combinations, range mode, minimum
@@ -22,15 +25,15 @@ writes them; ibtool compiles it without a warning. datePicker.m checks
 the values AppKit gives each of them when the compiled nib is loaded on
 macOS. Without the change 11 of its 14 checks fail.
 ---
- Source/GSXib5KeyedUnarchiver.m                |  86 +++++++++++++++
+ Source/GSXib5KeyedUnarchiver.m                |  65 +++++++++++
  .../gui/GSXib5KeyedUnarchiver/DatePicker.xib  |  80 ++++++++++++++
  Tests/gui/GSXib5KeyedUnarchiver/datePicker.m  | 102 ++++++++++++++++++
- 3 files changed, 268 insertions(+)
+ 3 files changed, 247 insertions(+)
  create mode 100644 Tests/gui/GSXib5KeyedUnarchiver/DatePicker.xib
  create mode 100644 Tests/gui/GSXib5KeyedUnarchiver/datePicker.m
 
 diff --git a/Source/GSXib5KeyedUnarchiver.m b/Source/GSXib5KeyedUnarchiver.m
-index 0a3fc50d..0edf56fa 100644
+index 0a3fc50d..58582b7f 100644
 --- a/Source/GSXib5KeyedUnarchiver.m
 +++ b/Source/GSXib5KeyedUnarchiver.m
 @@ -42,6 +42,7 @@
@@ -41,7 +44,15 @@ index 0a3fc50d..0edf56fa 100644
  #import "AppKit/NSCell.h"
  #import "AppKit/NSClipView.h"
  #import "AppKit/NSFormCell.h"
-@@ -357,6 +358,7 @@ + (void) initialize
+@@ -264,6 +265,7 @@ + (void) initialize
+           // 'XmlKeyToDecoderSelectorMap' variable below should contain the key to its associated decoding
+           // method for cross referencing...
+           XmlKeyMapTable = [NSDictionary dictionaryWithObjectsAndKeys:
++                                           @"timeIntervalSinceReferenceDate", @"NS.time",
+                                            @"isSeparatorItem", @"NSIsSeparator",
+                                            @"customClass", @"NSClassName",
+                                            @"catalog", @"NSCatalogName",
+@@ -357,6 +359,7 @@ + (void) initialize
                                      @"NSCellPrototype", @"NSBrFlags", @"NSNumberOfVisibleColumns",
                                      @"NSWhite", @"NSRGB", @"NSCYMK",
                                      @"NSCellFlags", @"NSCellFlags2",
@@ -49,7 +60,7 @@ index 0a3fc50d..0edf56fa 100644
                                      @"NSButtonFlags", @"NSButtonFlags2",
                                      @"NSUsesItemFromMenu",
                                      @"NSNormalImage", @"NSAlternateImage",
-@@ -456,6 +458,12 @@ + (void) initialize
+@@ -456,6 +459,10 @@ + (void) initialize
                 @"decodeTransitionStyle:", @"NSTransitionStyle",
  	       @"decodeShadowOffsetHoriz:", @"NSShadowHoriz",
  	       @"decodeShadowOffsetVert:", @"NSShadowVert",
@@ -57,25 +68,13 @@ index 0a3fc50d..0edf56fa 100644
 +               @"decodeDatePickerStyleForElement:", @"NSDatePickerType",
 +               @"decodeDatePickerModeForElement:", @"NSDatePickerMode",
 +               @"decodeDatePickerDateValueForElement:", @"NSDateValue",
-+               @"decodeDatePickerMinDateForElement:", @"NSMinDate",
-+               @"decodeDatePickerMaxDateForElement:", @"NSMaxDate",
                   nil];
            RETAIN(XmlKeyToDecoderSelectorMap);
  
-@@ -2566,6 +2574,84 @@ - (id) decodeSegmentItemImageForElement: (GSXibElement*)element
+@@ -2566,6 +2573,64 @@ - (id) decodeSegmentItemImageForElement: (GSXibElement*)element
    return object;
  }
  
-+- (NSDate *) _dateForElement: (GSXibElement*)element key: (NSString*)key
-+{
-+  GSXibElement *date = [element elementForKey: key];
-+  NSString *interval = [date attributeForKey: @"timeIntervalSinceReferenceDate"];
-+
-+  if (interval == nil)
-+    return nil;
-+  return [NSDate dateWithTimeIntervalSinceReferenceDate: [interval doubleValue]];
-+}
-+
 +- (id) decodeDatePickerElementsForElement: (GSXibElement*)element
 +{
 +  GSXibElement *elements = [element elementForKey: @"datePickerElements"];
@@ -131,17 +130,7 @@ index 0a3fc50d..0edf56fa 100644
 +{
 +  if ([[element attributeForKey: @"useCurrentDate"] boolValue])
 +    return [NSDate date];
-+  return [self _dateForElement: element key: @"date"];
-+}
-+
-+- (id) decodeDatePickerMinDateForElement: (GSXibElement*)element
-+{
-+  return [self _dateForElement: element key: @"minDate"];
-+}
-+
-+- (id) decodeDatePickerMaxDateForElement: (GSXibElement*)element
-+{
-+  return [self _dateForElement: element key: @"maxDate"];
++  return [self decodeObjectForKey: @"date"];
 +}
 +
  - (id) decodeButtonFlags1ForElement: (GSXibElement*)element
