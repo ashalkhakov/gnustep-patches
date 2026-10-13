@@ -1,0 +1,322 @@
+From 54934964aaa1dd80476a4c173c23522906d1f809 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Tue, 13 Oct 2026 12:23:54 +0500
+Subject: [PATCH] Provide arc4random() and its companions where glibc has none
+
+glibc has had arc4random(), arc4random_uniform() and arc4random_buf()
+only since 2.36 (2022).  Code written for Apple's C library or a BSD's
+calls them freely, and on an older glibc, such as Ubuntu 22.04's 2.35
+(the oldest LTS still supported, which AppImages are built on so they
+run on older systems), it builds with an implicit declaration and then
+fails to link.
+
+On such a glibc the base library now declares them (GSArc4Random.h,
+imported by NSObjCRuntime.h, so with Foundation) and provides them in
+Source/Additions/GSArc4Random.c: bytes from getrandom(), or /dev/urandom
+on a kernel without it, and arc4random_uniform() without modulo bias.
+On any other C library, glibc 2.36 and later among them, the header
+declares nothing and the file compiles to nothing.
+
+The test calls the three functions through Foundation: on glibc 2.35 it
+fails to link without this change and passes with it.
+---
+ Headers/Foundation/NSObjCRuntime.h |   1 +
+ Headers/GNUstepBase/GSArc4Random.h |  51 +++++++++++++
+ Source/Additions/GNUmakefile       |   1 +
+ Source/Additions/GSArc4Random.c    | 114 +++++++++++++++++++++++++++++
+ Source/GNUmakefile                 |   1 +
+ Tests/base/Functions/arc4random.m  |  67 +++++++++++++++++
+ 6 files changed, 235 insertions(+)
+ create mode 100644 Headers/GNUstepBase/GSArc4Random.h
+ create mode 100644 Source/Additions/GSArc4Random.c
+ create mode 100644 Tests/base/Functions/arc4random.m
+
+diff --git a/Headers/Foundation/NSObjCRuntime.h b/Headers/Foundation/NSObjCRuntime.h
+index d30bb96..ddfa1fd 100644
+--- a/Headers/Foundation/NSObjCRuntime.h
++++ b/Headers/Foundation/NSObjCRuntime.h
+@@ -38,6 +38,7 @@
+ #import	<GNUstepBase/GSConfig.h>
+ #import	<GNUstepBase/GNUstep.h>
+ #import	<GNUstepBase/GSBlocks.h>
++#import	<GNUstepBase/GSArc4Random.h>
+ 
+ #include <stdarg.h>
+ #include <limits.h>
+diff --git a/Headers/GNUstepBase/GSArc4Random.h b/Headers/GNUstepBase/GSArc4Random.h
+new file mode 100644
+index 0000000..0784aa2
+--- /dev/null
++++ b/Headers/GNUstepBase/GSArc4Random.h
+@@ -0,0 +1,51 @@
++/** arc4random() and its companions where the C library has none
++   Copyright (C) 2026 Free Software Foundation, Inc.
++
++   This file is part of the GNUstep Base Library.
++
++   This library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2 of the License, or (at your option) any later version.
++
++   This library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Library General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with this library; if not, write to the Free
++   Software Foundation, Inc., 31 Milk Street #960789 Boston, MA 02196 USA.
++
++   AutogsdocSource:	Additions/GSArc4Random.c
++   */
++
++#ifndef __GSArc4Random_h_GNUSTEP_BASE_INCLUDE
++#define __GSArc4Random_h_GNUSTEP_BASE_INCLUDE
++
++#include <stdint.h>
++#include <stdlib.h>
++
++/* glibc has had arc4random(), arc4random_uniform() and arc4random_buf()
++ * only since 2.36; code written for Apple's or a BSD's C library calls them
++ * freely.  Before that, the base library provides them.
++ */
++#if defined(__GLIBC__) \
++  && (__GLIBC__ < 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ < 36))
++#define GS_PROVIDES_ARC4RANDOM 1
++
++#if defined(__cplusplus)
++extern "C" {
++#endif
++
++extern uint32_t arc4random(void);
++extern uint32_t arc4random_uniform(uint32_t upper_bound);
++extern void arc4random_buf(void *buf, size_t nbytes);
++
++#if defined(__cplusplus)
++}
++#endif
++
++#endif /* glibc before 2.36 */
++
++#endif /* __GSArc4Random_h_GNUSTEP_BASE_INCLUDE */
+diff --git a/Source/Additions/GNUmakefile b/Source/Additions/GNUmakefile
+index 1c7f8b4..0b42e97 100644
+--- a/Source/Additions/GNUmakefile
++++ b/Source/Additions/GNUmakefile
+@@ -31,6 +31,7 @@ include ../../config.mak
+ SUBPROJECT_NAME = Additions
+ 
+ Additions_C_FILES =\
++	GSArc4Random.c \
+ 	GSTypeEncoding.c \
+ 
+ Additions_OBJC_FILES =\
+diff --git a/Source/Additions/GSArc4Random.c b/Source/Additions/GSArc4Random.c
+new file mode 100644
+index 0000000..50f4f0d
+--- /dev/null
++++ b/Source/Additions/GSArc4Random.c
+@@ -0,0 +1,114 @@
++/* arc4random() and its companions where the C library has none
++   Copyright (C) 2026 Free Software Foundation, Inc.
++
++   This file is part of the GNUstep Base Library.
++
++   This library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2 of the License, or (at your option) any later version.
++
++   This library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Library General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with this library; if not, write to the Free
++   Software Foundation, Inc., 31 Milk Street #960789 Boston, MA 02196 USA.
++   */
++
++#include "GNUstepBase/GSArc4Random.h"
++
++#if defined(GS_PROVIDES_ARC4RANDOM)
++
++#include <errno.h>
++#include <fcntl.h>
++#include <unistd.h>
++#include <sys/random.h>
++
++/* Bytes from the kernel's generator: getrandom(), which blocks only until
++ * the generator is first seeded, or /dev/urandom where the kernel has no
++ * getrandom (before Linux 3.17).  Like the BSDs' arc4random, these cannot
++ * fail: nothing would make sense of a missing random number.
++ */
++void
++arc4random_buf(void *buf, size_t nbytes)
++{
++  unsigned char	*p = buf;
++
++  while (nbytes > 0)
++    {
++      ssize_t	got = getrandom(p, nbytes, 0);
++
++      if (got < 0)
++	{
++	  if (errno == EINTR)
++	    {
++	      continue;
++	    }
++	  if (errno == ENOSYS)
++	    {
++	      int	fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
++
++	      while (fd >= 0 && nbytes > 0)
++		{
++		  got = read(fd, p, nbytes);
++		  if (got > 0)
++		    {
++		      p += got;
++		      nbytes -= (size_t)got;
++		    }
++		  else if (got < 0 && errno != EINTR)
++		    {
++		      break;
++		    }
++		}
++	      if (fd >= 0)
++		{
++		  close(fd);
++		}
++	      if (nbytes == 0)
++		{
++		  return;
++		}
++	    }
++	  abort();
++	}
++      p += got;
++      nbytes -= (size_t)got;
++    }
++}
++
++uint32_t
++arc4random(void)
++{
++  uint32_t	value;
++
++  arc4random_buf(&value, sizeof(value));
++  return value;
++}
++
++/* A value below upper_bound, every one equally likely: values from the top
++ * of the range that would favour the small ones are drawn again.
++ */
++uint32_t
++arc4random_uniform(uint32_t upper_bound)
++{
++  uint32_t	minimum;
++  uint32_t	value;
++
++  if (upper_bound < 2)
++    {
++      return 0;
++    }
++  minimum = (uint32_t)(-upper_bound) % upper_bound;
++  do
++    {
++      value = arc4random();
++    }
++  while (value < minimum);
++  return value % upper_bound;
++}
++
++#endif /* GS_PROVIDES_ARC4RANDOM */
+diff --git a/Source/GNUmakefile b/Source/GNUmakefile
+index fd03995..15df3bc 100644
+--- a/Source/GNUmakefile
++++ b/Source/GNUmakefile
+@@ -121,6 +121,7 @@ libgnustep-base.def
+ 
+ GNUSTEPBASE_HEADERS = \
+ GCObject.h \
++GSArc4Random.h \
+ GSBoxWeak.h \
+ GSBlocks.h \
+ GSVersionMacros.h \
+diff --git a/Tests/base/Functions/arc4random.m b/Tests/base/Functions/arc4random.m
+new file mode 100644
+index 0000000..0f11137
+--- /dev/null
++++ b/Tests/base/Functions/arc4random.m
+@@ -0,0 +1,67 @@
++#import <Foundation/Foundation.h>
++#import "Testing.h"
++
++/* arc4random(), arc4random_uniform() and arc4random_buf(), which code
++ * written for Apple's C library calls freely: declared and present with
++ * Foundation on every C library, the base library providing them where it
++ * has none (glibc before 2.36).
++ */
++int main(void)
++{
++  START_SET("arc4random")
++    unsigned	i;
++    BOOL	inRange = YES;
++    BOOL	allZero = YES;
++    BOOL	varies = NO;
++    uint32_t	first = arc4random();
++    unsigned char	buf[64];
++    unsigned	seen[6] = {0};
++    BOOL	everyValue = YES;
++
++    for (i = 0; i < 100; i++)
++      {
++	if (arc4random() != first)
++	  {
++	    varies = YES;
++	  }
++      }
++    PASS(varies, "arc4random() gives different values");
++
++    for (i = 0; i < 6000; i++)
++      {
++	uint32_t	v = arc4random_uniform(6);
++
++	if (v >= 6)
++	  {
++	    inRange = NO;
++	  }
++	else
++	  {
++	    seen[v]++;
++	  }
++      }
++    PASS(inRange, "arc4random_uniform(6) is always below 6");
++    for (i = 0; i < 6; i++)
++      {
++	if (seen[i] < 700)
++	  {
++	    everyValue = NO;
++	  }
++      }
++    PASS(everyValue, "arc4random_uniform(6) gives every value about as often");
++    PASS(arc4random_uniform(0) == 0 && arc4random_uniform(1) == 0,
++      "arc4random_uniform(0) and (1) are 0");
++
++    memset(buf, 0, sizeof(buf));
++    arc4random_buf(buf, sizeof(buf));
++    for (i = 0; i < sizeof(buf); i++)
++      {
++	if (buf[i] != 0)
++	  {
++	    allZero = NO;
++	  }
++      }
++    PASS(!allZero, "arc4random_buf() fills the buffer");
++  END_SET("arc4random")
++  return 0;
++}
+-- 
+2.50.1 (Apple Git-155)
+
