@@ -19,7 +19,6 @@ STATUS.md                                   every fix, its state, and who carrie
 Scripts/apply-patches.sh                    apply one project's patches to a checkout
 Scripts/build-gnustep.sh                    build the patched stack into a prefix
 Scripts/packages-ubuntu.txt                 what building on it needs, on Ubuntu 22.04
-Docker/stack.Dockerfile                     the published stack (below)
 ```
 
 The upstream projects are `libobjc2`, `libs-base`, `libs-gui`, `libs-opal`,
@@ -52,28 +51,29 @@ lists as carrying a copy, in the same pass.
 ## The stack, published
 
 The stack every application builds on is built here, once, and published as
-an image: a `v*` tag (the date, `v2026.10.13`; `v2026.10.13.1` for a second
-the same day) publishes
+an archive: a `v*` tag (the date, `v2026.10.13`; `v2026.10.13.1` for a second
+the same day) attaches
 
 ```
-ghcr.io/ashalkhakov/gnustep:<version>   and   :latest      (linux/amd64, linux/arm64)
+gnustep-patches-<version>-ubuntu22.04-x86_64.tar.xz
+gnustep-patches-<version>-ubuntu22.04-aarch64.tar.xz
 ```
 
-Ubuntu 22.04, the oldest LTS in support, so that an AppImage built on it runs
-on anything newer; every component any application uses (libobjc2,
-libdispatch, tools-make, libs-base, libs-gui, libs-back, libs-corebase,
-libs-opal, the Eau theme, tools-xctest), with the patches applied, in
-`/opt/gnustep`; and the packages building on it needs
-(`Scripts/packages-ubuntu.txt`). `/opt/gnustep/share/gnustep-patches` says
-what it is: `VERSION`, `MANIFEST` (the commit of every component) and the
-package list. gnustep-release-actions copies the stack out of `:latest` for
-every application's Linux build, and the applications' Dockerfiles start
-`FROM` it, so a fix here reaches all of them as one new version.
+to its release: `opt/gnustep`, unpacked at `/`. Ubuntu 22.04, the oldest LTS
+in support, so that what is built on it runs on anything newer; every
+component any application uses (libobjc2, libdispatch, tools-make, libs-base,
+libs-gui, libs-back, libs-corebase, libs-opal, the Eau theme, tools-xctest),
+with the patches applied. `/opt/gnustep/share/gnustep-patches` says what it
+is: `VERSION`, `MANIFEST` (the commit of every component), the packages
+building on it needs (`Scripts/packages-ubuntu.txt`) and `build-gnustep.sh`
+(`--verify-only` checks it). An application names the version it builds on
+in its `.github/pins.env` (`GNUSTEP_PATCHES_VERSION`), and
+gnustep-release-actions unpacks it, so a fix here reaches every application
+as one new version.
 
-`Docker/stack.Dockerfile` builds it; `.github/workflows/stack.yml` builds and
-checks it for both architectures on every push and pull request, and
-publishes it for a tag. (`Docker/Dockerfile` is the other image: unpatched,
-with its sources, for trying a patch.)
+`.github/workflows/stack.yml` builds and checks it on every push, for both
+architectures, and attaches it for a tag. (`Docker/Dockerfile` is an image for
+trying a patch: unpatched, with its sources.)
 
 ## Building the stack
 
