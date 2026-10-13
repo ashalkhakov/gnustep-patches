@@ -204,7 +204,7 @@ longer be built from scratch: `selector-and-fetch-expressions`, merged in a
 slightly different form, neither applied nor reverse-applied, and
 `predicate-secure-coding`, which edits the same decoders, no longer applied.
 `selector-and-fetch-expressions` left (gnustep-coredata, which the table
-listed as carrying it, still has its copy to delete). `predicate-secure-coding`
+listed as carrying it, holds no copy: it took the fix through its pin). `predicate-secure-coding`
 was rebased onto a588655, and the decoders #843 added (a function's operand,
 a key path's target, a fetch request expression's request and context) now
 decode as securely as the rest. `font-substitution-by-name` left too, merged
@@ -217,6 +217,11 @@ Checked on Ubuntu 22.04 (glibc 2.35), the stack built from scratch with
 every patch at libs-base a588655 and libs-gui 311db7d: the NSPredicate and
 Functions suites pass 619 of 619; `arc4random.m` fails to build without its
 fix and passes 5 of 5 with it.
+
+Later on 2026-10-13 libs-gui merged #984 (fdc5cfe) as it was sent, and
+`xib-date-picker` left: on libs-gui master it reverse-applies whole, so
+`apply-patches.sh` was already skipping it. The other nine libs-gui patches
+apply to fdc5cfe.
 
 Gershwin merges only into `dev`, never `main`, so its patches here are made
 against `dev` and `Scripts/build-gnustep.sh` builds Eau from it, at a pinned
@@ -248,9 +253,8 @@ in use.
 | `predicate-nil-constant-format` | libs-base | test | [#845](https://github.com/gnustep/libs-base/pull/845) | gnustep-coredata |
 | `predicate-format-nil-arguments` | libs-base | test | [#846](https://github.com/gnustep/libs-base/pull/846) | (none) |
 | `plist-read-binary` | libs-base | test | [#847](https://github.com/gnustep/libs-base/pull/847) | TopoText (SimpleNotes' SNSecretStore reads through NSPropertyListSerialization) |
-| `arc4random-glibc` | libs-base | test | not sent yet | (none: every app built on the stack uses it from here; HomeRow and UDCalc carry shims to remove) |
+| `arc4random-glibc` | libs-base | test | not sent yet | (none: every app built on the stack uses it from here; HomeRow's and UDCalc's shims are gone) |
 | `tableview-column-autoresizing-style` | libs-gui | test | [#982](https://github.com/gnustep/libs-gui/pull/982) | gnustep-coredata |
-| `xib-date-picker` | libs-gui | test | [#984](https://github.com/gnustep/libs-gui/pull/984) | gnustep-coredata |
 | `collectionview-make-item` | libs-gui | test | [#1001](https://github.com/gnustep/libs-gui/pull/1001) | (none: TopoText uses it from here) |
 | `collectionview-flow-layout` | libs-gui | test | [#1002](https://github.com/gnustep/libs-gui/pull/1002) | (none: TopoText uses it from here) |
 | `textview-attachment-double-click` | libs-gui | test | [#1004](https://github.com/gnustep/libs-gui/pull/1004) | (none: TopoText uses it from here) |
