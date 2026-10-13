@@ -1,4 +1,4 @@
-From b79628659c8e498934b5890c70ab304581aa5c7e Mon Sep 17 00:00:00 2001
+From b6b8a8f98355163b42200192491a39fbd6e2ef98 Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Sat, 10 Oct 2026 21:21:36 +0500
 Subject: [PATCH] NSPredicate and NSExpression support secure coding and
@@ -38,6 +38,10 @@ Tests/base/NSPredicate/secureCoding.m checks each of these against what
 Apple's Foundation does with the same calls.  Without the change 32 of
 its 35 checks fail; with it they pass, and so do the NSPredicate,
 NSKeyedArchiver, NSArchiver, NSArray, NSDictionary and NSSet tests.
+
+The key paths, functions and fetch requests #843 added are decoded the
+same way: a function's operand, a key path's target, and a fetch
+request expression's request and context, each an NSExpression.
 ---
  Headers/Foundation/NSCoder.h          |   7 +
  Headers/Foundation/NSExpression.h     |   9 +-
@@ -46,9 +50,9 @@ NSKeyedArchiver, NSArchiver, NSArray, NSDictionary and NSSet tests.
  Source/NSCoder.m                      |   5 +
  Source/NSKeyedUnarchiver.m            |   5 +
  Source/NSNull.m                       |   5 +
- Source/NSPredicate.m                  | 286 +++++++++++++++++++++++---
- Tests/base/NSPredicate/secureCoding.m | 210 +++++++++++++++++++
- 9 files changed, 506 insertions(+), 32 deletions(-)
+ Source/NSPredicate.m                  | 309 +++++++++++++++++++++++---
+ Tests/base/NSPredicate/secureCoding.m | 210 +++++++++++++++++
+ 9 files changed, 521 insertions(+), 40 deletions(-)
  create mode 100644 Tests/base/NSPredicate/secureCoding.m
 
 diff --git a/Headers/Foundation/NSCoder.h b/Headers/Foundation/NSCoder.h
@@ -70,7 +74,7 @@ index 41805bbfb..454019e6c 100644
  @end
  
 diff --git a/Headers/Foundation/NSExpression.h b/Headers/Foundation/NSExpression.h
-index 087c9e76f..d16094311 100644
+index 5fd82b068..1952994c3 100644
 --- a/Headers/Foundation/NSExpression.h
 +++ b/Headers/Foundation/NSExpression.h
 @@ -65,7 +65,7 @@ enum
@@ -82,7 +86,7 @@ index 087c9e76f..d16094311 100644
  {
  #if	GS_EXPOSE(NSExpression)
    NSExpressionType _type;
-@@ -110,6 +110,13 @@ GS_EXPORT_CLASS
+@@ -116,6 +116,13 @@ GS_EXPORT_CLASS
  - (NSString *) keyPath;
  - (NSExpression *) operand;
  - (NSString *) variable;
@@ -185,7 +189,7 @@ index bb4b30131..a4a5303fa 100644
  {
  }
 diff --git a/Source/NSPredicate.m b/Source/NSPredicate.m
-index d027cea1d..46ccf0998 100644
+index 60c130f4d..b01392fb6 100644
 --- a/Source/NSPredicate.m
 +++ b/Source/NSPredicate.m
 @@ -38,6 +38,7 @@
@@ -196,7 +200,7 @@ index d027cea1d..46ccf0998 100644
  #import "Foundation/NSKeyedArchiver.h"
  #import "Foundation/NSDictionary.h"
  #import "Foundation/NSEnumerator.h"
-@@ -46,8 +47,13 @@
+@@ -48,8 +49,13 @@
  #import "Foundation/NSNull.h"
  #import "Foundation/NSScanner.h"
  #import "Foundation/NSValue.h"
@@ -210,7 +214,7 @@ index d027cea1d..46ccf0998 100644
  
  // For pow()
  #include <math.h>
-@@ -62,6 +68,81 @@
+@@ -64,6 +70,81 @@
   */
  static NSExpression	*evaluatedObjectExpression = nil;
  
@@ -292,7 +296,7 @@ index d027cea1d..46ccf0998 100644
  extern void     GSPropertyListMake(id,NSDictionary*,BOOL,BOOL,unsigned,id*);
  
  @interface GSPredicateScanner : NSScanner
-@@ -109,7 +190,7 @@ @interface GSNotCompoundPredicate : NSCompoundPredicate
+@@ -111,7 +192,7 @@ @interface GSNotCompoundPredicate : NSCompoundPredicate
   * OS X archives it, with a class for each family of operators.  It exists
   * for archiving alone and holds what the predicate holds.
   */
@@ -301,7 +305,7 @@ index d027cea1d..46ccf0998 100644
  {
    @public
    NSPredicateOperatorType	_type;
-@@ -529,6 +610,7 @@ - (NSPredicate *) predicateWithSubstitutionVariables: (NSDictionary *)variables
+@@ -554,6 +635,7 @@ - (NSPredicate *) predicateWithSubstitutionVariables: (NSDictionary *)variables
  - (BOOL) evaluateWithObject: (id)object
        substitutionVariables: (GS_GENERIC_CLASS(NSDictionary, NSString*, id)*)variables
  {
@@ -309,7 +313,7 @@ index d027cea1d..46ccf0998 100644
    return [[self predicateWithSubstitutionVariables: variables]
                                  evaluateWithObject: object];
  }
-@@ -551,6 +633,31 @@ - (id) initWithCoder: (NSCoder *) coder
+@@ -576,6 +658,31 @@ - (id) initWithCoder: (NSCoder *) coder
    return self;
  }
  
@@ -341,7 +345,7 @@ index d027cea1d..46ccf0998 100644
  #if OS_API_VERSION(MAC_OS_X_VERSION_10_6, GS_API_LATEST)
  + (NSPredicate*)predicateWithBlock: (GSBlockPredicateBlock)block
  {
-@@ -578,6 +685,7 @@ - (id) copyWithZone: (NSZone *)z
+@@ -603,6 +710,7 @@ - (id) copyWithZone: (NSZone *)z
  
  - (BOOL) evaluateWithObject: (id)object
  {
@@ -349,7 +353,7 @@ index d027cea1d..46ccf0998 100644
    return YES;
  }
  
-@@ -624,6 +732,7 @@ - (id) copyWithZone: (NSZone *)z
+@@ -649,6 +757,7 @@ - (id) copyWithZone: (NSZone *)z
  
  - (BOOL) evaluateWithObject: (id)object
  {
@@ -357,7 +361,7 @@ index d027cea1d..46ccf0998 100644
    return NO;
  }
  
-@@ -804,7 +913,8 @@ - (id) initWithCoder: (NSCoder *)coder
+@@ -829,7 +938,8 @@ - (id) initWithCoder: (NSCoder *)coder
      {
        type = (NSCompoundPredicateType)
  	[coder decodeIntForKey: @"NSCompoundPredicateType"];
@@ -367,7 +371,7 @@ index d027cea1d..46ccf0998 100644
      }
    else
      {
-@@ -818,6 +928,12 @@ - (id) initWithCoder: (NSCoder *)coder
+@@ -843,6 +953,12 @@ - (id) initWithCoder: (NSCoder *)coder
    return [self initWithType: type subpredicates: subs];
  }
  
@@ -380,7 +384,7 @@ index d027cea1d..46ccf0998 100644
  @end
  
  @implementation GSAndCompoundPredicate
-@@ -827,6 +943,7 @@ - (BOOL) evaluateWithObject: (id) object
+@@ -852,6 +968,7 @@ - (BOOL) evaluateWithObject: (id) object
    NSEnumerator	*e = [_subs objectEnumerator];
    NSPredicate	*p;
  
@@ -388,7 +392,7 @@ index d027cea1d..46ccf0998 100644
    while ((p = [e nextObject]) != nil)
      {
        if ([p evaluateWithObject: object] == NO)
-@@ -890,6 +1007,7 @@ - (BOOL) evaluateWithObject: (id)object
+@@ -915,6 +1032,7 @@ - (BOOL) evaluateWithObject: (id)object
    NSEnumerator	*e = [_subs objectEnumerator];
    NSPredicate	*p;
  
@@ -396,7 +400,7 @@ index d027cea1d..46ccf0998 100644
    while ((p = [e nextObject]) != nil)
      {
        if ([p evaluateWithObject: object] == YES)
-@@ -929,6 +1047,7 @@ - (BOOL) evaluateWithObject: (id)object
+@@ -954,6 +1072,7 @@ - (BOOL) evaluateWithObject: (id)object
  {
    NSPredicate *sub = [_subs objectAtIndex: 0];
  
@@ -404,7 +408,7 @@ index d027cea1d..46ccf0998 100644
    return ![sub evaluateWithObject: object];
  }
  
-@@ -949,6 +1068,11 @@ - (NSString *) predicateFormat
+@@ -974,6 +1093,11 @@ - (NSString *) predicateFormat
  
  @implementation GSPredicateOperator
  
@@ -416,7 +420,7 @@ index d027cea1d..46ccf0998 100644
  + (id) operatorForType: (NSPredicateOperatorType)type
  	      modifier: (NSComparisonPredicateModifier)modifier
  	       options: (NSUInteger)options
-@@ -1098,8 +1222,8 @@ - (id) initWithCoder: (NSCoder *)coder
+@@ -1123,8 +1247,8 @@ - (id) initWithCoder: (NSCoder *)coder
      }
    if ([coder containsValueForKey: @"NSSelectorName"])
      {
@@ -427,7 +431,7 @@ index d027cea1d..46ccf0998 100644
      }
  
    return self;
-@@ -1707,8 +1831,12 @@ - (BOOL) _evaluateLeftValue: (id)leftResult
+@@ -1732,8 +1856,12 @@ - (BOOL) _evaluateLeftValue: (id)leftResult
  
  - (BOOL) evaluateWithObject: (id)object
  {
@@ -442,7 +446,7 @@ index d027cea1d..46ccf0998 100644
  
    if (_modifier == NSDirectPredicateModifier)
      {
-@@ -1797,9 +1925,12 @@ - (id) initWithCoder: (NSCoder *)coder
+@@ -1822,9 +1950,12 @@ - (id) initWithCoder: (NSCoder *)coder
      {
        GSPredicateOperator	*op;
  
@@ -458,7 +462,7 @@ index d027cea1d..46ccf0998 100644
        if (NO == [op isKindOfClass: [GSPredicateOperator class]])
  	{
  	  DESTROY(self);
-@@ -1843,6 +1974,13 @@ - (id) initWithCoder: (NSCoder *)coder
+@@ -1868,6 +1999,13 @@ - (id) initWithCoder: (NSCoder *)coder
  			      options: options];
  }
  
@@ -472,7 +476,7 @@ index d027cea1d..46ccf0998 100644
  @end
  
  
-@@ -2266,6 +2404,31 @@ - (id) initWithCoder: (NSCoder *)coder
+@@ -2349,6 +2487,31 @@ - (id) initWithCoder: (NSCoder *)coder
    return nil;
  }
  
@@ -504,7 +508,7 @@ index d027cea1d..46ccf0998 100644
  - (id) _expressionWithSubstitutionVariables: (NSDictionary *)variables
  {
    [self subclassResponsibility: _cmd];
-@@ -2326,13 +2489,18 @@ - (id) initWithCoder: (NSCoder *)coder
+@@ -2409,13 +2572,18 @@ - (id) initWithCoder: (NSCoder *)coder
  	{
  	  NSString	*name;
  
@@ -525,7 +529,7 @@ index d027cea1d..46ccf0998 100644
  	}
      }
    else
-@@ -2389,6 +2557,7 @@ - (NSString *) description
+@@ -2472,6 +2640,7 @@ - (NSString *) description
  - (id) expressionValueWithObject: (id)object
  			 context: (NSMutableDictionary *)context
  {
@@ -533,7 +537,7 @@ index d027cea1d..46ccf0998 100644
    if ([_obj isKindOfClass: [NSArray class]])
      {
        NSUInteger	count = [(NSArray*)_obj count];
-@@ -2470,6 +2639,12 @@ - (id) initWithCoder: (NSCoder *)coder
+@@ -2553,6 +2722,12 @@ - (id) initWithCoder: (NSCoder *)coder
    return RETAIN([NSExpression expressionForEvaluatedObject]);
  }
  
@@ -546,7 +550,7 @@ index d027cea1d..46ccf0998 100644
  - (id) expressionValueWithObject: (id)object
  			 context: (NSMutableDictionary *)context
  {
-@@ -2514,7 +2689,8 @@ - (id) initWithCoder: (NSCoder *)coder
+@@ -2597,7 +2772,8 @@ - (id) initWithCoder: (NSCoder *)coder
      {
        if ([coder allowsKeyedCoding])
  	{
@@ -556,7 +560,7 @@ index d027cea1d..46ccf0998 100644
  	}
        else
  	{
-@@ -2546,6 +2722,7 @@ - (NSUInteger) hash
+@@ -2629,6 +2805,7 @@ - (NSUInteger) hash
  - (id) expressionValueWithObject: (id)object
  			 context: (NSMutableDictionary *)context
  {
@@ -564,17 +568,23 @@ index d027cea1d..46ccf0998 100644
    return [context objectForKey: _variable];
  }
  
-@@ -2634,7 +2811,8 @@ - (id) initWithCoder: (NSCoder *)coder
+@@ -2717,10 +2894,12 @@ - (id) initWithCoder: (NSCoder *)coder
  
    if ([coder allowsKeyedCoding])
      {
--      NSArray	*arguments = [coder decodeObjectForKey: @"NSArguments"];
+-      NSArray		*arguments = [coder decodeObjectForKey: @"NSArguments"];
+-      id		first = ([arguments count] > 0
 +      NSArray	*arguments = decodeAllowing(coder, @"NSArguments",
 +	ALLOW([NSArray class], [NSExpression class]));
-       id	first = ([arguments count] > 0
++      id	first = ([arguments count] > 0
  	? [arguments objectAtIndex: 0] : nil);
+-      NSExpression	*operand = [coder decodeObjectForKey: @"NSOperand"];
++      NSExpression	*operand = decodeAllowing(coder, @"NSOperand",
++	ALLOW([NSExpression class]));
  
-@@ -2644,7 +2822,8 @@ - (id) initWithCoder: (NSCoder *)coder
+       if ([first isKindOfClass: [GSKeyPathSpecifierExpression class]])
+ 	{
+@@ -2728,7 +2907,8 @@ - (id) initWithCoder: (NSCoder *)coder
  	}
        else if ([coder containsValueForKey: @"NSKeyPath"])
  	{
@@ -582,9 +592,9 @@ index d027cea1d..46ccf0998 100644
 +	  ASSIGN(_keyPath, decodeAllowing(coder, @"NSKeyPath",
 +	    ALLOW([NSString class])));
  	}
-     }
-   else
-@@ -2676,6 +2855,7 @@ - (NSUInteger) hash
+ 
+       /* A key path reached through something else - $source.author, which
+@@ -2777,6 +2957,7 @@ - (NSUInteger) hash
  - (id) expressionValueWithObject: (id)object
  			 context: (NSMutableDictionary *)context
  {
@@ -592,7 +602,7 @@ index d027cea1d..46ccf0998 100644
    return [object valueForKeyPath: _keyPath];
  }
  
-@@ -2747,7 +2927,8 @@ - (id) initWithCoder: (NSCoder *)coder
+@@ -2848,7 +3029,8 @@ - (id) initWithCoder: (NSCoder *)coder
      {
        if ([coder allowsKeyedCoding])
  	{
@@ -602,7 +612,7 @@ index d027cea1d..46ccf0998 100644
  	}
        else
  	{
-@@ -2762,6 +2943,13 @@ - (id) initWithCoder: (NSCoder *)coder
+@@ -2863,6 +3045,13 @@ - (id) initWithCoder: (NSCoder *)coder
  
  @implementation GSBinaryExpression
  
@@ -616,7 +626,7 @@ index d027cea1d..46ccf0998 100644
  - (void) encodeWithCoder: (NSCoder *)coder
  {
    if ([coder allowsKeyedCoding])
-@@ -2788,8 +2976,10 @@ - (id) initWithCoder: (NSCoder *)coder
+@@ -2889,8 +3078,10 @@ - (id) initWithCoder: (NSCoder *)coder
  	[coder decodeIntForKey: @"NSExpressionType"]];
        if (self != nil)
  	{
@@ -629,7 +639,7 @@ index d027cea1d..46ccf0998 100644
  	}
      }
    else
-@@ -2867,6 +3057,7 @@ - (NSString *) description
+@@ -2998,6 +3189,7 @@ - (void) encodeWithCoder: (NSCoder *)coder
  - (id) expressionValueWithObject: (id)object
                           context: (NSMutableDictionary *)context
  {
@@ -637,7 +647,7 @@ index d027cea1d..46ccf0998 100644
    object = [_left expressionValueWithObject: object context: context];
    return [_right expressionValueWithObject: object context: context];
  }
-@@ -2922,12 +3113,15 @@ - (NSString *) description
+@@ -3053,12 +3245,15 @@ - (NSString *) description
  - (id) expressionValueWithObject: (id)object
  			 context: (NSMutableDictionary *)context
  {
@@ -655,7 +665,7 @@ index d027cea1d..46ccf0998 100644
    CHECK_SETS;
      
    result = [NSMutableSet setWithSet: leftSet];
-@@ -2948,12 +3142,15 @@ - (NSString *) description
+@@ -3079,12 +3274,15 @@ - (NSString *) description
  - (id) expressionValueWithObject: (id)object
  			 context: (NSMutableDictionary *)context
  {
@@ -673,7 +683,7 @@ index d027cea1d..46ccf0998 100644
    CHECK_SETS;
    
    result = [NSMutableSet setWithSet: leftSet];
-@@ -2974,12 +3171,15 @@ - (NSString *) description
+@@ -3105,12 +3303,15 @@ - (NSString *) description
  - (id) expressionValueWithObject: (id)object
  			 context: (NSMutableDictionary *)context
  {
@@ -691,7 +701,7 @@ index d027cea1d..46ccf0998 100644
    CHECK_SETS;
    
    result = [NSMutableSet setWithSet: leftSet];
-@@ -2992,6 +3192,13 @@ - (id) expressionValueWithObject: (id)object
+@@ -3123,6 +3324,13 @@ - (id) expressionValueWithObject: (id)object
  
  @implementation GSSubqueryExpression
  
@@ -705,7 +715,7 @@ index d027cea1d..46ccf0998 100644
  - (void) encodeWithCoder: (NSCoder *)coder
  {
    if ([coder allowsKeyedCoding])
-@@ -3016,9 +3223,12 @@ - (id) initWithCoder: (NSCoder *)coder
+@@ -3147,9 +3355,12 @@ - (id) initWithCoder: (NSCoder *)coder
      {
        if ([coder allowsKeyedCoding])
  	{
@@ -721,7 +731,7 @@ index d027cea1d..46ccf0998 100644
  	}
        else
  	{
-@@ -3099,6 +3309,7 @@ - (id) expressionValueWithObject: (id)object
+@@ -3230,6 +3441,7 @@ - (id) expressionValueWithObject: (id)object
    id			collection;
    NSMutableArray	*result;
  
@@ -729,7 +739,7 @@ index d027cea1d..46ccf0998 100644
    collection = [_collection expressionValueWithObject: object context: context];
    if (nil == collection)
      {
-@@ -3151,6 +3362,12 @@ - (id) _expressionWithSubstitutionVariables: (NSDictionary *)variables
+@@ -3282,6 +3494,12 @@ - (id) _expressionWithSubstitutionVariables: (NSDictionary *)variables
  
  @implementation GSAggregateExpression
  
@@ -742,7 +752,7 @@ index d027cea1d..46ccf0998 100644
  - (void) encodeWithCoder: (NSCoder *)coder
  {
    if ([coder allowsKeyedCoding])
-@@ -3171,7 +3388,8 @@ - (id) initWithCoder: (NSCoder *)coder
+@@ -3302,7 +3520,8 @@ - (id) initWithCoder: (NSCoder *)coder
      {
        if ([coder allowsKeyedCoding])
  	{
@@ -752,7 +762,7 @@ index d027cea1d..46ccf0998 100644
  	}
        else
  	{
-@@ -3231,6 +3449,7 @@ - (id) expressionValueWithObject: (id)object
+@@ -3362,6 +3581,7 @@ - (id) expressionValueWithObject: (id)object
    NSMutableArray	*result = [NSMutableArray arrayWithCapacity:
  						    [_collection count]];
  
@@ -760,7 +770,7 @@ index d027cea1d..46ccf0998 100644
    GS_FOR_IN(NSExpression*, exp, _collection)
      {
        NSExpression *value;
-@@ -3246,6 +3465,12 @@ - (id) expressionValueWithObject: (id)object
+@@ -3377,6 +3597,12 @@ - (id) expressionValueWithObject: (id)object
  
  @implementation GSFunctionExpression
  
@@ -773,20 +783,23 @@ index d027cea1d..46ccf0998 100644
  - (NSArray *) arguments
  {
    return _args;
-@@ -3292,8 +3517,10 @@ - (id) initWithCoder: (NSCoder *)coder
+@@ -3424,9 +3650,12 @@ - (id) initWithCoder: (NSCoder *)coder
  
    if ([coder allowsKeyedCoding])
      {
 -      name = [coder decodeObjectForKey: @"NSSelectorName"];
 -      args = [coder decodeObjectForKey: @"NSArguments"];
+-      operand = [coder decodeObjectForKey: @"NSOperand"];
 +      name = decodeAllowing(coder, @"NSSelectorName",
 +	ALLOW([NSString class]));
 +      args = decodeAllowing(coder, @"NSArguments",
 +	ALLOW([NSArray class], [NSExpression class]));
++      operand = decodeAllowing(coder, @"NSOperand",
++	ALLOW([NSExpression class]));
      }
    else
      {
-@@ -3388,6 +3615,7 @@ - (id) expressionValueWithObject: (id)object
+@@ -3540,6 +3769,7 @@ - (id) expressionValueWithObject: (id)object
    NSMutableArray	*eargs = [NSMutableArray arrayWithCapacity: _argc];
    unsigned int i;
  
@@ -794,6 +807,36 @@ index d027cea1d..46ccf0998 100644
    for (i = 0; i < _argc; i++)
      {
        [eargs addObject: [[_args objectAtIndex: i] 
+@@ -3944,9 +4174,12 @@ - (id) initWithCoder: (NSCoder *)coder
+ 
+   if ([coder allowsKeyedCoding])
+     {
+-      name = [coder decodeObjectForKey: @"NSSelectorName"];
+-      target = [coder decodeObjectForKey: @"NSOperand"];
+-      args = [coder decodeObjectForKey: @"NSArguments"];
++      name = decodeAllowing(coder, @"NSSelectorName",
++	ALLOW([NSString class]));
++      target = decodeAllowing(coder, @"NSOperand",
++	ALLOW([NSExpression class]));
++      args = decodeAllowing(coder, @"NSArguments",
++	ALLOW([NSArray class], [NSExpression class]));
+     }
+   else
+     {
+@@ -4126,9 +4359,11 @@ - (id) initWithCoder: (NSCoder *)coder
+     }
+   if ([coder allowsKeyedCoding])
+     {
+-      ASSIGN(_request, [coder decodeObjectForKey: @"NSFRExpression"]);
++      ASSIGN(_request, decodeAllowing(coder, @"NSFRExpression",
++	ALLOW([NSExpression class])));
+       ASSIGN(_contextExpression,
+-	[coder decodeObjectForKey: @"NSMOCExpression"]);
++	decodeAllowing(coder, @"NSMOCExpression",
++	ALLOW([NSExpression class])));
+       _countOnly = [coder decodeBoolForKey: @"NSCountOnlyFlag"];
+     }
+   else
 diff --git a/Tests/base/NSPredicate/secureCoding.m b/Tests/base/NSPredicate/secureCoding.m
 new file mode 100644
 index 000000000..34d866653

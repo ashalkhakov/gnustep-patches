@@ -199,6 +199,25 @@ never the did-resize one (macOS posts both; so do a drag and
 the NSSplitView suite passes 20 of 20 (same stack as above). Upstream
 master f4cb83f still has the bug.
 
+On 2026-10-13 libs-base merged #843 (a588655), and the stack could no
+longer be built from scratch: `selector-and-fetch-expressions`, merged in a
+slightly different form, neither applied nor reverse-applied, and
+`predicate-secure-coding`, which edits the same decoders, no longer applied.
+`selector-and-fetch-expressions` left (gnustep-coredata, which the table
+listed as carrying it, still has its copy to delete). `predicate-secure-coding`
+was rebased onto a588655, and the decoders #843 added (a function's operand,
+a key path's target, a fetch request expression's request and context) now
+decode as securely as the rest. `font-substitution-by-name` left too, merged
+as libs-gui #1003. And `arc4random-glibc` was added: glibc before 2.36 has
+no arc4random(), arc4random_uniform() or arc4random_buf(), which apps
+written for Apple's C library call, so on Ubuntu 22.04 (where AppImages are
+built, to run on older systems) HomeRow, UDCalc and ODataKit's Workbench
+failed to link; the base library now declares and provides them there.
+Checked on Ubuntu 22.04 (glibc 2.35), the stack built from scratch with
+every patch at libs-base a588655 and libs-gui 311db7d: the NSPredicate and
+Functions suites pass 619 of 619; `arc4random.m` fails to build without its
+fix and passes 5 of 5 with it.
+
 Gershwin merges only into `dev`, never `main`, so its patches here are made
 against `dev` and `Scripts/build-gnustep.sh` builds Eau from it, at a pinned
 commit (`EAU_REF`, 01be00b since 2026-10-08): a change on `dev` broke every
@@ -225,16 +244,15 @@ in use.
 | --- | --- | --- | --- | --- |
 | `autoreleased-return-value` | libobjc2 | test | [#426](https://github.com/gnustep/libobjc2/pull/426) closed unmerged | (none: ODataStore works around it) |
 | `predicate-secure-coding` | libs-base | test | not sent yet ([#766](https://github.com/gnustep/libs-base/issues/766)) | (none: FreeCoreData will use it from here) |
-| `selector-and-fetch-expressions` | libs-base | test | [#843](https://github.com/gnustep/libs-base/pull/843) | gnustep-coredata |
 | `predicate-format-expression-arguments` | libs-base | test | [#844](https://github.com/gnustep/libs-base/pull/844) | gnustep-coredata |
 | `predicate-nil-constant-format` | libs-base | test | [#845](https://github.com/gnustep/libs-base/pull/845) | gnustep-coredata |
 | `predicate-format-nil-arguments` | libs-base | test | [#846](https://github.com/gnustep/libs-base/pull/846) | (none) |
 | `plist-read-binary` | libs-base | test | [#847](https://github.com/gnustep/libs-base/pull/847) | TopoText (SimpleNotes' SNSecretStore reads through NSPropertyListSerialization) |
+| `arc4random-glibc` | libs-base | test | not sent yet | (none: every app built on the stack uses it from here; HomeRow and UDCalc carry shims to remove) |
 | `tableview-column-autoresizing-style` | libs-gui | test | [#982](https://github.com/gnustep/libs-gui/pull/982) | gnustep-coredata |
 | `xib-date-picker` | libs-gui | test | [#984](https://github.com/gnustep/libs-gui/pull/984) | gnustep-coredata |
 | `collectionview-make-item` | libs-gui | test | [#1001](https://github.com/gnustep/libs-gui/pull/1001) | (none: TopoText uses it from here) |
 | `collectionview-flow-layout` | libs-gui | test | [#1002](https://github.com/gnustep/libs-gui/pull/1002) | (none: TopoText uses it from here) |
-| `font-substitution-by-name` | libs-gui | test | [#1003](https://github.com/gnustep/libs-gui/pull/1003) | (none: TopoText uses it from here) |
 | `textview-attachment-double-click` | libs-gui | test | [#1004](https://github.com/gnustep/libs-gui/pull/1004) | (none: TopoText uses it from here) |
 | `splitview-set-position-did-resize` | libs-gui | test | not sent yet | (none: TopoText uses it from here) |
 | `graphicscontext-backend-recursion` | libs-gui | program | [#978](https://github.com/gnustep/libs-gui/pull/978) | RDLKit |
