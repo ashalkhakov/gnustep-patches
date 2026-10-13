@@ -1,0 +1,58 @@
+# What building on the stack needs, on Ubuntu 22.04: the toolchain, the
+# libraries the stack links (their -dev packages, since apps compile against
+# their headers too), and what apps' builds, tests and AppImages use (xvfb,
+# fonts, file, desktop-file-utils). One list, read by Docker/stack.Dockerfile
+# for the image and by anything that copies the stack out of the image onto
+# a machine of its own (gnustep-release-actions), so the two cannot differ.
+# One package per line; # starts a comment.
+# The toolchain: a runner image has these, a bare Ubuntu does not.
+build-essential
+binutils
+patch
+# libs-corebase's configure looks for the time zone database.
+tzdata
+clang
+pkg-config
+git
+ca-certificates
+curl
+file
+python3
+python3-pip
+libgnutls28-dev
+gnutls-bin
+libffi-dev
+libicu-dev
+libxml2-dev
+libxslt1-dev
+libssl-dev
+zlib1g-dev
+libcurl4-gnutls-dev
+libgmp-dev
+libavahi-client-dev
+libavahi-compat-libdnssd-dev
+libpthread-workqueue-dev
+libcairo2-dev
+libjpeg-dev
+libtiff-dev
+libpng-dev
+libicns-dev
+liblcms2-dev
+libfreetype-dev
+libfontconfig1-dev
+libxrender-dev
+libxt-dev
+libxmu-dev
+libxft-dev
+libxrandr-dev
+libxfixes-dev
+libxcursor-dev
+libsndfile1-dev
+libao-dev
+xvfb
+xauth
+fuse
+libfuse2
+desktop-file-utils
+fonts-dejavu
+fonts-liberation
