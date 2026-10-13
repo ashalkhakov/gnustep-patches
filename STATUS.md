@@ -223,6 +223,13 @@ Later on 2026-10-13 libs-gui merged #984 (fdc5cfe) as it was sent, and
 `apply-patches.sh` was already skipping it. The other nine libs-gui patches
 apply to fdc5cfe.
 
+The same day libs-base merged #847 (fbfc2da) as it was sent, and
+`plist-read-binary` left. A follow-up upstream (62aeadc, "fix uninitialised
+variable") then changed the same test, so on master the patch neither
+applied nor reverse-applied, and it stopped every build of the stack from
+scratch (UDQuakeTools' first, which had no cached stack). The other five
+libs-base patches apply to 62aeadc.
+
 Gershwin merges only into `dev`, never `main`, so its patches here are made
 against `dev` and `Scripts/build-gnustep.sh` builds Eau from it, at a pinned
 commit (`EAU_REF`, 01be00b since 2026-10-08): a change on `dev` broke every
@@ -252,7 +259,6 @@ in use.
 | `predicate-format-expression-arguments` | libs-base | test | [#844](https://github.com/gnustep/libs-base/pull/844) | gnustep-coredata |
 | `predicate-nil-constant-format` | libs-base | test | [#845](https://github.com/gnustep/libs-base/pull/845) | gnustep-coredata |
 | `predicate-format-nil-arguments` | libs-base | test | [#846](https://github.com/gnustep/libs-base/pull/846) | (none) |
-| `plist-read-binary` | libs-base | test | [#847](https://github.com/gnustep/libs-base/pull/847) | TopoText (SimpleNotes' SNSecretStore reads through NSPropertyListSerialization) |
 | `arc4random-glibc` | libs-base | test | not sent yet | (none: every app built on the stack uses it from here; HomeRow's and UDCalc's shims are gone) |
 | `tableview-column-autoresizing-style` | libs-gui | test | [#982](https://github.com/gnustep/libs-gui/pull/982) | gnustep-coredata |
 | `collectionview-make-item` | libs-gui | test | [#1001](https://github.com/gnustep/libs-gui/pull/1001) | (none: TopoText uses it from here) |
