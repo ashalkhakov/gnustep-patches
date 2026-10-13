@@ -1,158 +1,123 @@
 name: Stack
 
-# The patched GNUstep stack as an image (Docker/stack.Dockerfile), the one
-# every app builds and tests on. Every push and pull request builds it for
-# both architectures and checks it: the stack verified, and a Foundation
-# program built against it and run. A v* tag (the date: v2026.10.13, or
-# v2026.10.13.1 for a second the same day) also publishes it as
+# The patched GNUstep stack, the one every application builds and tests on,
+# built here once and published as an archive. Every push builds it on Ubuntu
+# 22.04 (the oldest LTS in support, so that what is built on it runs on
+# anything newer) for x86_64 and aarch64, checks it (verified, and a
+# Foundation program built on it and run), and uploads
 #
-#   ghcr.io/<owner>/gnustep:<version> and :latest
+#   gnustep-patches-<version>-ubuntu22.04-<arch>.tar.xz      (opt/gnustep)
 #
-# Each architecture is built on a runner of its own (ubuntu-22.04 and
-# ubuntu-22.04-arm), not under QEMU, which would take hours over the stack;
-# the two are then joined into one tag.
+# as the run's artifact; a v* tag (the date: v2026.10.13, or v2026.10.13.1 for
+# a second the same day) also attaches it to the tag's release, where an
+# application's GNUSTEP_PATCHES_VERSION (its .github/pins.env) finds it.
 on:
   push:
     branches: ['**']
     tags: ['v*']
-  pull_request:
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  group: ${{ github.workflow }}-${{ github.ref_name }}
   cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 permissions:
-  contents: read
-  packages: write
-
-env:
-  IMAGE: ghcr.io/${{ github.repository_owner }}/gnustep
+  contents: write
 
 jobs:
-  image:
-    name: Image (${{ matrix.platform }})
+  stack:
+    name: Stack (${{ matrix.runner }})
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - platform: linux/amd64
-            runner: ubuntu-22.04
-          - platform: linux/arm64
-            runner: ubuntu-22.04-arm
+        runner: [ubuntu-22.04, ubuntu-22.04-arm]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 150
+    env:
+      PREFIX: /opt/gnustep
+      CC: clang
+      CXX: clang++
+      LIBRARY_COMBO: ng-gnu-gnu
+      RUNTIME_VERSION: gnustep-2.0
+      LD_LIBRARY_PATH: /opt/gnustep/lib
+      COMPONENTS: libobjc2 libdispatch tools-make libs-base libs-gui libs-back libs-corebase libs-opal eau tools-xctest
     steps:
       - uses: actions/checkout@v4
 
       - name: Names
-        id: names
-        env:
-          PLATFORM: ${{ matrix.platform }}
         run: |
-          echo "arch=${PLATFORM#linux/}" >> "$GITHUB_OUTPUT"
           version="${GITHUB_REF_NAME#v}"
           [ "$GITHUB_REF_TYPE" = tag ] || version="0.0.0-$(git rev-parse --short HEAD)"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "ARCHIVE=gnustep-patches-$version-ubuntu22.04-$(uname -m).tar.xz" >> "$GITHUB_ENV"
 
-      - uses: docker/setup-buildx-action@v3
+      # From Ubuntu's archive only: the runner carries Google Chrome's and
+      # Microsoft's apt sources, which nothing here installs from, and an
+      # update straddling Google's republishing fails on a hash mismatch.
+      - name: Packages
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/google-chrome* /etc/apt/sources.list.d/*google* \
+                     /etc/apt/sources.list.d/microsoft* || true
+          packages=$(grep -v '^#' Scripts/packages-ubuntu.txt | tr '\n' ' ')
+          for i in 1 2 3; do
+            sudo apt-get -q -o Acquire::Retries=3 update \
+              && sudo apt-get -q -y -o Acquire::Retries=3 install $packages && break
+            [ "$i" != 3 ] || exit 1
+            sleep 10
+          done
+          # The gnustep-2.0 runtime needs ld.gold or lld; 22.04's binutils has gold.
+          sudo update-alternatives --install /usr/bin/ld ld /usr/bin/ld.gold 10
+          # libdispatch wants CMake 3.26 or newer; 22.04's is 3.22.
+          python3 -m pip install --user --quiet 'cmake>=3.26'
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Build
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Docker/stack.Dockerfile
-          platforms: ${{ matrix.platform }}
-          build-args: |
-            VERSION=${{ steps.names.outputs.version }}
-            REVISION=${{ github.sha }}
-          load: true
-          tags: gnustep:check
-          cache-from: type=gha,scope=stack-${{ steps.names.outputs.arch }}
-          cache-to: type=gha,scope=stack-${{ steps.names.outputs.arch }},mode=max
+        run: |
+          sudo mkdir -p "$PREFIX" && sudo chown "$(id -u):$(id -g)" "$PREFIX"
+          SOURCES="$RUNNER_TEMP/gnustep-sources" Scripts/build-gnustep.sh
 
-      # What it is, and that a program builds on it and runs: Foundation from
-      # gnustep-make's own rules, the way an app's GNUmakefile uses it.
+      # What it is, beside it: the version, the commit of every component, the
+      # package list building on it needs, and the script that checks it.
+      - name: Manifest
+        run: |
+          d=$PREFIX/share/gnustep-patches
+          mkdir -p "$d"
+          echo "$VERSION" > "$d/VERSION"
+          { echo "gnustep-patches $GITHUB_SHA"
+            for s in "$RUNNER_TEMP"/gnustep-sources/*/; do echo "$(basename "$s") $(git -C "$s" rev-parse HEAD)"; done
+          } > "$d/MANIFEST"
+          cp Scripts/packages-ubuntu.txt Scripts/build-gnustep.sh "$d/"
+          cat "$d/MANIFEST"
+
+      # Checked as it is shipped: libdispatch's main-queue hooks in
+      # gnustep-base, ICU, the backend bundle; and a Foundation program built
+      # with gnustep-make's own rules, as an application's GNUmakefile does.
       - name: Check
         run: |
-          docker image ls gnustep:check
-          docker run --rm gnustep:check bash -c 'cat /opt/gnustep/share/gnustep-patches/VERSION /opt/gnustep/share/gnustep-patches/MANIFEST'
-          docker run --rm gnustep:check bash -c '
-            set -e
-            . /opt/gnustep/System/Library/Makefiles/GNUstep.sh
-            mkdir /tmp/hello && cd /tmp/hello
-            printf "%s\n" "#import <Foundation/Foundation.h>" \
-              "int main(void) { @autoreleasepool { NSLog(@\"%@\", [[NSProcessInfo processInfo] operatingSystemVersionString]); printf(\"hello\\n\"); } return 0; }" > hello.m
-            printf "%s\n" "include \$(GNUSTEP_MAKEFILES)/common.make" "TOOL_NAME = hello" "hello_OBJC_FILES = hello.m" \
-              "include \$(GNUSTEP_MAKEFILES)/tool.make" > GNUmakefile
-            make -s
-            [ "$(./obj/hello)" = hello ]'
+          Scripts/build-gnustep.sh --verify-only
+          . "$PREFIX/System/Library/Makefiles/GNUstep.sh"
+          mkdir -p "$RUNNER_TEMP/hello" && cd "$RUNNER_TEMP/hello"
+          printf '%s\n' '#import <Foundation/Foundation.h>' \
+            'int main(void) { @autoreleasepool { printf("hello\n"); } return 0; }' > hello.m
+          printf '%s\n' 'include $(GNUSTEP_MAKEFILES)/common.make' 'TOOL_NAME = hello' 'hello_OBJC_FILES = hello.m' \
+            'include $(GNUSTEP_MAKEFILES)/tool.make' > GNUmakefile
+          make -s
+          [ "$(./obj/hello)" = hello ]
 
-      - name: Log in to the registry
-        if: github.ref_type == 'tag'
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      # Pushed by digest only; the join below tags the two as one.
-      - name: Push
-        id: push
-        if: github.ref_type == 'tag'
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Docker/stack.Dockerfile
-          platforms: ${{ matrix.platform }}
-          build-args: |
-            VERSION=${{ steps.names.outputs.version }}
-            REVISION=${{ github.sha }}
-          labels: |
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.version=${{ steps.names.outputs.version }}
-          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=gha,scope=stack-${{ steps.names.outputs.arch }}
-
-      - name: Keep the digest
-        if: github.ref_type == 'tag'
+      - name: Archive
         run: |
-          mkdir -p "$RUNNER_TEMP/digests"
-          digest="${{ steps.push.outputs.digest }}"
-          touch "$RUNNER_TEMP/digests/${digest#sha256:}"
+          tar -C / -cJf "$RUNNER_TEMP/$ARCHIVE" opt/gnustep
+          ls -la "$RUNNER_TEMP/$ARCHIVE"
 
       - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARCHIVE }}
+          path: ${{ runner.temp }}/${{ env.ARCHIVE }}
+          if-no-files-found: error
+          retention-days: ${{ github.ref_type == 'tag' && 90 || 14 }}
+
+      - name: Attach to the release
         if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
         with:
-          name: digest-${{ steps.names.outputs.arch }}
-          path: ${{ runner.temp }}/digests/*
-          retention-days: 1
-
-  publish:
-    name: Publish
-    if: github.ref_type == 'tag'
-    needs: image
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: digest-*
-          merge-multiple: true
-          path: ${{ runner.temp }}/digests
-
-      - uses: docker/setup-buildx-action@v3
-
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Tag both architectures as one
-        working-directory: ${{ runner.temp }}/digests
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          sources=()
-          for digest in *; do sources+=("$IMAGE@sha256:$digest"); done
-          docker buildx imagetools create -t "$IMAGE:$version" -t "$IMAGE:latest" "${sources[@]}"
-          docker buildx imagetools inspect "$IMAGE:$version"
+          files: ${{ runner.temp }}/${{ env.ARCHIVE }}
