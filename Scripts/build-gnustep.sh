@@ -334,6 +334,17 @@ verify() {
             ;;
     esac
 
+    # gnustep-gui builds its sound plug-ins (NSSound's) only when it finds
+    # libsndfile and libao, and says nothing when it does not.
+    case " $COMPONENTS " in
+        *" libs-gui "*)
+            if ! find "$PREFIX" -maxdepth 5 -name '*.nssound' | grep -q .; then
+                echo "verify: no .nssound bundles in $PREFIX (are libsndfile1-dev and libao-dev installed?)" >&2
+                failed=1
+            fi
+            ;;
+    esac
+
     [ "$failed" -eq 0 ] && say "verify: $PREFIX looks sound"
     return "$failed"
 }
