@@ -197,12 +197,20 @@ jobs:
             echo "== $t: $(sed -n 2p $t.m)"
             ./obj/$t.exe > out.txt 2>&1; echo "exit $?"; grep -a -v "absolute path\|fix your\|guessing" out.txt | tail -3
           done
-          for t in $names; do
-            ./obj/$t.exe > /dev/null 2>&1 && continue
-            echo "== gdb $t"
-            gdb -batch -ex run -ex bt -ex "info registers rip rsp rbp" -ex "x/16gx \$rsp-64" -ex "frame 4" -ex "x/24i \$pc-60" -ex "info frame" --args ./obj/$t.exe 2>&1 | grep -a -v "absolute path\|fix your\|guessing\|New Thread\|exited with code" | tail -70
-            break
-          done
+          echo "== the table, in the DLL"
+          gdb -batch -ex "p/a 'GSPrivateFormat'::step4_jumps" ./obj/t1.exe 2>&1 | grep -a -v "absolute path\|fix your\|guessing" | tail -40
+          base=$(find /c/GNUstep -iname 'gnustep-base*.dll' | head -1)
+          gdb -batch -ex "p/a 'GSPrivateFormat'::step4_jumps" "$base" 2>&1 | grep -a -v "absolute path\|fix your\|guessing" | tail -40
+          echo "== GSFormat.m at -O0"
+          src=$(cygpath -u "$RUNNER_TEMP")/gnustep-sources/libs-base/Source
+          touch "$src/GSFormat.m"
+          make -C "$src" -s GSFormat.m_FILE_FLAGS=-O0 2>&1 | grep -a -i "error" | head
+          make -C "$src" -s install 2>&1 | grep -a -i "error" | head
+          echo 'int main(void) { @autoreleasepool { [NSObject class]; printf("%s\n", [[NSString stringWithFormat: @"%u %lu %o", 7U, 8UL, 8] UTF8String]); NSLog(@"logged %@", @"yes"); } return 0; }' > o0.m
+          sed -i '1i #import <Foundation/Foundation.h>' o0.m
+          printf '%s\n' 'include $(GNUSTEP_MAKEFILES)/common.make' 'TOOL_NAME = o0' 'o0_OBJC_FILES = o0.m' 'include $(GNUSTEP_MAKEFILES)/tool.make' > GNUmakefile
+          make -s 2>&1 | grep -a -i error | head
+          ./obj/o0.exe 2>&1 | grep -a -v "absolute path\|fix your\|guessing"; echo "exit ${PIPESTATUS[0]}"
           true
 
       - name: Manifest
