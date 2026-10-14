@@ -140,7 +140,7 @@ jobs:
       CXX: clang++
       LIBRARY_COMBO: ng-gnu-gnu
       RUNTIME_VERSION: gnustep-2.0
-      COMPONENTS: libobjc2 libdispatch tools-make libs-base libs-gui libs-back libs-corebase libs-opal eau tools-xctest
+      COMPONENTS: libobjc2 libdispatch tools-make libs-base
     steps:
       # The patches are applied byte for byte: no CRLF.
       - name: Line endings
@@ -170,36 +170,38 @@ jobs:
         run: SOURCES="$(cygpath -u "$RUNNER_TEMP")/gnustep-sources" Scripts/build-gnustep.sh
 
       - name: Debug
-        if: failure()
+        if: always()
         run: |
           set +e +o pipefail
           . "$PREFIX/System/Library/Makefiles/GNUstep.sh"
           export PATH="$PREFIX/bin:$PATH"
-          src=$(cygpath -u "$RUNNER_TEMP")/gnustep-sources
-          gui=$(dirname "$(find "$src/libs-gui/Source" -iname 'gnustep-gui*.dll' | head -1)")
-          echo "gui DLL in: $gui"; ls "$gui" | head
-          export PATH="$gui:$PATH"
-          cd "$src/libs-gui/Tools"
-          ls obj GSspell.service GSspell.service/Resources 2>&1 | head -30
-          cat GSspell.service/Resources/Info-gnustep.plist 2>&1 | head -20
-          echo "PATH=$PATH" | tr ':' '\n'
-          for f in ./obj/make_services.exe "$gui/gnustep-gui-0_32.dll" $(find /c/GNUstep -iname 'gnustep-base*.dll'); do
-            echo "== $f"
-            for d in $(objdump -p "$f" | sed -n 's/.*DLL Name: //p' | tr -d '\r'); do
-              case "$d" in api-ms-*|KERNEL32*|kernel32*|USER32*|GDI32*|ADVAPI32*|WS2_32*|msvcrt*|ole32*|SHELL32*|COMCTL32*|comdlg32*|MPR*|NETAPI32*|WINMM*|IPHLPAPI*|SHLWAPI*|CRYPT32*|bcrypt*|ntdll*|Secur32*|WINSPOOL*|IMM32*|OLEAUT32*|USERENV*|DNSAPI*|dbghelp*|msimg32*|USP10*|VERSION*|RPCRT4*) continue ;; esac
-              w=$(PATH="$PATH" which "$d" 2>/dev/null) || w="NOT FOUND"
-              echo "  $d -> $w"
-            done
+          mkdir -p /tmp/t && cd /tmp/t
+          n=0
+          for body in 'printf("%s\n", [[NSString stringWithFormat: @"plain"] UTF8String]);' \
+                      'printf("%s\n", [[NSString stringWithFormat: @"%d", 42] UTF8String]);' \
+                      'printf("%s\n", [[NSString stringWithFormat: @"%s", "cstr"] UTF8String]);' \
+                      'printf("%s\n", [[NSString stringWithFormat: @"%@", @"obj"] UTF8String]);' \
+                      'printf("%s\n", [[NSString stringWithFormat: @"%lu %@", 7UL, @"two"] UTF8String]);' \
+                      'NSLog(@"plain");' \
+                      'NSLog(@"x = %@", @"y");'; do
+            n=$((n+1))
+            printf '%s\n' '#import <Foundation/Foundation.h>' "int main(void) { @autoreleasepool { [NSObject class]; $body } return 0; }" > t$n.m
+            names="$names t$n"; files="$files t${n}_OBJC_FILES=t$n.m"
           done
-          printf '%s\n' '#include <windows.h>' '#include <stdio.h>' \
-            'int main(int argc, char **argv) { for (int i = 1; i < argc; i++) { HMODULE h = LoadLibraryExA(argv[i], NULL, 0); printf("%s: %s %lu\n", argv[i], h ? "ok" : "FAILED", h ? 0UL : GetLastError()); } return 0; }' > /tmp/load.c
-          clang -o /tmp/load.exe /tmp/load.c
-          dlls=$(ldd ./obj/make_services.exe | sed -n 's/.*=> \(\/[^ ]*\) .*/\1/p' | grep -v -i '/c/Windows' | tac)
-          /tmp/load.exe $(for d in $dlls; do cygpath -w "$d"; done) "$(cygpath -w /c/GNUstep/bin/libBlocksRuntime.dll)"
-          ./obj/make_services --test GSspell.service/Resources/Info-gnustep.plist; echo "make_services exit $?"
-          gdb -batch -ex run -ex bt -ex "info registers rip" -ex "x/6i \$pc" --args ./obj/make_services.exe --test GSspell.service/Resources/Info-gnustep.plist 2>&1 | grep -v "absolute path\|fix your\|guessing\|New Thread" | tail -40
-          ./GSspell.service/GSspell.exe -RegisterOnly YES; echo "GSspell exit $?"
-          gdb -batch -ex run -ex bt -ex "info registers rip" -ex "x/6i \$pc" --args ./GSspell.service/GSspell.exe -RegisterOnly YES 2>&1 | grep -v "absolute path\|fix your\|guessing\|New Thread" | tail -40
+          { echo 'include $(GNUSTEP_MAKEFILES)/common.make'; echo "TOOL_NAME =$names"
+            for f in $files; do echo "${f%%=*} = ${f#*=}"; done
+            echo 'include $(GNUSTEP_MAKEFILES)/tool.make'; } > GNUmakefile
+          make -s 2>&1 | grep -a "error" | head
+          for t in $names; do
+            echo "== $t: $(sed -n 2p $t.m)"
+            ./obj/$t.exe > out.txt 2>&1; echo "exit $?"; grep -a -v "absolute path\|fix your\|guessing" out.txt | tail -3
+          done
+          for t in $names; do
+            ./obj/$t.exe > /dev/null 2>&1 && continue
+            echo "== gdb $t"
+            gdb -batch -ex run -ex bt -ex "info registers rip rsp" --args ./obj/$t.exe 2>&1 | grep -a -v "absolute path\|fix your\|guessing\|New Thread\|exited with code" | tail -30
+            break
+          done
           true
 
       - name: Manifest
