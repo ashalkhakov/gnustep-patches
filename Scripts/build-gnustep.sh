@@ -6,6 +6,10 @@
 #   Scripts/build-gnustep.sh --verify-only         # check a prefix that is already there
 #   Scripts/build-gnustep.sh --print-recipe-hash   # for a CI cache key
 #
+# On Linux, and on Windows in an MSYS2 CLANG64 shell (the same components,
+# patches and flags; what Windows does differently is said where it is done:
+# DLLs instead of rpaths, native paths for CMake, libc++).
+#
 # This replaces the near-identical dependencies.sh that several projects were
 # each carrying.  What genuinely differs between them is expressed as input:
 # which components to build, which patches to apply, where to put the result.
@@ -46,6 +50,11 @@ JOBS=${JOBS:-$(nproc 2>/dev/null || echo 4)}
 CLEAN=${CLEAN:-0}
 
 export CC CXX LIBRARY_COMBO RUNTIME_VERSION
+
+case "$(uname -s)" in
+    MINGW*|MSYS*) WINDOWS=1 ;;
+    *)            WINDOWS=0 ;;
+esac
 
 # ------------------------------------------------------------------ #
 # The recipe hash: script + selected components + the patches that
@@ -90,6 +99,23 @@ say() { echo "=== $*"; }
 export LD_LIBRARY_PATH="$PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export C_INCLUDE_PATH="$PREFIX/include${C_INCLUDE_PATH:+:$C_INCLUDE_PATH}"
 export CPLUS_INCLUDE_PATH="$PREFIX/include${CPLUS_INCLUDE_PATH:+:$CPLUS_INCLUDE_PATH}"
+RPATH="-Wl,-rpath,$PREFIX/lib"
+
+# Windows finds DLLs on PATH, and CMake's DLLs land in $PREFIX/bin; there is
+# no rpath. libobjc2 is part C++ and MSYS2's clang links libc++ only when
+# asked. gnustep-make's configure is given --prefix as the MSYS path it is
+# (libs-base's own CI does the same), CMake a native one. Newer clang makes
+# these warnings errors; the code is the same as on Linux, where they are
+# warnings.
+native() { echo "$1"; }
+if [ "$WINDOWS" = 1 ]; then
+    export PATH="$PREFIX/bin:$PATH"
+    export LDFLAGS="${LDFLAGS:+$LDFLAGS }-lc++"
+    export MSYS2_ARG_CONV_EXCL="--prefix="
+    export OBJCFLAGS="${OBJCFLAGS:+$OBJCFLAGS }-Wno-error=incompatible-pointer-types -Wno-error=int-conversion"
+    RPATH=
+    native() { cygpath -m "$1"; }
+fi
 
 ref_for() {
     eval "echo \"\${$(printf %s "$1" | tr 'a-z-' 'A-Z_')_REF:-}\""
@@ -150,6 +176,13 @@ gnustep_sh() {
     set -u
 }
 
+# Make's own generator on Linux; on Windows Ninja, since MSYS2's make and
+# CMake's "MSYS Makefiles" disagree about paths.
+cmake_generator() {
+    [ "$WINDOWS" = 1 ] && echo "-G Ninja"
+    return 0
+}
+
 # ------------------------------------------------------------------ #
 # Components
 # ------------------------------------------------------------------ #
@@ -157,13 +190,13 @@ build_libobjc2() {
     fetch libobjc2 https://github.com/gnustep/libobjc2.git
     apply_patches_for libobjc2 "$SOURCES/libobjc2"
     mkdir -p "$SOURCES/libobjc2/build"
-    (cd "$SOURCES/libobjc2/build" && cmake .. \
+    (cd "$SOURCES/libobjc2/build" && cmake .. $(cmake_generator) \
         -DTESTS=off \
         -DCMAKE_BUILD_TYPE=RelWithDebInfo \
         -DGNUSTEP_INSTALL_TYPE=NONE \
-        -DCMAKE_INSTALL_PREFIX:PATH="$PREFIX" \
+        -DCMAKE_INSTALL_PREFIX:PATH="$(native "$PREFIX")" \
         -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" \
-        && make -j"$JOBS" && make install)
+        && cmake --build . -j"$JOBS" && cmake --install .)
 }
 
 # Built before gnustep-base on purpose, and with its private headers:
@@ -176,16 +209,18 @@ build_libobjc2() {
 build_libdispatch() {
     fetch libdispatch https://github.com/swiftlang/swift-corelibs-libdispatch.git
     mkdir -p "$SOURCES/libdispatch/build"
-    (cd "$SOURCES/libdispatch/build" && cmake .. \
+    libobjc=$PREFIX/lib/libobjc.so
+    [ "$WINDOWS" = 1 ] && libobjc=$PREFIX/lib/libobjc.dll.a
+    (cd "$SOURCES/libdispatch/build" && cmake .. $(cmake_generator) \
         -DBUILD_TESTING=off \
         -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-        -DCMAKE_INSTALL_PREFIX:PATH="$PREFIX" \
+        -DCMAKE_INSTALL_PREFIX:PATH="$(native "$PREFIX")" \
         -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" \
         -DCMAKE_C_FLAGS="-Wno-error=void-pointer-to-int-cast" \
         -DINSTALL_PRIVATE_HEADERS=1 \
-        -DBlocksRuntime_INCLUDE_DIR="$PREFIX/include" \
-        -DBlocksRuntime_LIBRARIES="$PREFIX/lib/libobjc.so" \
-        && make -j"$JOBS" && make install)
+        -DBlocksRuntime_INCLUDE_DIR="$(native "$PREFIX/include")" \
+        -DBlocksRuntime_LIBRARIES="$(native "$libobjc")" \
+        && cmake --build . -j"$JOBS" && cmake --install .)
 }
 
 build_tools_make() {
@@ -197,7 +232,7 @@ build_tools_make() {
         --with-runtime-abi="$RUNTIME_VERSION" \
         --enable-objc-arc \
         CPPFLAGS="-I$PREFIX/include" \
-        LDFLAGS="-L$PREFIX/lib -Wl,-rpath,$PREFIX/lib" \
+        LDFLAGS="-L$PREFIX/lib $RPATH${LDFLAGS:+ $LDFLAGS}" \
         CC="$CC" CXX="$CXX"
     (cd "$SOURCES/tools-make" && make -j"$JOBS" && make install)
     gnustep_sh
@@ -260,7 +295,7 @@ build_libs_corebase() {
     configure_in "$SOURCES/libs-corebase" \
         --prefix="$PREFIX" \
         CPPFLAGS="-I$PREFIX/include" \
-        LDFLAGS="-L$PREFIX/lib -Wl,-rpath,$PREFIX/lib"
+        LDFLAGS="-L$PREFIX/lib $RPATH${LDFLAGS:+ $LDFLAGS}"
     (cd "$SOURCES/libs-corebase" && make -j"$JOBS" && make install)
 }
 
@@ -285,8 +320,10 @@ build_eau() {
     fetch eau https://github.com/gershwin-desktop/gershwin-eau-theme.git
     apply_patches_for gershwin-eau-theme "$SOURCES/eau"
     gnustep_sh
-    ldflags="-L$PREFIX/lib -Wl,-rpath,$PREFIX/lib -ldispatch"
-    [ -e "$PREFIX/lib/libBlocksRuntime.so" ] && ldflags="$ldflags -lBlocksRuntime"
+    ldflags="-L$PREFIX/lib $RPATH -ldispatch"
+    for blocks in "$PREFIX"/lib/libBlocksRuntime.so "$PREFIX"/lib/libBlocksRuntime.dll.a; do
+        [ -e "$blocks" ] && ldflags="$ldflags -lBlocksRuntime"
+    done
     (cd "$SOURCES/eau" && make -j"$JOBS" ADDITIONAL_LDFLAGS="$ldflags" && make install)
 }
 
@@ -300,18 +337,31 @@ build_tools_xctest() {
 # Verification - run after a build and after a cache restore, because a
 # prefix that came out of a cache can be wrong in exactly the same ways.
 # ------------------------------------------------------------------ #
+# The symbols a library imports and exports, and the libraries it links:
+# the ELF dynamic table on Linux, the PE import and export tables on Windows.
+symbols_of() {
+    if [ "$WINDOWS" = 1 ]; then objdump -p "$1"; else nm -D "$1"; fi
+}
+links_of() {
+    if [ "$WINDOWS" = 1 ]; then objdump -p "$1" | grep 'DLL Name'; else ldd "$1"; fi
+}
+
 verify() {
     failed=0
     gnustep_sh
 
-    base=$(ls "$PREFIX"/*/Library/Libraries/libgnustep-base.so.* 2>/dev/null | head -1 || true)
+    if [ "$WINDOWS" = 1 ]; then
+        base=$(find "$PREFIX" -iname 'gnustep-base*.dll' | head -1)
+    else
+        base=$(ls "$PREFIX"/*/Library/Libraries/libgnustep-base.so.* 2>/dev/null | head -1 || true)
+    fi
     if [ -z "$base" ]; then
         echo "verify: no libgnustep-base in $PREFIX" >&2
         return 1
     fi
 
     for hook in _dispatch_main_queue_callback_4CF _dispatch_get_main_queue_handle_4CF; do
-        if ! nm -D "$base" | grep -q " $hook\$"; then
+        if ! symbols_of "$base" | grep -qw "$hook"; then
             echo "verify: $base was built without libdispatch main-queue support ($hook)" >&2
             echo "verify: libdispatch must be built, with its private headers, BEFORE libs-base" >&2
             failed=1
@@ -320,7 +370,7 @@ verify() {
 
     # gnustep-base picks ICU up on its own when libicu-dev is present, and
     # says nothing at all when it is not.
-    if ! ldd "$base" | grep -q libicu; then
+    if ! links_of "$base" | grep -qi icu; then
         echo "verify: $base is not linked against ICU (is libicu-dev installed?)" >&2
         failed=1
     fi

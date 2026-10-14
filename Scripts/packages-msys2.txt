@@ -1,0 +1,35 @@
+# What building on the stack needs on Windows, in an MSYS2 CLANG64 (or
+# CLANGARM64) shell: the counterpart of packages-ubuntu.txt, read by the
+# same workflows. A name without a slash is a native package, installed as
+# ${MINGW_PACKAGE_PREFIX}-<name>; msys/<name> is one of the shell's tools.
+# One package per line; # starts a comment.
+msys/git
+msys/make
+msys/patch
+msys/autoconf
+msys/automake
+msys/libtool
+msys/rsync
+clang
+lld
+cmake
+ninja
+pkgconf
+gnutls
+libffi
+icu
+libiconv
+libxml2
+libxslt
+zlib
+curl
+cairo
+freetype
+fontconfig
+libjpeg-turbo
+libtiff
+libpng
+giflib
+lcms2
+libsndfile
+libao
