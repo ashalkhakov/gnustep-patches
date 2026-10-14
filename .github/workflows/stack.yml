@@ -193,8 +193,11 @@ jobs:
             't1_OBJC_FILES = t1.m' 't2_OBJC_FILES = t2.m' 't3_OBJC_FILES = t3.m' 't4_OBJC_FILES = t4.m' 't5_OBJC_FILES = t5.m' \
             'include $(GNUSTEP_MAKEFILES)/tool.make' > GNUmakefile
           make messages=yes 2>&1 | grep -v "absolute path\|fix your\|guessing" | tail -20
-          for t in t1 t2 t3 t4 t5; do echo "== $t"; ./obj/$t.exe 2>&1 | grep -v "absolute path\|fix your\|guessing"; echo "exit ${PIPESTATUS[0]}"; done
-          for t in t2 t3; do gdb -batch -ex run -ex bt -ex "info registers rip" -ex "x/6i \$pc" ./obj/$t.exe 2>&1 | tail -25; done
+          set +e +o pipefail
+          for t in t1 t2 t3 t4 t5; do echo "== $t"; ./obj/$t.exe > out.txt 2>&1; echo "exit $?"; grep -v "absolute path\|fix your\|guessing" out.txt | tail -5; done
+          for t in t2 t3; do gdb -batch -ex run -ex bt -ex "info registers rip" -ex "x/6i \$pc" -ex "info sharedlibrary" ./obj/$t.exe 2>&1 | grep -v "absolute path\|fix your\|guessing" | tail -40; done
+          objdump -p ./obj/t2.exe | grep "DLL Name"
+          true
 
       - name: Manifest
         run: |
