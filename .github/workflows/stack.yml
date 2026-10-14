@@ -182,6 +182,16 @@ jobs:
           cd "$src/libs-gui/Tools"
           ls obj GSspell.service GSspell.service/Resources 2>&1 | head -30
           cat GSspell.service/Resources/Info-gnustep.plist 2>&1 | head -20
+          echo "PATH=$PATH" | tr ':' '\n'
+          for f in ./obj/make_services.exe "$gui/gnustep-gui-0_32.dll" $(find /c/GNUstep -iname 'gnustep-base*.dll'); do
+            echo "== $f"
+            for d in $(objdump -p "$f" | sed -n 's/.*DLL Name: //p' | tr -d '\r'); do
+              case "$d" in api-ms-*|KERNEL32*|kernel32*|USER32*|GDI32*|ADVAPI32*|WS2_32*|msvcrt*|ole32*|SHELL32*|COMCTL32*|comdlg32*|MPR*|NETAPI32*|WINMM*|IPHLPAPI*|SHLWAPI*|CRYPT32*|bcrypt*|ntdll*|Secur32*|WINSPOOL*|IMM32*|OLEAUT32*|USERENV*|DNSAPI*|dbghelp*|msimg32*|USP10*|VERSION*|RPCRT4*) continue ;; esac
+              w=$(PATH="$PATH" which "$d" 2>/dev/null) || w="NOT FOUND"
+              echo "  $d -> $w"
+            done
+          done
+          ldd ./obj/make_services.exe
           ./obj/make_services --test GSspell.service/Resources/Info-gnustep.plist; echo "make_services exit $?"
           gdb -batch -ex run -ex bt -ex "info registers rip" -ex "x/6i \$pc" --args ./obj/make_services.exe --test GSspell.service/Resources/Info-gnustep.plist 2>&1 | grep -v "absolute path\|fix your\|guessing\|New Thread" | tail -40
           ./GSspell.service/GSspell.exe -RegisterOnly YES; echo "GSspell exit $?"
