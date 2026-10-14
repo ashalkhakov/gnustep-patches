@@ -1,0 +1,66 @@
+From 0a92b01ad3cf56055e5cdeef00d948a32ff348e2 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Wed, 14 Oct 2026 19:15:00 +0500
+Subject: [PATCH] Windows: a read source on a listening socket fires for a
+ connection
+
+A read source on a socket selects FD_READ (and FD_CLOSE) with
+WSAEventSelect(). A listening socket never reports FD_READ: Windows
+reports a pending connection as FD_ACCEPT, where on POSIX a listening
+socket becomes readable. So a DISPATCH_SOURCE_TYPE_READ source on a
+listening socket, the usual way to accept connections with dispatch,
+never fires on Windows, and a server built that way (GCDWebServer)
+listens but never accepts.
+
+Select FD_ACCEPT with FD_READ for a read source, clear it with it, and
+post a pending connection as readable, with an estimate of one.
+---
+ src/event/event_windows.c | 11 +++++++----
+ 1 file changed, 7 insertions(+), 4 deletions(-)
+
+diff --git a/src/event/event_windows.c b/src/event/event_windows.c
+index 7990b11..f7856bf 100644
+--- a/src/event/event_windows.c
++++ b/src/event/event_windows.c
+@@ -208,7 +208,7 @@ _dispatch_muxnote_disarm_events(dispatch_muxnote_t dmn,
+ 	case DISPATCH_MUXNOTE_HANDLE_TYPE_SOCKET:
+ 		lNetworkEvents = dmn->dmn_network_events;
+ 		if (events & DISPATCH_MUXNOTE_EVENT_READ) {
+-			lNetworkEvents &= ~FD_READ;
++			lNetworkEvents &= ~(FD_READ | FD_ACCEPT);
+ 		}
+ 		if (events & DISPATCH_MUXNOTE_EVENT_WRITE) {
+ 			lNetworkEvents &= ~FD_WRITE;
+@@ -217,7 +217,7 @@ _dispatch_muxnote_disarm_events(dispatch_muxnote_t dmn,
+ 			break;
+ 		}
+ 		int iResult;
+-		if (lNetworkEvents & (FD_READ | FD_WRITE)) {
++		if (lNetworkEvents & (FD_READ | FD_ACCEPT | FD_WRITE)) {
+ 			iResult = WSAEventSelect((SOCKET)dmn->dmn_ident,
+ 					(WSAEVENT)dmn->dmn_event, lNetworkEvents);
+ 		} else {
+@@ -377,7 +377,8 @@ _dispatch_socket_callback(PTP_CALLBACK_INSTANCE inst, void *context,
+ 			ioctlsocket(sock, FIONREAD, &dwBytesAvailable);
+ 		}
+ 		if ((lNetworkEvents & FD_CLOSE) ||
+-			((lNetworkEvents & FD_READ) && (dwBytesAvailable > 0))) {
++			((lNetworkEvents & FD_READ) && (dwBytesAvailable > 0)) ||
++			(lNetworkEvents & FD_ACCEPT)) {
+ 			_dispatch_muxnote_retain(dmn);
+ 			if (!PostQueuedCompletionStatus(hPort, dwBytesAvailable,
+ 					(ULONG_PTR)DISPATCH_PORT_SOCKET_READ, (LPOVERLAPPED)dmn)) {
+@@ -478,7 +479,9 @@ _dispatch_io_trigger(dispatch_muxnote_t dmn)
+ 		}
+ 		lNetworkEvents = FD_CLOSE;
+ 		if (dmn->dmn_events & DISPATCH_MUXNOTE_EVENT_READ) {
+-			lNetworkEvents |= FD_READ;
++			// A listening socket reports a pending connection as FD_ACCEPT,
++			// where a POSIX one becomes readable.
++			lNetworkEvents |= FD_READ | FD_ACCEPT;
+ 		}
+ 		if (dmn->dmn_events & DISPATCH_MUXNOTE_EVENT_WRITE) {
+ 			lNetworkEvents |= FD_WRITE;
+-- 
+2.50.1 (Apple Git-155)
+

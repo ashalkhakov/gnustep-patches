@@ -282,6 +282,7 @@ gnustep-coredata (now FreeCoreData), listed for two of them, holds no copy.
 | `gsunicode-write-name` | libs-corebase | none (a compile error on Windows; the Windows stack build is the check) | not sent yet | (none: the Windows stack uses it from here) |
 | `mingw-mode-t` | libdispatch | none (a header that does not compile on MinGW; the Windows stack build is the check) | not sent yet | (none: the Windows stack uses it from here) |
 | `mingw-blocksruntime-name` | libdispatch | none (libdispatch.dll does not load on MinGW; the Windows stack check is the test) | not sent yet | (none: the Windows stack uses it from here) |
+| `windows-listening-socket-read` | libdispatch | none (GCDWebServer's Windows smoke test is the check: it listens but never accepts without it) | not sent yet | (none: the Windows stack uses it from here) |
 
 Re-run that check before sending anything: `Scripts/apply-patches.sh` on a
 fresh checkout is the quickest form of it.
