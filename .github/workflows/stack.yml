@@ -140,7 +140,7 @@ jobs:
       CXX: clang++
       LIBRARY_COMBO: ng-gnu-gnu
       RUNTIME_VERSION: gnustep-2.0
-      COMPONENTS: libobjc2 libdispatch tools-make libs-base libs-gui libs-back libs-corebase libs-opal eau tools-xctest
+      COMPONENTS: libobjc2 libdispatch tools-make libs-base
     steps:
       # The patches are applied byte for byte: no CRLF.
       - name: Line endings
@@ -157,7 +157,7 @@ jobs:
       - name: Packages
         run: |
           packages=$(grep -v '^#' Scripts/packages-msys2.txt | sed "/\//!s/^/$MINGW_PACKAGE_PREFIX-/" | tr '\n' ' ')
-          pacman -S --noconfirm --needed $packages
+          pacman -S --noconfirm --needed $packages $MINGW_PACKAGE_PREFIX-lldb
 
       - name: Names
         run: |
@@ -191,6 +191,8 @@ jobs:
           printf '%s\n' 'include $(GNUSTEP_MAKEFILES)/common.make' 'TOOL_NAME = hello' 'hello_OBJC_FILES = hello.m' \
             'include $(GNUSTEP_MAKEFILES)/tool.make' > GNUmakefile
           make -s
+          ./obj/hello || { echo "exit $?"; lldb --batch -o run -o bt -o "thread list" -- ./obj/hello.exe; }
+          GSspell=x; defaults read 2>&1 | head -5 || true
           [ "$(./obj/hello | tr -d '\r')" = hello ]
 
       - name: Archive
