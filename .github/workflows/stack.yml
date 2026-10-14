@@ -157,7 +157,13 @@ jobs:
       - name: Packages
         run: |
           packages=$(grep -v '^#' Scripts/packages-msys2.txt | sed "/\//!s/^/$MINGW_PACKAGE_PREFIX-/" | tr '\n' ' ')
-          pacman -S --noconfirm --needed $packages $MINGW_PACKAGE_PREFIX-lldb $MINGW_PACKAGE_PREFIX-gdb
+          # A mirror that stalls fails the download; pacman tries another
+          # next time.
+          for i in 1 2 3; do
+            pacman -S --noconfirm --needed $packages $MINGW_PACKAGE_PREFIX-lldb $MINGW_PACKAGE_PREFIX-gdb && break
+            [ "$i" != 3 ] || exit 1
+            sleep 10
+          done
 
       - name: Names
         run: |
