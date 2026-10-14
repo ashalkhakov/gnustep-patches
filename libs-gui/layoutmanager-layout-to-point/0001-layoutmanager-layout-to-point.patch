@@ -1,0 +1,280 @@
+From 345bd6a1c04ec8c041f26481e61651da4cd04efd Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Wed, 14 Oct 2026 22:24:22 +0500
+Subject: [PATCH 2/2] Lay text out down to the point asked about, not to its
+ end
+
+-[NSLayoutManager _doLayoutToContainer:point:], behind
+-glyphRangeForBoundingRect:inTextContainer:,
+-glyphIndexForPoint:inTextContainer:fractionOfDistanceThroughGlyph:
+and vertical cursor movement, laid out the whole of every text
+container, whatever the point; and -_doLayoutToGlyph: asked the
+typesetter for all of a container's lines in one pass, so stopping at
+a glyph stopped only at the container's end. A text view showing the
+start of a long text laid all of it out before drawing anything.
+
+-_doLayoutToGlyph: now asks the typesetter for 64 line fragments at a
+time and stops once past the glyph; -_doLayoutToContainer:point:, now
+in GSLayoutManager beside it, lays out the containers before cindex
+and, in cindex, line fragments until one ends below the point. The
+typesetter already resumes mid-paragraph. It used to look for the
+extent of a paragraph style from where it started to the end of the
+text; with layout in passes that scan would run every pass, so it now
+stops at the end of the paragraph, which is as far as a paragraph style
+holds.
+
+Tests/gui/NSLayoutManager/layoutToPoint.m asks for the glyphs in the
+top of a 10000-line text and checks the rest is left unlaid and that
+the same glyphs are found once all of it is laid out; and lays texts of
+2000 and 16000 lines, with an attribute run every five characters, out
+to their last glyph, a part at a time, asking that the longer take less
+than 24 times as long (it takes about 10; scanning to the end of the
+text every pass it took 39).
+---
+ .../GNUstepGUI/GSLayoutManager_internal.h     |   3 +
+ Source/GSHorizontalTypesetter.m               |   7 +-
+ Source/GSLayoutManager.m                      |  26 +++-
+ Source/NSLayoutManager.m                      |  11 --
+ Tests/gui/NSLayoutManager/layoutToPoint.m     | 125 ++++++++++++++++++
+ 5 files changed, 159 insertions(+), 13 deletions(-)
+ create mode 100644 Tests/gui/NSLayoutManager/layoutToPoint.m
+
+diff --git a/Headers/Additions/GNUstepGUI/GSLayoutManager_internal.h b/Headers/Additions/GNUstepGUI/GSLayoutManager_internal.h
+index 4ab01a700..4ccc8966d 100644
+--- a/Headers/Additions/GNUstepGUI/GSLayoutManager_internal.h
++++ b/Headers/Additions/GNUstepGUI/GSLayoutManager_internal.h
+@@ -251,6 +251,9 @@ typedef struct GSLayoutManager_textcontainer_s
+ -(void) _doLayout; /* TODO: this is just a hack until proper incremental layout is done */
+ -(void) _doLayoutToGlyph: (unsigned int)glyphIndex;
+ -(void) _doLayoutToContainer: (int)cindex;
++/* The containers before cindex, and in cindex the line fragments down to
++   the first that ends below p. */
++-(void) _doLayoutToContainer: (int)cindex  point: (NSPoint)p;
+ 
+ -(void) _didInvalidateLayout;
+ @end
+diff --git a/Source/GSHorizontalTypesetter.m b/Source/GSHorizontalTypesetter.m
+index 380d6963e..ba10db6e7 100644
+--- a/Source/GSHorizontalTypesetter.m
++++ b/Source/GSHorizontalTypesetter.m
+@@ -203,7 +203,12 @@ -(void) _moveCacheToGlyph: (unsigned int)glyphIndex
+       charIndex = [currentLayoutManager characterIndexForGlyphAtIndex: glyphIndex];
+       [self _cacheAttributesAtCharacterIndex: charIndex];
+ 
+-      paragraphRange = NSMakeRange(charIndex, [currentTextStorage length] - charIndex);
++      /* A paragraph style holds for a paragraph: look no further than this
++         one's end, or every pass of layout scans to the end of the text. */
++      paragraphRange = [[currentTextStorage string]
++        paragraphRangeForRange: NSMakeRange(charIndex, 0)];
++      paragraphRange = NSMakeRange(charIndex,
++        NSMaxRange(paragraphRange) - charIndex);
+       currentParagraphStyle = [currentTextStorage attribute: NSParagraphStyleAttributeName
+                                                     atIndex: charIndex
+                                       longestEffectiveRange: &paragraphRange
+diff --git a/Source/GSLayoutManager.m b/Source/GSLayoutManager.m
+index 7fa4da80b..3b4c937d5 100644
+--- a/Source/GSLayoutManager.m
++++ b/Source/GSLayoutManager.m
+@@ -1848,6 +1848,10 @@ -(void) _doLayout
+   [self _doLayoutToContainer: num_textcontainers - 1];
+ }
+ 
++/* The line fragments the typesetter lays out at a time when layout is
++   wanted only so far: to a glyph, or down to a point. */
++#define LAYOUT_LINES_PER_PASS 64
++
+ -(void) _doLayoutToGlyph: (unsigned int)glyphIndex
+ {
+   int i, j;
+@@ -1876,7 +1880,7 @@ -(void) _doLayoutToGlyph: (unsigned int)glyphIndex
+                           startingAtGlyphIndex: next
+                           previousLineFragmentRect: prev
+                           nextGlyphIndex: &next
+-                          numberOfLineFragments: 0];
++                          numberOfLineFragments: LAYOUT_LINES_PER_PASS];
+           if (j)
+             break;
+ 
+@@ -1934,6 +1938,26 @@ -(void) _doLayoutToGlyph: (unsigned int)glyphIndex
+     }
+ }
+ 
++-(void) _doLayoutToContainer: (int)cindex  point: (NSPoint)p
++{
++  unsigned int before;
++  textcontainer_t *tc;
++
++  while (1)
++    {
++      tc = textcontainers + cindex;
++      if (tc->complete)
++        return;
++      if (tc->num_linefrags
++          && NSMaxY(tc->linefrags[tc->num_linefrags - 1].rect) > p.y)
++        return;
++      before = layout_glyph;
++      [self _doLayoutToGlyph: layout_glyph];
++      if (layout_glyph == before && !textcontainers[cindex].complete)
++        return;
++    }
++}
++
+ -(void) _doLayoutToContainer: (int)cindex
+ {
+   int i, j;
+diff --git a/Source/NSLayoutManager.m b/Source/NSLayoutManager.m
+index 786a91e97..faea888cc 100644
+--- a/Source/NSLayoutManager.m
++++ b/Source/NSLayoutManager.m
+@@ -135,17 +135,6 @@ -(void) _drawSpellingState: (NSInteger)spellingState
+ 
+ @end
+ 
+-@interface NSLayoutManager (LayoutHelpers)
+--(void) _doLayoutToContainer: (int)cindex  point: (NSPoint)p;
+-@end
+-
+-@implementation NSLayoutManager (LayoutHelpers)
+--(void) _doLayoutToContainer: (int)cindex  point: (NSPoint)p
+-{
+-  [self _doLayout];
+-}
+-@end
+-
+ /**
+  * Temporary attributes are implemented using an NSMutableAttributedString
+  * stored in the _temporaryAttributes ivar. We only care about this attributed
+diff --git a/Tests/gui/NSLayoutManager/layoutToPoint.m b/Tests/gui/NSLayoutManager/layoutToPoint.m
+new file mode 100644
+index 000000000..536b312ef
+--- /dev/null
++++ b/Tests/gui/NSLayoutManager/layoutToPoint.m
+@@ -0,0 +1,125 @@
++/* Asking for the glyphs in a rectangle lays the text out down to the
++   rectangle, not to its end: the first lines of a long text are found with
++   the rest of it still unlaid, and are the lines found once all of it has
++   been laid out.  The layout manager used to lay out every text container
++   whole for any point it was asked about, so a text view showing the start
++   of a long text laid all of it out before it drew.  Laid out a part at a
++   time to its end, a text of many attribute runs (every other word in
++   another colour) still costs time in proportion to its length. */
++#include "Testing.h"
++
++#include <Foundation/NSAutoreleasePool.h>
++#include <Foundation/NSDate.h>
++#include <Foundation/NSString.h>
++
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSAttributedString.h>
++#include <AppKit/NSColor.h>
++#include <AppKit/NSLayoutManager.h>
++#include <AppKit/NSTextContainer.h>
++#include <AppKit/NSTextStorage.h>
++
++/* Lays out a text of lines lines to its last glyph, as asking for that
++   glyph's line fragment does: a part at a time. */
++static NSTimeInterval
++layOutToEnd(NSUInteger lines)
++{
++  NSAutoreleasePool *pool = [NSAutoreleasePool new];
++  NSMutableString *text = [NSMutableString string];
++  NSTextStorage *storage;
++  NSLayoutManager *lm;
++  NSTextContainer *tc;
++  NSDate *start;
++  NSTimeInterval elapsed;
++  NSUInteger i;
++
++  for (i = 0; i < lines; i++)
++    {
++      [text appendFormat: @"line %lu of a long text\n", (unsigned long)i];
++    }
++  storage = AUTORELEASE([[NSTextStorage alloc] initWithString: text]);
++  [storage beginEditing];
++  for (i = 0; i + 8 <= [text length]; i += 10)
++    {
++      [storage addAttribute: NSForegroundColorAttributeName
++                      value: [NSColor redColor]
++                      range: NSMakeRange(i, 5)];
++    }
++  [storage endEditing];
++  lm = AUTORELEASE([[NSLayoutManager alloc] init]);
++  tc = AUTORELEASE([[NSTextContainer alloc]
++    initWithContainerSize: NSMakeSize(400, 1e7)]);
++  [lm addTextContainer: tc];
++  [storage addLayoutManager: lm];
++
++  start = [NSDate date];
++  [lm lineFragmentRectForGlyphAtIndex: [lm numberOfGlyphs] - 1
++                       effectiveRange: NULL];
++  elapsed = -[start timeIntervalSinceNow];
++  [pool release];
++  return elapsed;
++}
++
++int
++main(int argc, const char **argv)
++{
++  NSTimeInterval small;
++  NSTimeInterval large;
++  NSMutableString *text;
++  NSTextStorage *storage;
++  NSLayoutManager *lm;
++  NSTextContainer *tc;
++  NSRange top;
++  NSRange again;
++  NSUInteger glyphs;
++  NSUInteger i;
++
++  START_SET("NSLayoutManager layout to a point")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  text = [NSMutableString string];
++  for (i = 0; i < 10000; i++)
++    {
++      [text appendFormat: @"line %lu of a long text\n", (unsigned long)i];
++    }
++  storage = AUTORELEASE([[NSTextStorage alloc] initWithString: text]);
++  lm = AUTORELEASE([[NSLayoutManager alloc] init]);
++  tc = AUTORELEASE([[NSTextContainer alloc]
++    initWithContainerSize: NSMakeSize(400, 1e7)]);
++  [lm addTextContainer: tc];
++  [storage addLayoutManager: lm];
++  glyphs = [lm numberOfGlyphs];
++
++  top = [lm glyphRangeForBoundingRect: NSMakeRect(0, 0, 400, 100)
++                      inTextContainer: tc];
++  PASS(top.location == 0 && top.length > 0,
++       "the first lines are found");
++  PASS(NSMaxRange(top) < glyphs / 10,
++       "and they are a few of the text's lines");
++  PASS([lm firstUnlaidGlyphIndex] < glyphs / 10,
++       "the rest of the text is not laid out");
++
++  [lm glyphRangeForTextContainer: tc];
++  PASS([lm firstUnlaidGlyphIndex] == glyphs,
++       "laid out to its end, the text is laid out whole");
++  again = [lm glyphRangeForBoundingRect: NSMakeRect(0, 0, 400, 100)
++                        inTextContainer: tc];
++  PASS(NSEqualRanges(top, again),
++       "the first lines are the same once all of it is laid out");
++
++  layOutToEnd(250);
++  small = layOutToEnd(2000);
++  large = layOutToEnd(16000);
++  PASS(large < small * 24,
++       "laid out a part at a time, a text 8x as long takes less than 24x"
++       " as long (%.3fs, then %.3fs)", small, large);
++
++  END_SET("NSLayoutManager layout to a point")
++  return 0;
++}
+-- 
+2.50.1 (Apple Git-155)
+
