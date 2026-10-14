@@ -177,13 +177,14 @@ jobs:
           export PATH="$PREFIX/bin:$PATH"
           mkdir -p /tmp/t && cd /tmp/t
           n=0
-          for body in 'printf("%s\n", [[NSString stringWithFormat: @"plain"] UTF8String]);' \
-                      'printf("%s\n", [[NSString stringWithFormat: @"%d", 42] UTF8String]);' \
-                      'printf("%s\n", [[NSString stringWithFormat: @"%s", "cstr"] UTF8String]);' \
-                      'printf("%s\n", [[NSString stringWithFormat: @"%@", @"obj"] UTF8String]);' \
-                      'printf("%s\n", [[NSString stringWithFormat: @"%lu %@", 7UL, @"two"] UTF8String]);' \
-                      'NSLog(@"plain");' \
-                      'NSLog(@"x = %@", @"y");'; do
+          for body in 'printf("%s\n", [[NSString stringWithFormat: @"%u", 7U] UTF8String]);' \
+                      'printf("%s\n", [[NSString stringWithFormat: @"%lu", 7UL] UTF8String]);' \
+                      'printf("%s\n", [[NSString stringWithFormat: @"%ld", 7L] UTF8String]);' \
+                      'printf("%s\n", [[NSString stringWithFormat: @"%lld", 7LL] UTF8String]);' \
+                      'printf("%s\n", [[NSString stringWithFormat: @"%d %d", 1, 2] UTF8String]);' \
+                      'printf("%s\n", [[NSString stringWithFormat: @"%@ %@", @"a", @"b"] UTF8String]);' \
+                      'printf("%s\n", [[NSString stringWithFormat: @"%d %@", 1, @"b"] UTF8String]);' \
+                      'printf("%s\n", [[NSString stringWithFormat: @"%x", 255] UTF8String]);'; do
             n=$((n+1))
             printf '%s\n' '#import <Foundation/Foundation.h>' "int main(void) { @autoreleasepool { [NSObject class]; $body } return 0; }" > t$n.m
             names="$names t$n"; files="$files t${n}_OBJC_FILES=t$n.m"
@@ -191,7 +192,7 @@ jobs:
           { echo 'include $(GNUSTEP_MAKEFILES)/common.make'; echo "TOOL_NAME =$names"
             for f in $files; do echo "${f%%=*} = ${f#*=}"; done
             echo 'include $(GNUSTEP_MAKEFILES)/tool.make'; } > GNUmakefile
-          make -s 2>&1 | grep -a "error" | head
+          make -s 2>&1 | grep -a -i "error" | head
           for t in $names; do
             echo "== $t: $(sed -n 2p $t.m)"
             ./obj/$t.exe > out.txt 2>&1; echo "exit $?"; grep -a -v "absolute path\|fix your\|guessing" out.txt | tail -3
@@ -199,7 +200,7 @@ jobs:
           for t in $names; do
             ./obj/$t.exe > /dev/null 2>&1 && continue
             echo "== gdb $t"
-            gdb -batch -ex run -ex bt -ex "info registers rip rsp" --args ./obj/$t.exe 2>&1 | grep -a -v "absolute path\|fix your\|guessing\|New Thread\|exited with code" | tail -30
+            gdb -batch -ex run -ex bt -ex "info registers rip rsp rbp" -ex "x/16gx \$rsp-64" -ex "frame 4" -ex "x/24i \$pc-60" -ex "info frame" --args ./obj/$t.exe 2>&1 | grep -a -v "absolute path\|fix your\|guessing\|New Thread\|exited with code" | tail -70
             break
           done
           true
