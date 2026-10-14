@@ -104,14 +104,16 @@ RPATH="-Wl,-rpath,$PREFIX/lib"
 # Windows finds DLLs on PATH, and CMake's DLLs land in $PREFIX/bin; there is
 # no rpath. libobjc2 is part C++ and MSYS2's clang links libc++ only when
 # asked; LDFLAGS set here replaces the -L configure would otherwise add.
-# The paths gnustep-make and CMake are given are native (C:/GNUstep), as
-# MSYS2's own packages do: they end up in GNUstep.conf and in gnustep-base,
-# where Windows reads them. Newer clang makes these warnings errors; the
-# code is the same as on Linux, where they are warnings.
+# gnustep-make's configure is given --prefix as the MSYS path it is, as
+# libs-base's own CI does: base's configure finds its aux files on
+# GNUSTEP_MAKEFILES, and the colon in C:/ splits that in two. CMake is given
+# a native one. Newer clang makes these warnings errors; the code is the
+# same as on Linux, where they are warnings.
 native() { echo "$1"; }
 if [ "$WINDOWS" = 1 ]; then
     export PATH="$PREFIX/bin:$PATH"
     export LDFLAGS="-L$(cygpath -m "$PREFIX/lib")${LDFLAGS:+ $LDFLAGS} -lc++"
+    export MSYS2_ARG_CONV_EXCL="--prefix="
     export OBJCFLAGS="${OBJCFLAGS:+$OBJCFLAGS }-Wno-error=incompatible-pointer-types -Wno-error=int-conversion"
     RPATH=
     native() { cygpath -m "$1"; }
@@ -227,7 +229,7 @@ build_libdispatch() {
 build_tools_make() {
     fetch tools-make https://github.com/gnustep/tools-make.git
     configure_in "$SOURCES/tools-make" \
-        --prefix="$(native "$PREFIX")" \
+        --prefix="$PREFIX" \
         --with-layout=gnustep \
         --with-library-combo="$LIBRARY_COMBO" \
         --with-runtime-abi="$RUNTIME_VERSION" \
