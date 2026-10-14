@@ -1,0 +1,31 @@
+From d291d88c5d2591ad3795ffc8a56577d2a4fb9b6b Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Wed, 14 Oct 2026 15:02:11 +0500
+Subject: [PATCH] Windows: name BlocksRuntime's DLL after the file it is built
+ as
+
+BlocksRuntime.def names the library BlocksRuntime, which is the DLL's
+file name only where CMake gives shared libraries no prefix (MSVC).
+With MinGW, CMake builds libBlocksRuntime.dll, but the import library
+still records BlocksRuntime.dll, so libdispatch.dll asks the loader for
+a DLL that does not exist and fails to load (ERROR_MOD_NOT_FOUND), and
+so does anything that links libdispatch.
+
+Without a LIBRARY statement the linker records the name of the DLL it
+writes, which is right for both toolchains.
+---
+ src/BlocksRuntime/BlocksRuntime.def | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/src/BlocksRuntime/BlocksRuntime.def b/src/BlocksRuntime/BlocksRuntime.def
+index a3b1aab..5ae96ed 100644
+--- a/src/BlocksRuntime/BlocksRuntime.def
++++ b/src/BlocksRuntime/BlocksRuntime.def
+@@ -1,4 +1,3 @@
+-LIBRARY BlocksRuntime
+ EXPORTS
+   _NSConcreteGlobalBlock CONSTANT
+   _NSConcreteStackBlock CONSTANT
+-- 
+2.50.1 (Apple Git-155)
+
