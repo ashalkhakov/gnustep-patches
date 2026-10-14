@@ -276,6 +276,8 @@ gnustep-coredata (now FreeCoreData), listed for two of them, holds no copy.
 | `tableview-bound-value-transform` | libs-gui | test | [#981](https://github.com/gnustep/libs-gui/pull/981) | (none: WorkflowKit uses it from here) |
 | `tableview-prototype-identifier` | libs-gui | test | [#1005](https://github.com/gnustep/libs-gui/pull/1005) | (none: UDCalc will use it from here) |
 | `scrollview-autohide-reentrancy` | libs-gui | test | not sent yet | (none: UDCalc will use it from here; Gershwin needs its own copy, see NOTES.md) |
+| `layoutmanager-sanity-checks` | libs-gui | test | not sent yet | (none: UDCodeKit uses it from here) |
+| `layoutmanager-layout-to-point` | libs-gui | test | not sent yet | (none: UDCodeKit uses it from here) |
 | `cgrectunion-size` | libs-opal | none | [#71](https://github.com/gnustep/libs-opal/pull/71) | GSXFormsKit |
 | `freetype-advance-without-size` | libs-opal | test | [#72](https://github.com/gnustep/libs-opal/pull/72) | (none: XFormsKit uses it from here) |
 | `cfstring-overrelease` | libs-corebase | none | [#166](https://github.com/gnustep/libs-corebase/pull/166) | gnustep-build |

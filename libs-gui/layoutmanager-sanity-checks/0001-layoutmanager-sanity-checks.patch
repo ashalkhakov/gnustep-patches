@@ -1,0 +1,137 @@
+From b47c69e3d79958e98c97a82afe71236cd92483d7 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Wed, 14 Oct 2026 22:24:22 +0500
+Subject: [PATCH 1/2] Check the glyph run list in debug builds only
+
+-[GSLayoutManager _sanityChecks] walks the whole glyph run list, and
+-_generateRunsToCharacter: calls it after every pass, as do two other
+paths. A text generates its runs a pass at a time, and one run per
+attribute run at least, so for a text with many attribute runs (a
+highlighted program) the check made layout quadratic: 8000 lines with
+an attribute run every five characters took 20 seconds to lay out,
+and 16000 lines 82.
+
+Compile the check's body only when DEBUG is defined, as in a debug
+build. The 8000 lines take 0.15 seconds.
+
+Tests/gui/NSLayoutManager/layoutCost.m lays out such texts of 1000 and
+8000 lines and asks that the longer take less than 24 times as long:
+linear is 8, and without the change it took 84.
+---
+ Source/GSLayoutManager.m               |  2 +
+ Tests/gui/NSLayoutManager/layoutCost.m | 83 ++++++++++++++++++++++++++
+ 2 files changed, 85 insertions(+)
+ create mode 100644 Tests/gui/NSLayoutManager/layoutCost.m
+
+diff --git a/Source/GSLayoutManager.m b/Source/GSLayoutManager.m
+index f6d652c76..7fa4da80b 100644
+--- a/Source/GSLayoutManager.m
++++ b/Source/GSLayoutManager.m
+@@ -318,6 +318,7 @@ - (void) _glyphDumpRuns
+ 
+ - (void) _sanityChecks
+ {
++#ifdef DEBUG
+   glyph_run_t *g;
+ 
+   g = (glyph_run_t *)&glyphs[SKIP_LIST_DEPTH - 1];
+@@ -327,6 +328,7 @@ - (void) _sanityChecks
+                @"glyph structure corrupted: g->next->prev!=g");
+       g = (glyph_run_t *)g->head.next;
+     }
++#endif
+ }
+ 
+ 
+diff --git a/Tests/gui/NSLayoutManager/layoutCost.m b/Tests/gui/NSLayoutManager/layoutCost.m
+new file mode 100644
+index 000000000..7085ce764
+--- /dev/null
++++ b/Tests/gui/NSLayoutManager/layoutCost.m
+@@ -0,0 +1,83 @@
++/* Laying text out costs time in proportion to the text: a text eight times
++   as long takes about eight times as long to lay out, not sixty-four.  The
++   layout manager used to check its whole glyph run list after every run it
++   generated, which made laying out a text of many attribute runs (a
++   highlighted program, here every other word in another colour) quadratic.
++   The bound is far from both, so a loaded machine does not fail it. */
++#include "Testing.h"
++
++#include <Foundation/NSAutoreleasePool.h>
++#include <Foundation/NSDate.h>
++#include <Foundation/NSString.h>
++
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSAttributedString.h>
++#include <AppKit/NSColor.h>
++#include <AppKit/NSLayoutManager.h>
++#include <AppKit/NSTextContainer.h>
++#include <AppKit/NSTextStorage.h>
++
++static NSTimeInterval
++layOut(NSUInteger lines)
++{
++  NSAutoreleasePool *pool = [NSAutoreleasePool new];
++  NSMutableString *text = [NSMutableString string];
++  NSTextStorage *storage;
++  NSLayoutManager *lm;
++  NSTextContainer *tc;
++  NSDate *start;
++  NSTimeInterval elapsed;
++  NSUInteger i;
++
++  for (i = 0; i < lines; i++)
++    {
++      [text appendFormat: @"line %lu of a text laid out from the start\n",
++        (unsigned long)i];
++    }
++  storage = AUTORELEASE([[NSTextStorage alloc] initWithString: text]);
++  [storage beginEditing];
++  for (i = 0; i + 8 <= [text length]; i += 10)
++    {
++      [storage addAttribute: NSForegroundColorAttributeName
++                      value: [NSColor redColor]
++                      range: NSMakeRange(i, 5)];
++    }
++  [storage endEditing];
++  lm = AUTORELEASE([[NSLayoutManager alloc] init]);
++  tc = AUTORELEASE([[NSTextContainer alloc]
++    initWithContainerSize: NSMakeSize(400, 1e7)]);
++  [lm addTextContainer: tc];
++  [storage addLayoutManager: lm];
++
++  start = [NSDate date];
++  [lm glyphRangeForTextContainer: tc];
++  elapsed = -[start timeIntervalSinceNow];
++  [pool release];
++  return elapsed;
++}
++
++int
++main(int argc, const char **argv)
++{
++  NSTimeInterval small;
++  NSTimeInterval large;
++
++  START_SET("NSLayoutManager layout cost")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  layOut(125);
++  small = layOut(1000);
++  large = layOut(8000);
++  PASS(large < small * 24,
++       "a text 8x as long takes less than 24x as long to lay out"
++       " (%.3fs, then %.3fs)", small, large);
++
++  END_SET("NSLayoutManager layout cost")
++  return 0;
++}
+-- 
+2.50.1 (Apple Git-155)
+
