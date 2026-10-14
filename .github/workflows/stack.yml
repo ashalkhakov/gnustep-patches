@@ -140,7 +140,7 @@ jobs:
       CXX: clang++
       LIBRARY_COMBO: ng-gnu-gnu
       RUNTIME_VERSION: gnustep-2.0
-      COMPONENTS: libobjc2 libdispatch tools-make libs-base
+      COMPONENTS: libobjc2 libdispatch tools-make libs-base libs-gui libs-back libs-corebase libs-opal eau tools-xctest
     steps:
       # The patches are applied byte for byte: no CRLF.
       - name: Line endings
@@ -170,33 +170,15 @@ jobs:
         run: SOURCES="$(cygpath -u "$RUNNER_TEMP")/gnustep-sources" Scripts/build-gnustep.sh
 
       - name: Debug
-        if: always()
+        if: failure()
         run: |
-          src=$(cygpath -u "$RUNNER_TEMP")/gnustep-sources
-          grep -n -B5 -A40 "checking for dispatch_queue_create" $src/libs-base/config.log | tail -60 || true
-          ls -la $PREFIX/lib $PREFIX/bin || true
+          set +e +o pipefail
           . "$PREFIX/System/Library/Makefiles/GNUstep.sh"
           export PATH="$PREFIX/bin:$PATH"
-          mkdir -p /tmp/t && cd /tmp/t
-          echo '#include <stdio.h>
-          #include <objc/runtime.h>
-          int main(void) { printf("c: %p\n", (void *)objc_getClass("NSObject")); return 0; }' > t1.m
-          echo '#import <Foundation/Foundation.h>
-          int main(void) { id o = [NSObject new]; printf("new: %p\n", (void *)o); return 0; }' > t2.m
-          echo '#import <Foundation/Foundation.h>
-          int main(void) { printf("len: %d\n", (int)[@"abc" length]); return 0; }' > t3.m
-          echo '#import <Foundation/Foundation.h>
-          int main(void) { @autoreleasepool { printf("pool\n"); } return 0; }' > t4.m
-          echo '#import <Foundation/Foundation.h>
-          int main(void) { @autoreleasepool { NSLog(@"log %@", [NSProcessInfo processInfo]); } return 0; }' > t5.m
-          printf '%s\n' 'include $(GNUSTEP_MAKEFILES)/common.make' 'TOOL_NAME = t1 t2 t3 t4 t5' \
-            't1_OBJC_FILES = t1.m' 't2_OBJC_FILES = t2.m' 't3_OBJC_FILES = t3.m' 't4_OBJC_FILES = t4.m' 't5_OBJC_FILES = t5.m' \
-            'include $(GNUSTEP_MAKEFILES)/tool.make' > GNUmakefile
-          make messages=yes 2>&1 | grep -v "absolute path\|fix your\|guessing" | tail -20
-          set +e +o pipefail
-          for t in t1 t2 t3 t4 t5; do echo "== $t"; ./obj/$t.exe > out.txt 2>&1; echo "exit $?"; grep -v "absolute path\|fix your\|guessing" out.txt | tail -5; done
-          for t in t2 t3; do gdb -batch -ex run -ex bt -ex "info registers rip" -ex "x/6i \$pc" -ex "info sharedlibrary" ./obj/$t.exe 2>&1 | grep -v "absolute path\|fix your\|guessing" | tail -40; done
-          objdump -p ./obj/t2.exe | grep "DLL Name"
+          src=$(cygpath -u "$RUNNER_TEMP")/gnustep-sources
+          spell=$(find "$src/libs-gui/Tools" -name 'GSspell.exe' | head -1)
+          echo "GSspell: $spell"
+          [ -n "$spell" ] && gdb -batch -ex run -ex bt -ex "info registers rip" -ex "x/6i \$pc" --args "$spell" -RegisterOnly YES 2>&1 | grep -v "absolute path\|fix your\|guessing" | tail -40
           true
 
       - name: Manifest
