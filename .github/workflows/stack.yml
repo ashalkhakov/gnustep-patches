@@ -176,9 +176,16 @@ jobs:
           . "$PREFIX/System/Library/Makefiles/GNUstep.sh"
           export PATH="$PREFIX/bin:$PATH"
           src=$(cygpath -u "$RUNNER_TEMP")/gnustep-sources
-          spell=$(find "$src/libs-gui/Tools" -name 'GSspell.exe' | head -1)
-          echo "GSspell: $spell"
-          [ -n "$spell" ] && gdb -batch -ex run -ex bt -ex "info registers rip" -ex "x/6i \$pc" --args "$spell" -RegisterOnly YES 2>&1 | grep -v "absolute path\|fix your\|guessing" | tail -40
+          gui=$(dirname "$(find "$src/libs-gui/Source" -iname 'gnustep-gui*.dll' | head -1)")
+          echo "gui DLL in: $gui"; ls "$gui" | head
+          export PATH="$gui:$PATH"
+          cd "$src/libs-gui/Tools"
+          ls obj GSspell.service GSspell.service/Resources 2>&1 | head -30
+          cat GSspell.service/Resources/Info-gnustep.plist 2>&1 | head -20
+          ./obj/make_services --test GSspell.service/Resources/Info-gnustep.plist; echo "make_services exit $?"
+          gdb -batch -ex run -ex bt -ex "info registers rip" -ex "x/6i \$pc" --args ./obj/make_services.exe --test GSspell.service/Resources/Info-gnustep.plist 2>&1 | grep -v "absolute path\|fix your\|guessing\|New Thread" | tail -40
+          ./GSspell.service/GSspell.exe -RegisterOnly YES; echo "GSspell exit $?"
+          gdb -batch -ex run -ex bt -ex "info registers rip" -ex "x/6i \$pc" --args ./GSspell.service/GSspell.exe -RegisterOnly YES 2>&1 | grep -v "absolute path\|fix your\|guessing\|New Thread" | tail -40
           true
 
       - name: Manifest
