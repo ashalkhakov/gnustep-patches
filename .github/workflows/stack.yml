@@ -206,7 +206,7 @@ jobs:
           echo "== GSFormat.m, preprocessed as base compiles it"
           src=$(cygpath -u "$RUNNER_TEMP")/gnustep-sources/libs-base/Source
           touch "$src/GSFormat.m"
-          cmd=$(make -C "$src" -n messages=yes 2>/dev/null | grep -a -m1 "GSFormat.m -c")
+          cmd=$(make -C "$src" -n messages=yes 2>/dev/null | sed -e :a -e '/\\$/N; s/\\\n//; ta' | grep -a -m1 "GSFormat.m -c")
           echo "$cmd" | head -c 3000; echo
           mkdir -p /tmp/gsformat
           (cd "$src" && eval "$(echo "$cmd" | sed 's/ -c / -E /; s/ -o [^ ]*/ -o \/tmp\/gsformat\/GSFormat.mi/')")
