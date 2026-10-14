@@ -208,6 +208,7 @@ build_libobjc2() {
 # own copy.
 build_libdispatch() {
     fetch libdispatch https://github.com/swiftlang/swift-corelibs-libdispatch.git
+    apply_patches_for libdispatch "$SOURCES/libdispatch"
     mkdir -p "$SOURCES/libdispatch/build"
     libobjc=$PREFIX/lib/libobjc.so
     [ "$WINDOWS" = 1 ] && libobjc=$PREFIX/lib/libobjc.dll.a
