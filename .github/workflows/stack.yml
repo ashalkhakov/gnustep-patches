@@ -191,7 +191,11 @@ jobs:
               echo "  $d -> $w"
             done
           done
-          ldd ./obj/make_services.exe
+          printf '%s\n' '#include <windows.h>' '#include <stdio.h>' \
+            'int main(int argc, char **argv) { for (int i = 1; i < argc; i++) { HMODULE h = LoadLibraryExA(argv[i], NULL, 0); printf("%s: %s %lu\n", argv[i], h ? "ok" : "FAILED", h ? 0UL : GetLastError()); } return 0; }' > /tmp/load.c
+          clang -o /tmp/load.exe /tmp/load.c
+          dlls=$(ldd ./obj/make_services.exe | sed -n 's/.*=> \(\/[^ ]*\) .*/\1/p' | grep -v -i '/c/Windows' | tac)
+          /tmp/load.exe $(for d in $dlls; do cygpath -w "$d"; done) "$(cygpath -w /c/GNUstep/bin/libBlocksRuntime.dll)"
           ./obj/make_services --test GSspell.service/Resources/Info-gnustep.plist; echo "make_services exit $?"
           gdb -batch -ex run -ex bt -ex "info registers rip" -ex "x/6i \$pc" --args ./obj/make_services.exe --test GSspell.service/Resources/Info-gnustep.plist 2>&1 | grep -v "absolute path\|fix your\|guessing\|New Thread" | tail -40
           ./GSspell.service/GSspell.exe -RegisterOnly YES; echo "GSspell exit $?"
