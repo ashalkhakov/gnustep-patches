@@ -20,6 +20,20 @@ ENV DEBIAN_FRONTEND=noninteractive \
     SOURCES=/w/src \
     LD_LIBRARY_PATH=/w/build/lib
 
+# Packages over HTTPS: on some networks plain HTTP from ports.ubuntu.com
+# arrives altered ("Hash Sum mismatch", "File has unexpected size"), which
+# retries do not cure. The image has no CA certificates to check the mirror's
+# with until it installs them, so that one install does not check the peer;
+# apt still checks every index against Ubuntu's signing key and every package
+# against the indexes, so nothing unsigned gets in.
+RUN sed -i 's#http://\(ports\|archive\|security\)\.ubuntu\.com#https://\1.ubuntu.com#' \
+        /etc/apt/sources.list.d/ubuntu.sources \
+    && printf 'Acquire::Retries "5";\n' > /etc/apt/apt.conf.d/99-retries \
+    && apt-get -o Acquire::https::Verify-Peer=false update \
+    && apt-get -o Acquire::https::Verify-Peer=false install -y --no-install-recommends \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential clang cmake git pkg-config ca-certificates \
         libgnutls28-dev libffi-dev libicu-dev libxml2-dev libxslt1-dev \

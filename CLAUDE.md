@@ -86,21 +86,29 @@ patch still applied on top. Reverse-apply is the quick check
 
 ## The test environment
 
-GNUstep is built and tested in docker, in the container `ois-dev`, which
-holds a built stack; `docker ps -a | grep ois-dev` tells you whether it is
-still there. Leave the `cdci` container alone: it is CI's, and is not to be
-changed. `ois-dev` also has fresh clones of every upstream master under
-`/w/upstream/<project>`, for checking that the patches still apply.
+GNUstep is built and tested in docker, in a container of your own, started
+from this repository's image: `Docker/Dockerfile` builds the whole stack,
+unpatched, into `/w/build` from checkouts in `/w/src`. Do not borrow another
+project's container: `ois-dev` is ODataKit's, and `cdci` is CI's; leave both
+alone.
+
+```sh
+cd /Volumes/ExtraSSD/Projects/gnustep-patches
+docker build -f Docker/Dockerfile -t gnustep-patches:latest .
+docker run -d --name gp-dev gnustep-patches:latest sleep infinity
+```
 
 ```
 /w/build                 the prefix: the whole GNUstep stack, installed
-/w/dependencies/libs-*   source trees, patched and built - where you rebuild
-/w/status/<project>      clean checkouts at upstream master - where you git am
-/w/am/gnustep-patches    a copy of this repository, refreshed by you
-/w/upstream/<project>    fresh clones of upstream master - where a fix is written
-/w/oisdev                ODataStore and FreeCoreData, built on this stack
-/repo                    the host's gnustep-coredata, read-only
+/w/src/<project>         source trees at the commits the image was built from,
+                         unpatched - where you apply, rebuild and test
+/w/gnustep-patches       a copy of this repository, refreshed by you
 ```
+
+The stack is built unpatched on purpose: a test must be seen failing
+without its fix. Upstream master moves, so before writing a fix, bring the
+project's tree to it (`git -C /w/src/<project> pull`) and rebuild that one
+library; a patch is written against master.
 
 Copy this repository in before using it, since the container's copy goes
 stale the moment you edit a patch:
@@ -108,17 +116,17 @@ stale the moment you edit a patch:
 ```sh
 cd /Volumes/ExtraSSD/Projects/gnustep-patches \
   && COPYFILE_DISABLE=1 tar cf - --exclude .git . \
-  | docker exec -i ois-dev bash -lc 'rm -rf /w/am/gnustep-patches \
-      && mkdir -p /w/am/gnustep-patches && tar xf - -C /w/am/gnustep-patches'
+  | docker exec -i gp-dev bash -lc 'rm -rf /w/gnustep-patches \
+      && mkdir -p /w/gnustep-patches && tar xf - -C /w/gnustep-patches'
 ```
 
 Apply, build, install and test:
 
 ```sh
-docker exec ois-dev bash -lc '/w/am/gnustep-patches/Scripts/apply-patches.sh libs-base /w/dependencies/libs-base'
-docker exec ois-dev bash -lc 'cd /w/dependencies/libs-base && . /w/build/System/Library/Makefiles/GNUstep.sh \
+docker exec gp-dev bash -lc '/w/gnustep-patches/Scripts/apply-patches.sh libs-base /w/src/libs-base'
+docker exec gp-dev bash -lc 'cd /w/src/libs-base && . /w/build/System/Library/Makefiles/GNUstep.sh \
     && make -j4 && make install'
-docker exec ois-dev bash -lc 'cd /w/dependencies/libs-base && . /w/build/System/Library/Makefiles/GNUstep.sh \
+docker exec gp-dev bash -lc 'cd /w/src/libs-base && . /w/build/System/Library/Makefiles/GNUstep.sh \
     && gnustep-tests Tests/base/NSPredicate'
 ```
 
@@ -136,7 +144,7 @@ the suite's own guard — `[NSApplication sharedApplication]` inside
 - `docker exec` without `-i` swallows stdin, so a heredoc or a pipe into it
   silently does nothing.
 - A shell redirect runs even when the command before it fails:
-  `docker exec ois-dev cat /tmp/x > patch` truncates `patch` when the container
+  `docker exec gp-dev cat /tmp/x > patch` truncates `patch` when the container
   has no `/tmp/x`. Write to a temporary file, check it, then move it.
 - `git am` needs a committer identity: export `GIT_COMMITTER_NAME` and
   `GIT_COMMITTER_EMAIL`, or every apply fails with "Committer identity
@@ -148,11 +156,15 @@ the suite's own guard — `[NSApplication sharedApplication]` inside
 - In the test harness, `PASS(...)` is a macro, and the preprocessor splits
   on commas that square brackets do not protect. Any message send with two
   arguments inside `PASS` must be wrapped in its own parentheses.
-- There is no valgrind in the image, so a fault only valgrind can see cannot
-  be demonstrated there.
-- The container is a pet, not a recipe: it was built by hand on `ubuntu:24.04`
-  and the stack inside it is not in any image. `docker commit ois-dev` before
-  doing anything drastic, or rebuild it with `Scripts/build-gnustep.sh`.
+- The image has valgrind, for the faults that have no test (a use-after-free
+  the allocator hides).
+- The container is disposable: what it holds beyond the image is your work in
+  progress, so `docker commit gp-dev` before anything drastic, and when it is
+  in doubt, remove it and start a fresh one from the image.
+- On this machine plain HTTP from ports.ubuntu.com arrives altered ("Hash Sum
+  mismatch", "File has unexpected size"), and no apt setting cures it; the
+  image fetches its packages over HTTPS instead (see the Dockerfile for how it
+  gets its first CA certificates).
 - macOS `tar` writes an AppleDouble `._name` beside every file it carries
   metadata for, so a tree piped into the container arrives with a twin of
   each file — and the twins keep the extension, which means anything that
