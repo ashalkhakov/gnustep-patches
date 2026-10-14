@@ -1,0 +1,38 @@
+From 49c571bd9e4c8e62a8f778a90ebbeabe2225ffcf Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Wed, 14 Oct 2026 13:30:43 +0500
+Subject: [PATCH] Windows: MinGW's headers already define mode_t
+
+os/generic_win_base.h declares mode_t as int unless HAVE_MODE_T is
+defined, which only libdispatch's own build defines. MinGW's
+<sys/types.h> defines mode_t too (as unsigned short), so any program
+built with MinGW that includes <dispatch/dispatch.h> fails:
+
+  os/generic_win_base.h:28:13: error: typedef redefinition with
+  different types ('int' vs '_mode_t' (aka 'unsigned short'))
+
+That includes gnustep-base, whose configure probe for dispatch.h fails
+the same way, so it is built without libdispatch on MinGW.
+
+Leave mode_t to MinGW, as it is left to the C library on other
+platforms.
+---
+ os/generic_win_base.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/os/generic_win_base.h b/os/generic_win_base.h
+index 5f1ea74..f792c0d 100644
+--- a/os/generic_win_base.h
++++ b/os/generic_win_base.h
+@@ -24,7 +24,7 @@
+ // Unices provide `howmany` via sys/param.h
+ #define howmany(x, y)  (((x) + ((y) - 1)) / (y))
+ 
+-#ifndef HAVE_MODE_T
++#if !defined(HAVE_MODE_T) && !defined(__MINGW32__)
+ typedef int mode_t;
+ #endif
+ typedef void pthread_attr_t;
+-- 
+2.50.1 (Apple Git-155)
+
