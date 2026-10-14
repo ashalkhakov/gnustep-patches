@@ -140,7 +140,9 @@ jobs:
       CXX: clang++
       LIBRARY_COMBO: ng-gnu-gnu
       RUNTIME_VERSION: gnustep-2.0
-      COMPONENTS: libobjc2 libdispatch tools-make libs-base libs-gui libs-back libs-corebase libs-opal tools-xctest
+      # Eau is built on X11; Windows applications use WinUXTheme, the native
+      # look, instead.
+      COMPONENTS: libobjc2 libdispatch tools-make libs-base libs-gui libs-back libs-corebase libs-opal winuxtheme tools-xctest
     steps:
       # The patches are applied byte for byte: no CRLF.
       - name: Line endings

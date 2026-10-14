@@ -20,7 +20,8 @@
 #
 #   PREFIX           where the stack is installed (also accepted: INSTALL_PATH)
 #   SOURCES          where the checkouts live (also accepted: DEPS_PATH)
-#   COMPONENTS       build these, in this order (default: the full stack)
+#   COMPONENTS       build these, in this order (default: the full stack;
+#                    on Windows, winuxtheme in place of eau)
 #   PATCHES          "all" (default), "none", or a list of <project>/<topic>
 #   CC, CXX          default clang / clang++
 #   LIBRARY_COMBO    default ng-gnu-gnu
@@ -40,7 +41,11 @@ PATCHES_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 
 PREFIX=${PREFIX:-${INSTALL_PATH:-}}
 SOURCES=${SOURCES:-${DEPS_PATH:-}}
-COMPONENTS=${COMPONENTS:-"libobjc2 libdispatch tools-make libs-base libs-gui libs-back eau tools-xctest"}
+case "$(uname -s)" in
+    MINGW*|MSYS*) theme=winuxtheme ;;
+    *)            theme=eau ;;
+esac
+COMPONENTS=${COMPONENTS:-"libobjc2 libdispatch tools-make libs-base libs-gui libs-back $theme tools-xctest"}
 PATCHES=${PATCHES:-all}
 CC=${CC:-clang}
 CXX=${CXX:-clang++}
@@ -347,6 +352,15 @@ build_eau() {
     (cd "$SOURCES/eau" && make -j"$JOBS" ADDITIONAL_LDFLAGS="$ldflags" && make install)
 }
 
+# The theme Windows applications use: controls drawn by Windows' own
+# theming (uxtheme). Eau, the Linux one, is built on X11.
+build_winuxtheme() {
+    fetch winuxtheme https://github.com/gnustep/plugins-themes-WinUXTheme.git
+    apply_patches_for plugins-themes-WinUXTheme "$SOURCES/winuxtheme"
+    gnustep_sh
+    (cd "$SOURCES/winuxtheme" && make -j"$JOBS" && make install)
+}
+
 build_tools_xctest() {
     fetch tools-xctest https://github.com/gnustep/tools-xctest.git
     gnustep_sh
@@ -404,6 +418,19 @@ verify() {
             ;;
     esac
 
+    # A theme bundle that is asked for and not installed would leave every
+    # application with GNUstep's own look, and nothing would say so.
+    for theme in eau:Eau winuxtheme:WinUXTheme; do
+        case " $COMPONENTS " in
+            *" ${theme%%:*} "*)
+                if ! find "$PREFIX" -maxdepth 6 -type d -name "${theme#*:}.theme" | grep -q .; then
+                    echo "verify: no ${theme#*:}.theme in $PREFIX" >&2
+                    failed=1
+                fi
+                ;;
+        esac
+    done
+
     # gnustep-gui builds its sound plug-ins (NSSound's) only when it finds
     # libsndfile and libao, and says nothing when it does not.
     case " $COMPONENTS " in
@@ -443,6 +470,7 @@ for component in $COMPONENTS; do
         libs-corebase)  build_libs_corebase ;;
         libs-opal)      build_libs_opal ;;
         eau)            build_eau ;;
+        winuxtheme)     build_winuxtheme ;;
         tools-xctest)   build_tools_xctest ;;
         *) echo "build-gnustep: unknown component $component" >&2; exit 2 ;;
     esac
