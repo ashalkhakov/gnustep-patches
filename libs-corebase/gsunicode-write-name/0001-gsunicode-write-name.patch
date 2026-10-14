@@ -1,0 +1,113 @@
+From 7fc2e8130955d76fc7ab0b5354a4028b8f4e64dd Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Wed, 14 Oct 2026 16:34:56 +0500
+Subject: [PATCH] GSUnicode: rename _write, which Windows' C runtime declares
+
+GSUnicode.c's static helper _write copies UniChars into the output
+buffer. Microsoft's C runtime declares a function of that name in
+<io.h> (the POSIX write under its own name), and with MinGW that
+declaration reaches GSUnicode.c through the headers it includes, so on
+Windows the file does not compile:
+
+  GSUnicode.c:1221:1: error: static declaration of '_write' follows
+  non-static declaration
+  GSUnicode.c:1247:70: error: too many arguments to function call,
+  expected 3, have 4
+
+Call it _write_string, beside its companion _write_char.
+---
+ Source/GSUnicode.c | 20 ++++++++++----------
+ 1 file changed, 10 insertions(+), 10 deletions(-)
+
+diff --git a/Source/GSUnicode.c b/Source/GSUnicode.c
+index 23084e4..cc61c5c 100644
+--- a/Source/GSUnicode.c
++++ b/Source/GSUnicode.c
+@@ -1218,7 +1218,7 @@ _write_char (UniChar * obuf, UniChar * obuf_end, const UniChar c)
+ }
+ 
+ static CFIndex
+-_write (UniChar * obuf, UniChar * obuf_end, const UniChar * s, CFIndex len)
++_write_string (UniChar * obuf, UniChar * obuf_end, const UniChar * s, CFIndex len)
+ {
+   int remain = obuf_end - obuf;
+   if (remain > 0)
+@@ -1244,10 +1244,10 @@ _pad (UniChar * obuf, UniChar * obuf_end, const UniChar padchar, CFIndex len)
+         pad_string = _pad_zero;
+       for (; len > PAD_SIZE; len -= PAD_SIZE)
+         {
+-          written += _write (obuf, obuf_end, (UniChar *) pad_string, PAD_SIZE);
++          written += _write_string (obuf, obuf_end, (UniChar *) pad_string, PAD_SIZE);
+           obuf += PAD_SIZE;
+         }
+-      written += _write (obuf, obuf_end, (UniChar *) pad_string, len);
++      written += _write_string (obuf, obuf_end, (UniChar *) pad_string, len);
+     }
+   return written;
+ }
+@@ -1687,7 +1687,7 @@ GSUnicodeFormatWithArguments (UniChar * __restrict__ s, CFIndex n,
+       prev = fmt;
+       while (fmt < fmtlimit && *fmt != '%')
+         fmt++;
+-      obuf += _write (obuf, obuf_end, prev, fmt - prev);
++      obuf += _write_string (obuf, obuf_end, prev, fmt - prev);
+       if (!(fmt < fmtlimit))
+         break;
+       fmt++;                    /* skip '%' */
+@@ -1850,7 +1850,7 @@ GSUnicodeFormatWithArguments (UniChar * __restrict__ s, CFIndex n,
+               obuf += _pad (obuf, obuf_end, ' ', width);
+             if (string)
+               {
+-                obuf += _write (obuf, obuf_end, string, string_len);
++                obuf += _write_string (obuf, obuf_end, string, string_len);
+               }
+             else
+               {
+@@ -1863,7 +1863,7 @@ GSUnicodeFormatWithArguments (UniChar * __restrict__ s, CFIndex n,
+                   {
+                     r.length = GS_MIN (string_len, BUFFER_SIZE);
+                     CFStringGetCharacters (desc, r, string);
+-                    obuf += _write (obuf, obuf_end, string, r.length);
++                    obuf += _write_string (obuf, obuf_end, string, r.length);
+                     r.location += r.length;
+                     string_len -= BUFFER_SIZE;
+                   }
+@@ -2048,7 +2048,7 @@ GSUnicodeFormatWithArguments (UniChar * __restrict__ s, CFIndex n,
+                     prec += width;
+                   if (prec > 0)
+                     obuf += _pad (obuf, obuf_end, '0', prec);
+-                  obuf += _write (obuf, obuf_end, string, string_len);
++                  obuf += _write_string (obuf, obuf_end, string, string_len);
+                 }
+               else
+                 {
+@@ -2067,7 +2067,7 @@ GSUnicodeFormatWithArguments (UniChar * __restrict__ s, CFIndex n,
+ 
+                   if (prec > 0)
+                     obuf += _pad (obuf, obuf_end, '0', prec);
+-                  obuf += _write (obuf, obuf_end, string, string_len);
++                  obuf += _write_string (obuf, obuf_end, string, string_len);
+                   if (width > 0)
+                     obuf += _pad (obuf, obuf_end, ' ', width);
+                 }
+@@ -2238,7 +2238,7 @@ GSUnicodeFormatWithArguments (UniChar * __restrict__ s, CFIndex n,
+               GSUnicodeFromEncoding (&tmp, tmp_limit,
+                                      CFStringGetSystemEncoding (), &cstring,
+                                      cstring + string_len, 0);
+-              obuf += _write (obuf, obuf_end, buffer, tmp - buffer);
++              obuf += _write_string (obuf, obuf_end, buffer, tmp - buffer);
+               string_len -= BUFFER_SIZE;
+             }
+           while (string_len > 0);
+@@ -2251,7 +2251,7 @@ GSUnicodeFormatWithArguments (UniChar * __restrict__ s, CFIndex n,
+       width -= string_len;
+       if (!left_align)
+         obuf += _pad (obuf, obuf_end, ' ', width);
+-      obuf += _write (obuf, obuf_end, string, string_len);
++      obuf += _write_string (obuf, obuf_end, string, string_len);
+       if (left_align)
+         obuf += _pad (obuf, obuf_end, ' ', width);
+     }
+-- 
+2.50.1 (Apple Git-155)
+
