@@ -169,6 +169,22 @@ jobs:
       - name: Build
         run: SOURCES="$(cygpath -u "$RUNNER_TEMP")/gnustep-sources" Scripts/build-gnustep.sh
 
+      - name: Debug
+        if: failure()
+        run: |
+          src=$(cygpath -u "$RUNNER_TEMP")/gnustep-sources
+          grep -n -B5 -A40 "checking for dispatch_queue_create" $src/libs-base/config.log | tail -60 || true
+          ls -la $PREFIX/lib $PREFIX/bin || true
+          . "$PREFIX/System/Library/Makefiles/GNUstep.sh"
+          export PATH="$PREFIX/bin:$PATH"
+          mkdir -p /tmp/hello && cd /tmp/hello
+          printf '%s\n' '#import <Foundation/Foundation.h>' \
+            'int main(void) { @autoreleasepool { NSLog(@"%@", [NSProcessInfo processInfo]); printf("hello\n"); } return 0; }' > hello.m
+          printf '%s\n' 'include $(GNUSTEP_MAKEFILES)/common.make' 'TOOL_NAME = hello' 'hello_OBJC_FILES = hello.m' \
+            'include $(GNUSTEP_MAKEFILES)/tool.make' > GNUmakefile
+          make -s messages=yes
+          ./obj/hello || { echo "exit $?"; lldb --batch -o run -o bt -- ./obj/hello.exe; }
+
       - name: Manifest
         run: |
           d=$PREFIX/share/gnustep-patches
