@@ -284,8 +284,15 @@ relative_gnustep_conf() {
         case "$line" in
             GNUSTEP_*_USERS_DIR=*) continue ;;
             GNUSTEP_*="$PREFIX"*)
-                path=${line#*=}
-                echo "${line%%=*}=$(realpath -m --relative-to="$dir" "$path")" ;;
+                # base takes a path as relative to this file only when it
+                # starts with ./ or ../ ('Admin' and even '.' it rejects).
+                path=$(realpath -m --relative-to="$dir" "${line#*=}")
+                case "$path" in
+                    ..|../*) ;;
+                    .) path=./ ;;
+                    *) path=./$path ;;
+                esac
+                echo "${line%%=*}=$path" ;;
             *) echo "$line" ;;
         esac
     done < "$(gnustep-config --variable=GNUSTEP_CONFIG_FILE)" > "$dir/GNUstep.conf"
