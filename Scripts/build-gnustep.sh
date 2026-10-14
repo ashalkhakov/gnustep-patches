@@ -265,7 +265,8 @@ build_libs_base() {
 # leaves the original unreachable, so its address becomes 1: every %u, %lu
 # and %o, and so every NSLog, jumps there and crashes. Seen on Windows
 # (MSYS2's clang 23), where it stopped gnustep-gui's install at GSspell; the
-# pass is told to leave GSFormat.m alone wherever the compiler has it.
+# pass is told to leave GSFormat.m alone wherever the compiler has it, until
+# https://github.com/llvm/llvm-project/issues/231864 is fixed.
 gsformat_flags() {
     if echo 'int x;' | "$CC" -mllvm -enable-dfa-jump-thread=false -x c -c -o /dev/null - 2>/dev/null; then
         echo "-mllvm -enable-dfa-jump-thread=false"
