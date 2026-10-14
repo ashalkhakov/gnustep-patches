@@ -254,15 +254,50 @@ build_tools_make() {
 # gnustep-gui then looks for the backend beside etc/ and reports
 # "Did not find correct version of backend (libgnustep-back-032.bundle)"
 # while the bundle sits in Local/Library/Bundles.
+#
+# On Windows the config file is base's own default there, ./GNUstep.conf:
+# beside the base DLL, read wherever the DLL is, with paths relative to it
+# (see relative_gnustep_conf). gnustep-make's has MSYS paths (/c/GNUstep/...),
+# which a Windows program cannot use, and base warned about each of them.
 build_libs_base() {
     fetch libs-base https://github.com/gnustep/libs-base.git
     apply_patches_for libs-base "$SOURCES/libs-base"
     gnustep_sh
+    config_file=$(gnustep-config --variable=GNUSTEP_CONFIG_FILE)
+    [ "$WINDOWS" = 1 ] && config_file=./GNUstep.conf
     configure_in "$SOURCES/libs-base" \
         --prefix="$PREFIX" \
-        --with-config-file="$(gnustep-config --variable=GNUSTEP_CONFIG_FILE)" \
+        --with-config-file="$config_file" \
         --with-default-config=standalone.conf
     (cd "$SOURCES/libs-base" && make -j"$JOBS" GSFormat.m_FILE_FLAGS="$(gsformat_flags)" && make install)
+    if [ "$WINDOWS" = 1 ]; then relative_gnustep_conf; fi
+}
+
+# gnustep-make's GNUstep.conf, rewritten beside the base DLL with every path
+# in the prefix relative to the DLL's directory, so that the prefix works
+# wherever it is copied: C:\GNUstep, or an application's installed runtime.
+# The users' directories (/home) are left out, so base uses Windows' own.
+relative_gnustep_conf() {
+    base=$(find "$PREFIX" -iname 'gnustep-base*.dll' | head -1)
+    dir=$(dirname "$base")
+    while IFS= read -r line; do
+        case "$line" in
+            GNUSTEP_*_USERS_DIR=*) continue ;;
+            GNUSTEP_*="$PREFIX"*)
+                # base takes a path as relative to this file only when it
+                # starts with ./ or ../ ('Admin' and even '.' it rejects).
+                path=$(realpath -m --relative-to="$dir" "${line#*=}")
+                case "$path" in
+                    ..|../*) ;;
+                    .) path=./ ;;
+                    *) path=./$path ;;
+                esac
+                echo "${line%%=*}=$path" ;;
+            *) echo "$line" ;;
+        esac
+    done < "$(gnustep-config --variable=GNUSTEP_CONFIG_FILE)" > "$dir/GNUstep.conf"
+    say "$dir/GNUstep.conf:"
+    grep -v '^#' "$dir/GNUstep.conf" | grep . | head -20
 }
 
 # Clang 23's DFA jump threading, on by default from that release, clones a
@@ -392,6 +427,11 @@ verify() {
     if [ -z "$base" ]; then
         echo "verify: no libgnustep-base in $PREFIX" >&2
         return 1
+    fi
+
+    if [ "$WINDOWS" = 1 ] && [ ! -f "$(dirname "$base")/GNUstep.conf" ]; then
+        echo "verify: no GNUstep.conf beside $base: a program run from anywhere else finds none of its domains" >&2
+        failed=1
     fi
 
     for hook in _dispatch_main_queue_callback_4CF _dispatch_get_main_queue_handle_4CF; do

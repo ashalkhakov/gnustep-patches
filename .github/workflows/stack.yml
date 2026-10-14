@@ -199,7 +199,10 @@ jobs:
           printf '%s\n' 'include $(GNUSTEP_MAKEFILES)/common.make' 'TOOL_NAME = hello' 'hello_OBJC_FILES = hello.m' \
             'include $(GNUSTEP_MAKEFILES)/tool.make' > GNUmakefile
           make -s
-          [ "$(./obj/hello | tr -d '\r')" = "hello 7 8 10" ]
+          [ "$(./obj/hello 2>stderr.txt | tr -d '\r')" = "hello 7 8 10" ]
+          # base reads its GNUstep.conf from beside its DLL, all Windows paths.
+          cat stderr.txt
+          ! grep -q "is not an absolute path" stderr.txt
 
       - name: Archive
         run: |
