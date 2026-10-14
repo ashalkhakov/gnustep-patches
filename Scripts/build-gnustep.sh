@@ -308,7 +308,11 @@ build_libs_corebase() {
     fetch libs-corebase https://github.com/gnustep/libs-corebase.git
     apply_patches_for libs-corebase "$SOURCES/libs-corebase"
     gnustep_sh
-    configure_in "$SOURCES/libs-corebase" \
+    # CFRunLoop is built on poll() and pthreads, and corebase's configure
+    # says --disable-cfrunloop "must be passed when building on Windows".
+    cfrunloop=
+    [ "$WINDOWS" = 1 ] && cfrunloop=--disable-cfrunloop
+    configure_in "$SOURCES/libs-corebase" $cfrunloop \
         --prefix="$PREFIX" \
         CPPFLAGS="-I$PREFIX/include" \
         LDFLAGS="-L$PREFIX/lib $RPATH${LDFLAGS:+ $LDFLAGS}"
