@@ -1,4 +1,4 @@
-From da648a4641b4838b7582d4820012978d91654a47 Mon Sep 17 00:00:00 2001
+From 9d8839ba27658a190c17ad0f749b3aec55b05fb5 Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Wed, 7 Oct 2026 10:09:04 +0000
 Subject: [PATCH] NSPredicate: an expression given for %@ is that expression
@@ -17,8 +17,8 @@ Tests/base/NSPredicate/expressionArguments.m fails seven of its ten
 tests without the change and passes with it.
 ---
  Source/NSPredicate.m                         | 12 ++++
- Tests/base/NSPredicate/expressionArguments.m | 65 ++++++++++++++++++++
- 2 files changed, 77 insertions(+)
+ Tests/base/NSPredicate/expressionArguments.m | 60 ++++++++++++++++++++
+ 2 files changed, 72 insertions(+)
  create mode 100644 Tests/base/NSPredicate/expressionArguments.m
 
 diff --git a/Source/NSPredicate.m b/Source/NSPredicate.m
@@ -46,22 +46,16 @@ index d027cea1d..fa84dd603 100644
                case 'd':
 diff --git a/Tests/base/NSPredicate/expressionArguments.m b/Tests/base/NSPredicate/expressionArguments.m
 new file mode 100644
-index 000000000..6ace1b5b2
+index 000000000..072759730
 --- /dev/null
 +++ b/Tests/base/NSPredicate/expressionArguments.m
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,60 @@
 +#import "ObjectTesting.h"
-+#import <Foundation/NSAutoreleasePool.h>
-+#import <Foundation/NSArray.h>
-+#import <Foundation/NSDictionary.h>
-+#import <Foundation/NSExpression.h>
-+#import <Foundation/NSPredicate.h>
-+#import <Foundation/NSString.h>
-+#import <Foundation/NSValue.h>
++#import <Foundation/Foundation.h>
 +
 +int main()
 +{
-+  NSAutoreleasePool     *arp = [NSAutoreleasePool new];
++  START_SET("an expression given for %@ is that expression")
 +  NSExpression          *path = [NSExpression expressionForKeyPath: @"tags"];
 +  NSExpression          *e;
 +  NSComparisonPredicate *p;
@@ -69,8 +63,6 @@ index 000000000..6ace1b5b2
 +
 +  ada = [NSDictionary dictionaryWithObjectsAndKeys:
 +    @"ada", @"name", [NSArray arrayWithObject: @"ada"], @"tags", nil];
-+
-+  START_SET("an expression given for %@ is that expression")
 +
 +  e = [NSExpression expressionWithFormat: @"%@", path];
 +  PASS(e == path, "a whole expression format is the argument itself")
@@ -87,22 +79,27 @@ index 000000000..6ace1b5b2
 +                           argumentArray: [NSArray arrayWithObject: path]];
 +  PASS(e == path, "the same through an argument array")
 +
-+  p = (NSComparisonPredicate *)[NSPredicate predicateWithFormat: @"%@ == 1", path];
++  p = (NSComparisonPredicate *)[NSPredicate predicateWithFormat: @"%@ == 1",
++    path];
 +  PASS([p leftExpression] == path, "a predicate's left side")
 +
-+  p = (NSComparisonPredicate *)[NSPredicate predicateWithFormat: @"name IN %@", path];
++  p = (NSComparisonPredicate *)[NSPredicate predicateWithFormat: @"name IN %@",
++    path];
 +  PASS([p rightExpression] == path, "a predicate's right side")
 +  PASS([p evaluateWithObject: ada], "and is evaluated as one")
 +
 +  END_SET("an expression given for %@ is that expression")
 +
 +  START_SET("anything else given for %@ is a constant")
++  NSExpression          *path = [NSExpression expressionForKeyPath: @"tags"];
++  NSExpression          *e;
 +
 +  e = [NSExpression expressionWithFormat: @"%@", @"tags"];
 +  PASS([e expressionType] == NSConstantValueExpressionType
 +    && [[e constantValue] isEqual: @"tags"], "a string")
 +
-+  e = [NSExpression expressionWithFormat: @"%@", [NSArray arrayWithObject: path]];
++  e = [NSExpression expressionWithFormat: @"%@",
++    [NSArray arrayWithObject: path]];
 +  PASS([e expressionType] == NSConstantValueExpressionType,
 +    "an array, even of expressions")
 +
@@ -111,8 +108,6 @@ index 000000000..6ace1b5b2
 +    && [[e constantValue] isEqual: [NSNumber numberWithInt: 5]], "a number")
 +
 +  END_SET("anything else given for %@ is a constant")
-+
-+  [arp release];
 +  return 0;
 +}
 -- 

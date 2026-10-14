@@ -1,4 +1,4 @@
-From ba7805a979bee4f58665d77f31df522404567d25 Mon Sep 17 00:00:00 2001
+From 2842482f42fe0f0c4e2d68aa7009d18529a8564d Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Wed, 7 Oct 2026 17:57:46 +0000
 Subject: [PATCH] NSPredicate: a nil constant prints as nil
@@ -16,16 +16,16 @@ Tests/base/NSPredicate/nilConstant.m fails three of its six tests
 without the change, and its set stops where the format does not parse
 back; it passes with it.
 ---
- Source/NSPredicate.m                 |  4 +++
- Tests/base/NSPredicate/nilConstant.m | 44 ++++++++++++++++++++++++++++
- 2 files changed, 48 insertions(+)
+ Source/NSPredicate.m                 |  4 ++++
+ Tests/base/NSPredicate/nilConstant.m | 36 ++++++++++++++++++++++++++++
+ 2 files changed, 40 insertions(+)
  create mode 100644 Tests/base/NSPredicate/nilConstant.m
 
 diff --git a/Source/NSPredicate.m b/Source/NSPredicate.m
-index 15fd99a62..266471756 100644
+index d027cea1d..81a1249c8 100644
 --- a/Source/NSPredicate.m
 +++ b/Source/NSPredicate.m
-@@ -2452,6 +2452,10 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
+@@ -2369,6 +2369,10 @@ - (NSUInteger) hash
  
  - (NSString *) description
  {
@@ -38,21 +38,16 @@ index 15fd99a62..266471756 100644
        NSMutableString	*result = nil;
 diff --git a/Tests/base/NSPredicate/nilConstant.m b/Tests/base/NSPredicate/nilConstant.m
 new file mode 100644
-index 000000000..e4608d3cc
+index 000000000..b71a104e8
 --- /dev/null
 +++ b/Tests/base/NSPredicate/nilConstant.m
-@@ -0,0 +1,44 @@
+@@ -0,0 +1,36 @@
 +#import "ObjectTesting.h"
-+#import <Foundation/NSAutoreleasePool.h>
-+#import <Foundation/NSDictionary.h>
-+#import <Foundation/NSExpression.h>
-+#import <Foundation/NSNull.h>
-+#import <Foundation/NSPredicate.h>
-+#import <Foundation/NSString.h>
++#import <Foundation/Foundation.h>
 +
 +int main()
 +{
-+  NSAutoreleasePool     *arp = [NSAutoreleasePool new];
++  START_SET("a nil constant reads back as nil")
 +  NSDictionary          *named;
 +  NSDictionary          *unnamed;
 +  NSPredicate           *p;
@@ -60,8 +55,6 @@ index 000000000..e4608d3cc
 +
 +  named = [NSDictionary dictionaryWithObject: @"ada" forKey: @"title"];
 +  unnamed = [NSDictionary dictionary];
-+
-+  START_SET("a nil constant reads back as nil")
 +
 +  PASS_EQUAL([[NSExpression expressionForConstantValue: nil] description],
 +    @"nil", "a nil constant prints as nil")
@@ -74,7 +67,8 @@ index 000000000..e4608d3cc
 +
 +  again = [NSPredicate predicateWithFormat: [p predicateFormat]];
 +  PASS(again != nil, "and the format parses back")
-+  PASS([again evaluateWithObject: named] && ![again evaluateWithObject: unnamed],
++  PASS([again evaluateWithObject: named]
++    && ![again evaluateWithObject: unnamed],
 +    "to a predicate that means the same")
 +
 +  p = [NSPredicate predicateWithFormat: @"title == NULL"];
@@ -82,10 +76,8 @@ index 000000000..e4608d3cc
 +    "NULL is printed as nil too")
 +
 +  END_SET("a nil constant reads back as nil")
-+
-+  [arp release];
 +  return 0;
 +}
 -- 
-2.43.0
+2.50.1 (Apple Git-155)
 
