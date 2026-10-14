@@ -252,13 +252,20 @@ RDLKit, UDQuakeTools and XFormsKit clone Eau without patches, so for them
 `dev` is only the branch Gershwin actually maintains.  gnustep-build is not
 in use.
 
+`predicate-format-expression-arguments`, `predicate-nil-constant-format`
+and `predicate-format-nil-arguments` left on 2026-10-14: rfm merged
+[#844](https://github.com/gnustep/libs-base/pull/844) (78a1bb2),
+[#845](https://github.com/gnustep/libs-base/pull/845) (e88c4a0) and
+[#846](https://github.com/gnustep/libs-base/pull/846) (e9ff11d), with their
+tests in his style, and the copies here reverse-apply to that master.
+Before they left, the copies here were the older revisions, which neither
+applied nor reverse-applied, and stopped every build of the stack.
+gnustep-coredata (now FreeCoreData), listed for two of them, holds no copy.
+
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
 | `autoreleased-return-value` | libobjc2 | test | [#426](https://github.com/gnustep/libobjc2/pull/426) closed unmerged | (none: ODataStore works around it) |
 | `predicate-secure-coding` | libs-base | test | not sent yet ([#766](https://github.com/gnustep/libs-base/issues/766)) | (none: FreeCoreData will use it from here) |
-| `predicate-format-expression-arguments` | libs-base | test | [#844](https://github.com/gnustep/libs-base/pull/844) | gnustep-coredata |
-| `predicate-nil-constant-format` | libs-base | test | [#845](https://github.com/gnustep/libs-base/pull/845) | gnustep-coredata |
-| `predicate-format-nil-arguments` | libs-base | test | [#846](https://github.com/gnustep/libs-base/pull/846) | (none) |
 | `arc4random-glibc` | libs-base | test | not sent yet | (none: every app built on the stack uses it from here; HomeRow's and UDCalc's shims are gone) |
 | `tableview-column-autoresizing-style` | libs-gui | test | [#982](https://github.com/gnustep/libs-gui/pull/982) | gnustep-coredata |
 | `collectionview-make-item` | libs-gui | test | [#1001](https://github.com/gnustep/libs-gui/pull/1001) | (none: TopoText uses it from here) |
