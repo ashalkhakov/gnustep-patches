@@ -103,11 +103,11 @@ jobs:
           . "$PREFIX/System/Library/Makefiles/GNUstep.sh"
           mkdir -p "$RUNNER_TEMP/hello" && cd "$RUNNER_TEMP/hello"
           printf '%s\n' '#import <Foundation/Foundation.h>' \
-            'int main(void) { @autoreleasepool { printf("hello\n"); } return 0; }' > hello.m
+            'int main(void) { @autoreleasepool { NSLog(@"%u %lu", 7U, 8UL); printf("%s\n", [[NSString stringWithFormat: @"hello %u %lu %o", 7U, 8UL, 8U] UTF8String]); } return 0; }' > hello.m
           printf '%s\n' 'include $(GNUSTEP_MAKEFILES)/common.make' 'TOOL_NAME = hello' 'hello_OBJC_FILES = hello.m' \
             'include $(GNUSTEP_MAKEFILES)/tool.make' > GNUmakefile
           make -s
-          [ "$(./obj/hello)" = hello ]
+          [ "$(./obj/hello)" = "hello 7 8 10" ]
 
       - name: Archive
         run: |
@@ -140,7 +140,7 @@ jobs:
       CXX: clang++
       LIBRARY_COMBO: ng-gnu-gnu
       RUNTIME_VERSION: gnustep-2.0
-      COMPONENTS: libobjc2 libdispatch tools-make libs-base
+      COMPONENTS: libobjc2 libdispatch tools-make libs-base libs-gui libs-back libs-corebase libs-opal eau tools-xctest
     steps:
       # The patches are applied byte for byte: no CRLF.
       - name: Line endings
@@ -160,7 +160,7 @@ jobs:
           # A mirror that stalls fails the download; pacman tries another
           # next time.
           for i in 1 2 3; do
-            pacman -S --noconfirm --needed $packages $MINGW_PACKAGE_PREFIX-lldb $MINGW_PACKAGE_PREFIX-gdb && break
+            pacman -S --noconfirm --needed $packages && break
             [ "$i" != 3 ] || exit 1
             sleep 10
           done
@@ -174,53 +174,6 @@ jobs:
 
       - name: Build
         run: SOURCES="$(cygpath -u "$RUNNER_TEMP")/gnustep-sources" Scripts/build-gnustep.sh
-
-      - name: Debug
-        if: always()
-        run: |
-          set +e +o pipefail
-          . "$PREFIX/System/Library/Makefiles/GNUstep.sh"
-          export PATH="$PREFIX/bin:$PATH"
-          mkdir -p /tmp/t && cd /tmp/t
-          n=0
-          for body in 'printf("%s\n", [[NSString stringWithFormat: @"%u", 7U] UTF8String]);' \
-                      'printf("%s\n", [[NSString stringWithFormat: @"%lu", 7UL] UTF8String]);' \
-                      'printf("%s\n", [[NSString stringWithFormat: @"%ld", 7L] UTF8String]);' \
-                      'printf("%s\n", [[NSString stringWithFormat: @"%lld", 7LL] UTF8String]);' \
-                      'printf("%s\n", [[NSString stringWithFormat: @"%d %d", 1, 2] UTF8String]);' \
-                      'printf("%s\n", [[NSString stringWithFormat: @"%@ %@", @"a", @"b"] UTF8String]);' \
-                      'printf("%s\n", [[NSString stringWithFormat: @"%d %@", 1, @"b"] UTF8String]);' \
-                      'printf("%s\n", [[NSString stringWithFormat: @"%x", 255] UTF8String]);'; do
-            n=$((n+1))
-            printf '%s\n' '#import <Foundation/Foundation.h>' "int main(void) { @autoreleasepool { [NSObject class]; $body } return 0; }" > t$n.m
-            names="$names t$n"; files="$files t${n}_OBJC_FILES=t$n.m"
-          done
-          { echo 'include $(GNUSTEP_MAKEFILES)/common.make'; echo "TOOL_NAME =$names"
-            for f in $files; do echo "${f%%=*} = ${f#*=}"; done
-            echo 'include $(GNUSTEP_MAKEFILES)/tool.make'; } > GNUmakefile
-          make -s 2>&1 | grep -a -i "error" | head
-          for t in $names; do
-            echo "== $t: $(sed -n 2p $t.m)"
-            ./obj/$t.exe > out.txt 2>&1; echo "exit $?"; grep -a -v "absolute path\|fix your\|guessing" out.txt | tail -3
-          done
-          echo "== GSFormat.m, preprocessed as base compiles it"
-          src=$(cygpath -u "$RUNNER_TEMP")/gnustep-sources/libs-base/Source
-          touch "$src/GSFormat.m"
-          cmd=$(make -C "$src" -n messages=yes 2>/dev/null | sed -e :a -e '/\\$/N; s/\\\n//; ta' | grep -a -m1 "GSFormat.m -c")
-          echo "$cmd" | head -c 3000; echo
-          mkdir -p /tmp/gsformat
-          (cd "$src" && eval "$(echo "$cmd" | sed 's/ -c / -E /; s/ -o [^ ]*/ -o \/tmp\/gsformat\/GSFormat.mi/')")
-          echo "$cmd" > /tmp/gsformat/command.txt
-          clang --version > /tmp/gsformat/clang-version.txt
-          ls -la /tmp/gsformat
-          true
-
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: gsformat-preprocessed
-          path: D:\a\_temp\msys64\tmp\gsformat
-          if-no-files-found: warn
 
       - name: Manifest
         run: |
@@ -240,13 +193,11 @@ jobs:
           export PATH="$PREFIX/bin:$PATH"
           mkdir -p "$(cygpath -u "$RUNNER_TEMP")/hello" && cd "$(cygpath -u "$RUNNER_TEMP")/hello"
           printf '%s\n' '#import <Foundation/Foundation.h>' \
-            'int main(void) { @autoreleasepool { printf("hello\n"); } return 0; }' > hello.m
+            'int main(void) { @autoreleasepool { NSLog(@"%u %lu", 7U, 8UL); printf("%s\n", [[NSString stringWithFormat: @"hello %u %lu %o", 7U, 8UL, 8U] UTF8String]); } return 0; }' > hello.m
           printf '%s\n' 'include $(GNUSTEP_MAKEFILES)/common.make' 'TOOL_NAME = hello' 'hello_OBJC_FILES = hello.m' \
             'include $(GNUSTEP_MAKEFILES)/tool.make' > GNUmakefile
           make -s
-          ./obj/hello || { echo "exit $?"; lldb --batch -o run -o bt -o "thread list" -- ./obj/hello.exe; }
-          GSspell=x; defaults read 2>&1 | head -5 || true
-          [ "$(./obj/hello | tr -d '\r')" = hello ]
+          [ "$(./obj/hello | tr -d '\r')" = "hello 7 8 10" ]
 
       - name: Archive
         run: |

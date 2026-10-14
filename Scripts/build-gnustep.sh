@@ -257,7 +257,19 @@ build_libs_base() {
         --prefix="$PREFIX" \
         --with-config-file="$(gnustep-config --variable=GNUSTEP_CONFIG_FILE)" \
         --with-default-config=standalone.conf
-    (cd "$SOURCES/libs-base" && make -j"$JOBS" && make install)
+    (cd "$SOURCES/libs-base" && make -j"$JOBS" GSFormat.m_FILE_FLAGS="$(gsformat_flags)" && make install)
+}
+
+# Clang 23's DFA jump threading, on by default from that release, clones a
+# block GSPrivateFormat's computed-goto table holds the address of and
+# leaves the original unreachable, so its address becomes 1: every %u, %lu
+# and %o, and so every NSLog, jumps there and crashes. Seen on Windows
+# (MSYS2's clang 23), where it stopped gnustep-gui's install at GSspell; the
+# pass is told to leave GSFormat.m alone wherever the compiler has it.
+gsformat_flags() {
+    if echo 'int x;' | "$CC" -mllvm -enable-dfa-jump-thread=false -x c -c -o /dev/null - 2>/dev/null; then
+        echo "-mllvm -enable-dfa-jump-thread=false"
+    fi
 }
 
 build_libs_gui() {
