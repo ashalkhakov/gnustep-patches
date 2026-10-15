@@ -1,0 +1,210 @@
+From 4ea1663d6914b6c816c612328a2a7bb514c68b63 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Thu, 15 Oct 2026 16:45:01 +0000
+Subject: [PATCH] x11: keep a quick click's press ahead of its release
+
+The first button press an application receives calls -initializeMouse,
+which registers with the distributed notification center for changes to
+the mouse options.  That registration talks to gdnc and runs the run loop
+while -processEvent: is still handling the press, and the run loop reads
+the X connection: when the button has already been released, as it has in
+a quick click, the release is processed and queued before the press that
+is being handled.
+
+A view that tracks the mouse after a mouse down, NSTextView among them,
+then waits for a release that is already behind it in the queue.  The
+application consumes the next click's release to end that loop and stays
+one click behind from then on: clicks place the caret where the previous
+one was, or appear to hang until the mouse is clicked again.
+
+Read the mouse options at once, as before, and register for their changes
+once the event has been handled.
+
+The test sends a press and its release from a second connection so both
+are waiting before the application reads either, and checks that the
+press arrives first.
+---
+ Source/x11/XGServerEvent.m |  11 ++-
+ Tests/x11/quickclick.m     | 140 +++++++++++++++++++++++++++++++++++++
+ 2 files changed, 149 insertions(+), 2 deletions(-)
+ create mode 100644 Tests/x11/quickclick.m
+
+diff --git a/Source/x11/XGServerEvent.m b/Source/x11/XGServerEvent.m
+index c98ecb3..e66379e 100644
+--- a/Source/x11/XGServerEvent.m
++++ b/Source/x11/XGServerEvent.m
+@@ -400,9 +400,8 @@ posixFileDescriptor: (NSPosixFileDescriptor*)fileDescriptor
+     }
+ }
+ 
+-- (void) initializeMouse
++- (void) _observeMouseOptions
+ {
+-  [self mouseOptionsChanged: nil];
+   [[NSDistributedNotificationCenter defaultCenter]
+     addObserver: self
+        selector: @selector(mouseOptionsChanged:)
+@@ -410,6 +409,14 @@ posixFileDescriptor: (NSPosixFileDescriptor*)fileDescriptor
+          object: nil];
+ }
+ 
++- (void) initializeMouse
++{
++  [self mouseOptionsChanged: nil];
++  [self performSelector: @selector(_observeMouseOptions)
++             withObject: nil
++             afterDelay: 0.0];
++}
++
+ - (void) processEvent: (XEvent *) event
+ {
+   static int clickCount = 1;
+diff --git a/Tests/x11/quickclick.m b/Tests/x11/quickclick.m
+new file mode 100644
+index 0000000..f2587b8
+--- /dev/null
++++ b/Tests/x11/quickclick.m
+@@ -0,0 +1,140 @@
++/* A click whose button is released before the application has handled the
++ * press has to reach the application as a mouse down followed by a mouse up.
++ *
++ * The first button press an application sees makes the backend read the
++ * mouse options and start observing them through the distributed
++ * notification center.  Registering with that center talks to gdnc and runs
++ * the run loop while the press is still being processed, and the run loop
++ * reads the X connection: a release already waiting there was queued ahead
++ * of the press it ends.  NSTextView, like any view that tracks the mouse
++ * after a mouse down, then waits for a release that has already gone by,
++ * and the application stays one click behind from then on.
++ *
++ * The test sends a press and its release together from a second connection,
++ * so both are on the application's connection before it reads either, and
++ * checks the order the application receives them in.
++ */
++#import <Foundation/Foundation.h>
++#import "Testing.h"
++#include "config.h"
++
++#if defined(BUILD_SERVER) && defined(SERVER_x11) && BUILD_SERVER == SERVER_x11
++
++#import <AppKit/AppKit.h>
++#import <GNUstepGUI/GSDisplayServer.h>
++#include <X11/Xlib.h>
++
++static void
++sendButton(Display *dpy, Window w, int type)
++{
++  XEvent	e;
++
++  memset(&e, 0, sizeof(e));
++  e.xbutton.type = type;
++  e.xbutton.display = dpy;
++  e.xbutton.window = w;
++  e.xbutton.root = DefaultRootWindow(dpy);
++  e.xbutton.subwindow = None;
++  e.xbutton.time = CurrentTime;
++  e.xbutton.x = 20;
++  e.xbutton.y = 20;
++  e.xbutton.x_root = 20;
++  e.xbutton.y_root = 20;
++  e.xbutton.state = (type == ButtonRelease) ? Button1Mask : 0;
++  e.xbutton.button = Button1;
++  e.xbutton.same_screen = True;
++  XSendEvent(dpy, w, True,
++    (type == ButtonPress) ? ButtonPressMask : ButtonReleaseMask, &e);
++}
++
++int
++main(int argc, const char **argv)
++{
++  START_SET("quick click")
++
++  NSWindow	*win = nil;
++  Display	*dpy;
++  Window	xwin;
++  NSEvent	*first = nil;
++  NSEvent	*second = nil;
++  NSDate	*limit;
++
++  if (getenv("DISPLAY") == NULL || *getenv("DISPLAY") == '\0')
++    {
++      SKIP("no window server available")
++    }
++
++  NS_DURING
++    {
++      [NSApplication sharedApplication];
++    }
++  NS_HANDLER
++    {
++      NSLog(@"the application did not start: %@", localException);
++      SKIP("It looks like the GNUstep backend is not installed")
++    }
++  NS_ENDHANDLER
++
++  win = [[NSWindow alloc] initWithContentRect: NSMakeRect(100, 100, 200, 100)
++                                    styleMask: NSBorderlessWindowMask
++                                      backing: NSBackingStoreBuffered
++                                        defer: NO];
++  [win orderFrontRegardless];
++  limit = [NSDate dateWithTimeIntervalSinceNow: 0.5];
++  while ([limit timeIntervalSinceNow] > 0)
++    {
++      NSEvent	*e = [NSApp nextEventMatchingMask: NSAnyEventMask
++                                         untilDate: limit
++                                            inMode: NSDefaultRunLoopMode
++                                           dequeue: YES];
++      if (e != nil)
++        {
++          [NSApp sendEvent: e];
++        }
++    }
++
++  xwin = (Window)(uintptr_t)[GSCurrentServer()
++    windowDevice: [win windowNumber]];
++  dpy = XOpenDisplay(NULL);
++  if (dpy == NULL || xwin == 0)
++    {
++      SKIP("the window server could not be reached a second time")
++    }
++  sendButton(dpy, xwin, ButtonPress);
++  sendButton(dpy, xwin, ButtonRelease);
++  XSync(dpy, False);
++
++  limit = [NSDate dateWithTimeIntervalSinceNow: 5.0];
++  first = [NSApp nextEventMatchingMask: NSLeftMouseDownMask | NSLeftMouseUpMask
++                             untilDate: limit
++                                inMode: NSDefaultRunLoopMode
++                               dequeue: YES];
++  second = [NSApp nextEventMatchingMask: NSLeftMouseDownMask | NSLeftMouseUpMask
++                              untilDate: limit
++                                 inMode: NSDefaultRunLoopMode
++                               dequeue: YES];
++
++  PASS(first != nil && second != nil,
++    "a press and its release both reach the application");
++  PASS([first type] == NSLeftMouseDown && [second type] == NSLeftMouseUp,
++    "the press of a quick click reaches the application before its release");
++
++  XCloseDisplay(dpy);
++  [win close];
++
++  END_SET("quick click")
++  return 0;
++}
++
++#else
++
++int
++main(int argc, const char **argv)
++{
++  START_SET("quick click")
++    SKIP("back is not built with the x11 server")
++  END_SET("quick click")
++  return 0;
++}
++
++#endif
+-- 
+2.43.0
+
