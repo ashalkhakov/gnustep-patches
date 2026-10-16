@@ -280,6 +280,7 @@ gnustep-coredata (now FreeCoreData), listed for two of them, holds no copy.
 | `layoutmanager-sanity-checks` | libs-gui | test | not sent yet | (none: UDCodeKit uses it from here) |
 | `layoutmanager-layout-to-point` | libs-gui | test | not sent yet | (none: UDCodeKit uses it from here) |
 | `quick-click-order` | libs-back | test | not sent yet | (none: UDCodeKit and UDQuakeTools use it from here) |
+| `binding-to-many-mutation` | libs-gui | test | not sent yet | (none: UDQuakeTools uses it from here) |
 | `cgrectunion-size` | libs-opal | none | [#71](https://github.com/gnustep/libs-opal/pull/71) | GSXFormsKit |
 | `freetype-advance-without-size` | libs-opal | test | [#72](https://github.com/gnustep/libs-opal/pull/72) | (none: XFormsKit uses it from here) |
 | `cfstring-overrelease` | libs-corebase | none | [#166](https://github.com/gnustep/libs-corebase/pull/166) | gnustep-build |
