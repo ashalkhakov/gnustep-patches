@@ -1,4 +1,4 @@
-From 578657818ca6ee9c2eff56fb44ca9ba062a3ef4f Mon Sep 17 00:00:00 2001
+From 711470b87a4f53ecbd29da26b68c15e4b7c02abe Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Fri, 16 Oct 2026 10:43:12 +0000
 Subject: [PATCH] NSXMLNode: copies and detached trees resolve their namespaces
@@ -78,11 +78,11 @@ index 3498592..8f57e2b 100644
  
    {
 diff --git a/Source/NSXMLNode.m b/Source/NSXMLNode.m
-index de95ac3..e3e3b25 100644
+index de95ac3..9c15451 100644
 --- a/Source/NSXMLNode.m
 +++ b/Source/NSXMLNode.m
-@@ -313,6 +313,70 @@ rebind_ns(xmlNodePtr node, xmlNsPtr from, xmlNsPtr to, BOOL siblings)
-     }
+@@ -272,6 +272,70 @@ ensure_oldNs(xmlNodePtr node)
+   return newDoc;
  }
  
 +/* Whether ns is declared on node, or on an element above it.
@@ -149,9 +149,9 @@ index de95ac3..e3e3b25 100644
 +    }
 +}
 +
- /* Declare on parent a copy of each of its document's placeholders that
-  * nothing in scope there binds, and return how many it declared.
-  */
+ #if LIBXML_VERSION >= 20620 && LIBXML_VERSION < 21200
+ static BOOL
+ ns_in_scope(xmlNodePtr node, xmlNsPtr ns)
 @@ -954,6 +1018,18 @@ isEqualTree(xmlNodePtr nodeA, xmlNodePtr nodeB)
                        resolved = YES;
                      }
