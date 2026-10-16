@@ -455,6 +455,15 @@ verify() {
                 echo "verify: no backend bundle in $PREFIX" >&2
                 failed=1
             fi
+            # NSOpenGLView needs the backend's GLX, which configure leaves
+            # out without a word when GL/glx.h is missing (libgl-dev).
+            if [ "$WINDOWS" = 0 ]; then
+                back=$(find "$PREFIX" -path '*libgnustep-back-*.bundle/libgnustep-back-*' -type f | head -n 1)
+                if [ -n "$back" ] && ! symbols_of "$back" | grep -q glX; then
+                    echo "verify: $back has no GLX (is libgl-dev installed?)" >&2
+                    failed=1
+                fi
+            fi
             ;;
     esac
 

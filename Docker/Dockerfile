@@ -42,6 +42,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libpthread-workqueue-dev libsqlite3-dev libsndfile1-dev libao-dev \
         libfreetype-dev libfontconfig1-dev libxrender-dev liblcms2-dev \
         libxt-dev libxmu-dev libxft-dev libxrandr-dev libxfixes-dev libxcursor-dev \
+        libgl-dev libgl1-mesa-dri \
         xvfb valgrind \
     && rm -rf /var/lib/apt/lists/*
 
