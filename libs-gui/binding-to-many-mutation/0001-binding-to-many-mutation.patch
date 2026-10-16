@@ -1,0 +1,137 @@
+From 7bb782b5d61c85a1b14282afdab684c3559f95a9 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Fri, 16 Oct 2026 07:21:21 +0000
+Subject: [PATCH] Bindings: a to-many's members added or removed show in full
+
+A binding took the new value of every key-value observing notice it got
+as the bound value. That is the whole value only for a setting change
+(NSKeyValueChangeSetting). An insertion, a removal or a replacement
+carries just the objects that changed, so a controller bound to a to-many
+(contentSet, contentArray) was left holding only the members just added,
+or the ones just removed. A notice of any kind other than setting now
+makes the binding read the observed key path again, as AppKit's does.
+
+It shows wherever a to-many is changed through mutableSetValueForKey: or
+mutableArrayValueForKey:, or by a Core Data child context saving into its
+parent.
+
+The test binds NSArrayController's contentSet and contentArray and changes
+the bound to-many: it fails without the change, passes with it, and passes
+on AppKit.
+---
+ Source/NSKeyValueBinding.m                    | 12 ++-
+ Tests/gui/NSArrayController/contentMutation.m | 79 +++++++++++++++++++
+ 2 files changed, 90 insertions(+), 1 deletion(-)
+ create mode 100644 Tests/gui/NSArrayController/contentMutation.m
+
+diff --git a/Source/NSKeyValueBinding.m b/Source/NSKeyValueBinding.m
+index 12ba766..5ee0981 100644
+--- a/Source/NSKeyValueBinding.m
++++ b/Source/NSKeyValueBinding.m
+@@ -408,7 +408,17 @@ void GSBindingInvokeAction(NSString *targetKey, NSString *argumentKey,
+   if (change != nil)
+     {
+       options = [info objectForKey: NSOptionsKey];
+-      newValue = [change objectForKey: NSKeyValueChangeNewKey];
++      /* Only a setting change carries the whole value; an insertion, a
++         removal or a replacement carries just the objects it changed. */
++      if ([[change objectForKey: NSKeyValueChangeKindKey] intValue]
++        == NSKeyValueChangeSetting)
++        {
++          newValue = [change objectForKey: NSKeyValueChangeNewKey];
++        }
++      else
++        {
++          newValue = [object valueForKeyPath: keyPath];
++        }
+       newValue = [self transformValue: newValue withOptions: options];
+       NSDebugLLog(@"NSBinding", @"observeValueForKeyPath: binding %@, keyPath %@, source %@ value %@", binding, keyPath, src, newValue);
+       [src setValue: newValue forKey: binding];
+diff --git a/Tests/gui/NSArrayController/contentMutation.m b/Tests/gui/NSArrayController/contentMutation.m
+new file mode 100644
+index 0000000..15f8cf4
+--- /dev/null
++++ b/Tests/gui/NSArrayController/contentMutation.m
+@@ -0,0 +1,79 @@
++/* A controller bound to a to-many shows all of it after the to-many gains or
++   loses members.  The key-value observing notice of such a change carries
++   only the members added or removed (NSKeyValueChangeInsertion, ...Removal),
++   so the binding has to read the to-many again; taking the notice's new
++   value as the content left the controller with the added members alone.
++   Matches AppKit. */
++#include "Testing.h"
++
++#include <Foundation/NSAutoreleasePool.h>
++#include <Foundation/NSArray.h>
++#include <Foundation/NSSet.h>
++#include <Foundation/NSString.h>
++#include <Foundation/NSKeyValueCoding.h>
++
++#include <AppKit/NSArrayController.h>
++#include <AppKit/NSKeyValueBinding.h>
++
++@interface Owner : NSObject
++{
++  NSMutableSet   *members;
++  NSMutableArray *list;
++}
++@end
++
++@implementation Owner
++- (id) init
++{
++  if ((self = [super init]) != nil)
++    {
++      members = [[NSMutableSet alloc] initWithObjects: @"first", nil];
++      list = [[NSMutableArray alloc] initWithObjects: @"first", nil];
++    }
++  return self;
++}
++- (void) dealloc
++{
++  RELEASE(members);
++  RELEASE(list);
++  [super dealloc];
++}
++- (NSSet *) members { return members; }
++- (void) addMembersObject: (id)object { [members addObject: object]; }
++- (void) removeMembersObject: (id)object { [members removeObject: object]; }
++- (NSArray *) list { return list; }
++- (NSUInteger) countOfList { return [list count]; }
++- (id) objectInListAtIndex: (NSUInteger)i { return [list objectAtIndex: i]; }
++- (void) insertObject: (id)object inListAtIndex: (NSUInteger)i { [list insertObject: object atIndex: i]; }
++- (void) removeObjectFromListAtIndex: (NSUInteger)i { [list removeObjectAtIndex: i]; }
++@end
++
++int main()
++{
++  START_SET("NSArrayController content binding mutations")
++  Owner *owner = AUTORELEASE([[Owner alloc] init]);
++  NSArrayController *ac;
++
++  ac = AUTORELEASE([[NSArrayController alloc] init]);
++  [ac bind: NSContentSetBinding toObject: owner withKeyPath: @"members" options: nil];
++  PASS([[ac arrangedObjects] count] == 1, "a set binding shows the set");
++
++  [[owner mutableSetValueForKey: @"members"] addObject: @"second"];
++  PASS([[ac arrangedObjects] count] == 2, "a member added to the set: both show");
++  PASS([[ac arrangedObjects] containsObject: @"first"]
++    && [[ac arrangedObjects] containsObject: @"second"],
++    "the one there and the one added");
++
++  [[owner mutableSetValueForKey: @"members"] removeObject: @"first"];
++  PASS([[ac arrangedObjects] count] == 1
++    && [[[ac arrangedObjects] lastObject] isEqual: @"second"],
++    "a member taken off the set: the rest show");
++
++  ac = AUTORELEASE([[NSArrayController alloc] init]);
++  [ac bind: NSContentArrayBinding toObject: owner withKeyPath: @"list" options: nil];
++  [[owner mutableArrayValueForKey: @"list"] addObject: @"second"];
++  PASS([[ac arrangedObjects] count] == 2, "an object inserted into the array: both show");
++
++  END_SET("NSArrayController content binding mutations")
++  return 0;
++}
+-- 
+2.43.0
+
