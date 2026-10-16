@@ -1,0 +1,290 @@
+From 5755ecabdaa72b06ef958e2b64019222d86cf1ac Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Fri, 16 Oct 2026 05:28:48 +0000
+Subject: [PATCH] Copying a set, an array or an ordered set does not copy its
+ members
+
+-[NSSet copyWithZone:], -[NSArray copyWithZone:] and
+-[NSOrderedSet copyWithZone:] made the copy with copyItems: YES, so
+copying an instance of a subclass of one of them sent -copy to every
+member.  The concrete classes override the method and copy shallowly,
+so this was seen only with a subclass - but there, a member that is
+not NSCopying raised, and one that is was replaced by a copy.  Apple
+copies a collection shallowly whatever its class (checked on macOS 15
+with a subclass of each, whose member does not conform to NSCopying),
+and so does -[NSDictionary copyWithZone:] here already.
+
+Key-value observing copies the old value of a set when an observer
+asks for old values and a set mutation is announced
+(-willChangeValueForKey:withSetMutation:usingObjects:).  A to-many
+relationship of a Core Data object is a subclass of NSMutableSet, and
+its members do not conform to NSCopying, so announcing that members were
+removed raised for any observer with NSKeyValueObservingOptionOld.
+
+Each test fails both its checks without the change.
+---
+ Source/NSArray.m                       |  2 +-
+ Source/NSOrderedSet.m                  |  2 +-
+ Source/NSSet.m                         |  2 +-
+ Tests/base/NSArray/copySubclass.m      | 62 ++++++++++++++++++++++++
+ Tests/base/NSOrderedSet/copySubclass.m | 66 ++++++++++++++++++++++++++
+ Tests/base/NSSet/copySubclass.m        | 66 ++++++++++++++++++++++++++
+ 6 files changed, 197 insertions(+), 3 deletions(-)
+ create mode 100644 Tests/base/NSArray/copySubclass.m
+ create mode 100644 Tests/base/NSOrderedSet/copySubclass.m
+ create mode 100644 Tests/base/NSSet/copySubclass.m
+
+diff --git a/Source/NSArray.m b/Source/NSArray.m
+index c8711d7..fb39944 100644
+--- a/Source/NSArray.m
++++ b/Source/NSArray.m
+@@ -408,7 +408,7 @@ static SEL	rlSel;
+ {
+   NSArray	*copy = [NSArrayClass allocWithZone: zone];
+ 
+-  return [copy initWithArray: self copyItems: YES];
++  return [copy initWithArray: self copyItems: NO];
+ }
+ 
+ - (NSUInteger) count
+diff --git a/Source/NSOrderedSet.m b/Source/NSOrderedSet.m
+index c046e4d..480f9ca 100644
+--- a/Source/NSOrderedSet.m
++++ b/Source/NSOrderedSet.m
+@@ -206,7 +206,7 @@ static SEL	remSel;
+ - (id) copyWithZone: (NSZone*)zone
+ {
+   NSOrderedSet	*copy = [NSOrderedSet_concrete_class allocWithZone: zone];
+-  return [copy initWithOrderedSet: self copyItems: YES];
++  return [copy initWithOrderedSet: self copyItems: NO];
+ }
+ 
+ - (id) mutableCopyWithZone: (NSZone*)zone
+diff --git a/Source/NSSet.m b/Source/NSSet.m
+index 48560db..61b99c6 100644
+--- a/Source/NSSet.m
++++ b/Source/NSSet.m
+@@ -158,7 +158,7 @@ static Class NSMutableSet_concrete_class;
+ {
+   NSSet	*copy = [NSSet_concrete_class allocWithZone: z];
+ 
+-  return [copy initWithSet: self copyItems: YES];
++  return [copy initWithSet: self copyItems: NO];
+ }
+ 
+ /**
+diff --git a/Tests/base/NSArray/copySubclass.m b/Tests/base/NSArray/copySubclass.m
+new file mode 100644
+index 0000000..c9f5bf4
+--- /dev/null
++++ b/Tests/base/NSArray/copySubclass.m
+@@ -0,0 +1,62 @@
++#import "ObjectTesting.h"
++#import <Foundation/NSAutoreleasePool.h>
++#import <Foundation/NSArray.h>
++#import <Foundation/NSEnumerator.h>
++#import <Foundation/NSException.h>
++
++@interface Uncopyable : NSObject
++@end
++@implementation Uncopyable
++@end
++
++/* Not the concrete class, so copying it goes through NSArray's own
++ * -copyWithZone:.
++ */
++@interface WrappedArray : NSArray
++{
++  NSArray *backing;
++}
++- (id) initWithBacking: (NSArray*)aBacking;
++@end
++@implementation WrappedArray
++- (id) initWithBacking: (NSArray*)aBacking
++{
++  backing = [aBacking retain];
++  return self;
++}
++- (void) dealloc
++{
++  [backing release];
++  [super dealloc];
++}
++- (NSUInteger) count
++{
++  return [backing count];
++}
++- (id) objectAtIndex: (NSUInteger)index
++{
++  return [backing objectAtIndex: index];
++}
++@end
++
++int main()
++{
++  NSAutoreleasePool *arp = [NSAutoreleasePool new];
++  Uncopyable        *item = [[Uncopyable new] autorelease];
++  NSArray             *original;
++  NSArray             *copy = nil;
++
++  original = [[[WrappedArray alloc] initWithBacking:
++    [NSArray arrayWithObject: item]] autorelease];
++  NS_DURING
++    copy = [[original copy] autorelease];
++  NS_HANDLER
++    copy = nil;
++  NS_ENDHANDLER
++  PASS(copy != nil, "a copy does not copy the members of a subclass of NSArray");
++  PASS([copy count] == 1 && [copy objectAtIndex: 0] == item,
++    "a copy of a subclass of NSArray holds the same members");
++
++  [arp release]; arp = nil;
++  return 0;
++}
+diff --git a/Tests/base/NSOrderedSet/copySubclass.m b/Tests/base/NSOrderedSet/copySubclass.m
+new file mode 100644
+index 0000000..bfe2f51
+--- /dev/null
++++ b/Tests/base/NSOrderedSet/copySubclass.m
+@@ -0,0 +1,66 @@
++#import "ObjectTesting.h"
++#import <Foundation/NSAutoreleasePool.h>
++#import <Foundation/NSOrderedSet.h>
++#import <Foundation/NSEnumerator.h>
++#import <Foundation/NSException.h>
++
++@interface Uncopyable : NSObject
++@end
++@implementation Uncopyable
++@end
++
++/* Not the concrete class, so copying it goes through NSOrderedSet's own
++ * -copyWithZone:.
++ */
++@interface WrappedOrderedSet : NSOrderedSet
++{
++  NSOrderedSet *backing;
++}
++- (id) initWithBacking: (NSOrderedSet*)aBacking;
++@end
++@implementation WrappedOrderedSet
++- (id) initWithBacking: (NSOrderedSet*)aBacking
++{
++  backing = [aBacking retain];
++  return self;
++}
++- (void) dealloc
++{
++  [backing release];
++  [super dealloc];
++}
++- (NSUInteger) count
++{
++  return [backing count];
++}
++- (id) objectAtIndex: (NSUInteger)index
++{
++  return [backing objectAtIndex: index];
++}
++- (NSUInteger) indexOfObject: (id)anObject
++{
++  return [backing indexOfObject: anObject];
++}
++@end
++
++int main()
++{
++  NSAutoreleasePool *arp = [NSAutoreleasePool new];
++  Uncopyable        *item = [[Uncopyable new] autorelease];
++  NSOrderedSet             *original;
++  NSOrderedSet             *copy = nil;
++
++  original = [[[WrappedOrderedSet alloc] initWithBacking:
++    [NSOrderedSet orderedSetWithObject: item]] autorelease];
++  NS_DURING
++    copy = [[original copy] autorelease];
++  NS_HANDLER
++    copy = nil;
++  NS_ENDHANDLER
++  PASS(copy != nil, "a copy does not copy the members of a subclass of NSOrderedSet");
++  PASS([copy count] == 1 && [copy objectAtIndex: 0] == item,
++    "a copy of a subclass of NSOrderedSet holds the same members");
++
++  [arp release]; arp = nil;
++  return 0;
++}
+diff --git a/Tests/base/NSSet/copySubclass.m b/Tests/base/NSSet/copySubclass.m
+new file mode 100644
+index 0000000..87d7fce
+--- /dev/null
++++ b/Tests/base/NSSet/copySubclass.m
+@@ -0,0 +1,66 @@
++#import "ObjectTesting.h"
++#import <Foundation/NSAutoreleasePool.h>
++#import <Foundation/NSSet.h>
++#import <Foundation/NSEnumerator.h>
++#import <Foundation/NSException.h>
++
++@interface Uncopyable : NSObject
++@end
++@implementation Uncopyable
++@end
++
++/* Not the concrete class, so copying it goes through NSSet's own
++ * -copyWithZone:.
++ */
++@interface WrappedSet : NSSet
++{
++  NSSet *backing;
++}
++- (id) initWithBacking: (NSSet*)aBacking;
++@end
++@implementation WrappedSet
++- (id) initWithBacking: (NSSet*)aBacking
++{
++  backing = [aBacking retain];
++  return self;
++}
++- (void) dealloc
++{
++  [backing release];
++  [super dealloc];
++}
++- (NSUInteger) count
++{
++  return [backing count];
++}
++- (id) member: (id)anObject
++{
++  return [backing member: anObject];
++}
++- (NSEnumerator*) objectEnumerator
++{
++  return [backing objectEnumerator];
++}
++@end
++
++int main()
++{
++  NSAutoreleasePool *arp = [NSAutoreleasePool new];
++  Uncopyable        *item = [[Uncopyable new] autorelease];
++  NSSet             *original;
++  NSSet             *copy = nil;
++
++  original = [[[WrappedSet alloc] initWithBacking:
++    [NSSet setWithObject: item]] autorelease];
++  NS_DURING
++    copy = [[original copy] autorelease];
++  NS_HANDLER
++    copy = nil;
++  NS_ENDHANDLER
++  PASS(copy != nil, "a copy does not copy the members of a subclass of NSSet");
++  PASS([copy count] == 1 && [copy anyObject] == item,
++    "a copy of a subclass of NSSet holds the same members");
++
++  [arp release]; arp = nil;
++  return 0;
++}
+-- 
+2.43.0
+

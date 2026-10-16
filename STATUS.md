@@ -267,6 +267,7 @@ gnustep-coredata (now FreeCoreData), listed for two of them, holds no copy.
 | `autoreleased-return-value` | libobjc2 | test | [#426](https://github.com/gnustep/libobjc2/pull/426) closed unmerged | (none: ODataStore works around it) |
 | `predicate-secure-coding` | libs-base | test | not sent yet ([#766](https://github.com/gnustep/libs-base/issues/766)) | (none: FreeCoreData will use it from here) |
 | `arc4random-glibc` | libs-base | test | not sent yet | (none: every app built on the stack uses it from here; HomeRow's and UDCalc's shims are gone) |
+| `collection-copy-is-shallow` | libs-base | test | not sent yet | (none: FreeCoreData uses it from here) |
 | `tableview-column-autoresizing-style` | libs-gui | test | [#982](https://github.com/gnustep/libs-gui/pull/982) | gnustep-coredata |
 | `collectionview-make-item` | libs-gui | test | [#1001](https://github.com/gnustep/libs-gui/pull/1001) | (none: TopoText uses it from here) |
 | `collectionview-flow-layout` | libs-gui | test | [#1002](https://github.com/gnustep/libs-gui/pull/1002) | (none: TopoText uses it from here) |
@@ -428,6 +429,23 @@ returned mutable. `binaryPropertyLists.m` fails five of its ten checks
 without the fix; `NSDictionary` (143), `NSArray` (139),
 `NSMutableDictionary` (68), `NSPropertyList` (29), `PropertyLists` (133)
 and `NSUserDefaults` (94) pass with all libs-base patches applied in order.
+
+Added on 2026-10-16 against `libs-base` e00f6dc: `collection-copy-is-shallow`.
+`-copyWithZone:` of `NSSet`, `NSArray` and `NSOrderedSet` made the copy
+with `copyItems: YES`, so copying a subclass of one of them copied every
+member, and raised for a member that is not `NSCopying`.  Apple copies a
+collection shallowly whatever its class, as `NSDictionary` here already
+did.  Found by FreeCoreData
+([#83](https://github.com/ashalkhakov/FreeCoreData/issues/83)): a to-many
+relationship's value is a subclass of `NSMutableSet`, so key-value
+observing, which copies the old set when members are removed, raised for
+an observer that asks for old values.  `NSCountedSet` copies its members
+too, and is left as it is: nothing found it.  Each new `copySubclass.m`
+fails both its checks without the fix; `NSSet` (130), `NSArray` (141),
+`NSOrderedSet` (960), `NSPredicate` (386) and `NSKVOSupport` (518) pass
+with all libs-base patches applied in order, and the whole base suite
+passes but for `GSMime/encoded-word-stack.m`, which aborts without the
+patch too.
 
 Where the column says **test**, the patch adds a test to the project's own
 suite (`Tests/base/...`, run by `gnustep-tests`), so the fix and the thing
