@@ -1,0 +1,336 @@
+From 578657818ca6ee9c2eff56fb44ca9ba062a3ef4f Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Fri, 16 Oct 2026 10:43:12 +0000
+Subject: [PATCH] NSXMLNode: copies and detached trees resolve their namespaces
+ where inserted
+
+A tree taken out of its document, or a copy of one, mishandled the
+namespaces it used and that were declared above it.
+
+-copy made the copy with xmlCopyNode(), which leaves the copy in no
+document, its names possibly still the original document's, and with a
+declaration of its own for each namespace declared above the original.
+Inserting a copy of a parsed node's children into another element freed
+strings libxml2 keeps in the parsed document's dictionary (an invalid
+free, then a crash), and the copies went into the document each with a
+redundant declaration.  A copy now gets a document of its own, as a
+detached node does, and the declarations xmlCopyNode() made for it are
+kept as that document's placeholders, to be resolved where the copy is
+inserted.  Apple's copy declares only what the original declared itself.
+
+-detach moved the tree to a document of its own but left its nodes bound
+to declarations in the document it left.  Put into another detached
+element, a node bound so got a declaration of its own, which stayed when
+the trees went back into the document; and the binding pointed into a
+document the tree no longer belonged to.  Detaching now binds such nodes
+to placeholders of the tree's own document.
+
+On insertion, a placeholder with a namespace URI is now bound to the
+declaration in scope with the same prefix and URI, as one without a URI
+already was.  And -attributeForName: finds a prefixed attribute of an
+element out of a tree, whose namespace is declared nowhere in scope, as
+Apple's does.
+
+The tests check a copy of a parsed element's children moved into the
+document, an element put into a detached one and put back, a detached
+element's prefixed attribute, and what a copy declares.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/NSXMLElement.m                     |  15 ++-
+ Source/NSXMLNode.m                        | 126 ++++++++++++++++++++++
+ Tests/base/NSXMLNode/copyInsert.m         |  37 +++++++
+ Tests/base/NSXMLNode/detachedNamespaces.m |  47 ++++++++
+ 4 files changed, 223 insertions(+), 2 deletions(-)
+ create mode 100644 Tests/base/NSXMLNode/copyInsert.m
+ create mode 100644 Tests/base/NSXMLNode/detachedNamespaces.m
+
+diff --git a/Source/NSXMLElement.m b/Source/NSXMLElement.m
+index 3498592..8f57e2b 100644
+--- a/Source/NSXMLElement.m
++++ b/Source/NSXMLElement.m
+@@ -516,14 +516,25 @@ searchPlaceholderNs(xmlNodePtr node, const xmlChar *prefix)
+   if ((nil != prefix) && [prefix length] > 0)
+     {
+       NSXMLNode *ns = [self namespaceForPrefix: prefix];
++      NSString *localName = [[self class] localNameForName: name];
++      xmlAttrPtr attribute;
+ 
+       if (nil != ns)
+         {
+-          NSString *localName = [[self class] localNameForName: name];
+-
+           // Namespace nodes have the URI as their stringValue
+           return [self attributeForLocalName: localName URI: [ns stringValue]];
+         }
++      /* Out of a tree, its namespace may be declared nowhere in scope. */
++      for (attribute = internal->node.node->properties; attribute != NULL;
++        attribute = attribute->next)
++        {
++          if (attribute->ns != NULL
++            && xmlStrEqual(attribute->ns->prefix, XMLSTRING(prefix))
++            && xmlStrEqual(attribute->name, XMLSTRING(localName)))
++            {
++              return [NSXMLNode _objectForNode: (xmlNodePtr)attribute];
++            }
++        }
+     }
+ 
+   {
+diff --git a/Source/NSXMLNode.m b/Source/NSXMLNode.m
+index de95ac3..e3e3b25 100644
+--- a/Source/NSXMLNode.m
++++ b/Source/NSXMLNode.m
+@@ -313,6 +313,70 @@ rebind_ns(xmlNodePtr node, xmlNsPtr from, xmlNsPtr to, BOOL siblings)
+     }
+ }
+ 
++/* Whether ns is declared on node, or on an element above it.
++ */
++static BOOL
++ns_declared_above(xmlNodePtr node, xmlNsPtr ns)
++{
++  if (node != NULL && node->type == XML_ATTRIBUTE_NODE)
++    {
++      node = node->parent;
++    }
++  for (; node != NULL && node->type == XML_ELEMENT_NODE; node = node->parent)
++    {
++      xmlNsPtr cur;
++
++      for (cur = node->nsDef; cur != NULL; cur = cur->next)
++        {
++          if (cur == ns)
++            {
++              return YES;
++            }
++        }
++    }
++  return NO;
++}
++
++/* Bind each node of a tree taken out of its document to a placeholder of
++ * the tree's new document, where its namespace was declared outside the
++ * tree: inserted again, the placeholder is resolved where it goes.
++ */
++static void
++keep_outside_ns(xmlNodePtr top, xmlNodePtr node, BOOL siblings)
++{
++  while (node != NULL)
++    {
++      if ((node->type == XML_ELEMENT_NODE || node->type == XML_ATTRIBUTE_NODE)
++        && node->ns != NULL && !ns_declared_above(node, node->ns))
++        {
++          xmlNsPtr      ns;
++
++          ensure_oldNs(top);
++          for (ns = top->doc->oldNs; ns != NULL; ns = ns->next)
++            {
++              if (xmlStrEqual(ns->prefix, node->ns->prefix)
++                && xmlStrEqual(ns->href, node->ns->href))
++                {
++                  break;
++                }
++            }
++          if (ns == NULL)
++            {
++              ns = xmlNewNs(NULL, node->ns->href, node->ns->prefix);
++              ns->next = top->doc->oldNs->next;
++              top->doc->oldNs->next = ns;
++            }
++          node->ns = ns;
++        }
++      if (node->type == XML_ELEMENT_NODE)
++        {
++          keep_outside_ns(top, (xmlNodePtr)node->properties, YES);
++          keep_outside_ns(top, node->children, YES);
++        }
++      node = siblings ? node->next : NULL;
++    }
++}
++
+ /* Declare on parent a copy of each of its document's placeholders that
+  * nothing in scope there binds, and return how many it declared.
+  */
+@@ -954,6 +1018,18 @@ isEqualTree(xmlNodePtr nodeA, xmlNodePtr nodeB)
+                       resolved = YES;
+                     }
+                 }
++              else
++                {
++                  xmlNsPtr ns1;
++
++                  /* Bound to the same namespace declared where it goes. */
++                  ns1 = xmlSearchNs(parentNode->doc, parentNode, ns->prefix);
++                  if (ns1 != NULL && xmlStrEqual(ns1->href, ns->href))
++                    {
++                      cleanup_namespaces(childNode, ns1);
++                      resolved = YES;
++                    }
++                }
+               /*
+               else if (ns->prefix == NULL)
+                 {
+@@ -1640,6 +1716,55 @@ execute_xpath(xmlNodePtr node, NSString *xpath_exp, NSDictionary *constants,
+   clearPrivatePointers(newNode);
+ 
+   c = [c _initWithNode: newNode kind: internal->kind];
++  if (newNode->type == XML_ELEMENT_NODE || newNode->type == XML_ATTRIBUTE_NODE
++    || newNode->type == XML_TEXT_NODE || newNode->type == XML_CDATA_SECTION_NODE
++    || newNode->type == XML_COMMENT_NODE || newNode->type == XML_PI_NODE)
++    {
++      xmlNodePtr	original = [self _node];
++      xmlNsPtr		*link;
++
++      /* Out of the tree, the copy has a document of its own, as a detached
++       * node has: one inserted elsewhere gives that document up. */
++      if (newNode->doc != NULL)
++        {
++          GSIVar(c, detached) = xmlNewDoc((xmlChar *)"1.0");
++          setTreeDoc(newNode, GSIVar(c, detached));
++        }
++      else if (ensure_oldNs(newNode))
++        {
++          GSIVar(c, detached) = newNode->doc;
++        }
++
++      /* The declarations xmlCopyNode() made for namespaces declared above
++       * the original are no declarations of the copy: they are left to be
++       * resolved where the copy is inserted, as a detached node's are. */
++      link = &newNode->nsDef;
++      while (newNode->type == XML_ELEMENT_NODE && *link != NULL)
++        {
++          xmlNsPtr	cur = *link;
++          xmlNsPtr	own;
++
++          for (own = original->nsDef; own != NULL; own = own->next)
++            {
++              if (xmlStrEqual(own->prefix, cur->prefix)
++                && xmlStrEqual(own->href, cur->href))
++                {
++                  break;
++                }
++            }
++          if (own != NULL)
++            {
++              link = &cur->next;
++              continue;
++            }
++          *link = cur->next;
++          cur->next = NULL;
++          ensure_oldNs(newNode);
++          for (own = newNode->doc->oldNs; own->next != NULL; own = own->next)
++            ;
++          own->next = cur;
++        }
++    }
+ 
+   GSIVar(c, options) = internal->options;
+   if (nil != internal->objectValue)
+@@ -1778,6 +1903,7 @@ execute_xpath(xmlNodePtr node, NSString *xpath_exp, NSDictionary *constants,
+ 	       */
+               xmlUnlinkNode(theNode);
+               setTreeDoc(theNode, internal->detached);
++              keep_outside_ns(theNode, theNode, NO);
+             }
+           else
+             {
+diff --git a/Tests/base/NSXMLNode/copyInsert.m b/Tests/base/NSXMLNode/copyInsert.m
+new file mode 100644
+index 0000000..6fa433e
+--- /dev/null
++++ b/Tests/base/NSXMLNode/copyInsert.m
+@@ -0,0 +1,37 @@
++#import <Foundation/Foundation.h>
++#import "Testing.h"
++
++int main()
++{
++  NSAutoreleasePool *arp = [NSAutoreleasePool new];
++  NSString *text = @"<a:R xmlns:a=\"urn:x\"><a:T id=\"1\"><a:N>n</a:N><a:M/></a:T></a:R>";
++  NSXMLDocument *doc;
++  NSXMLElement *t;
++  NSXMLElement *replacement;
++  NSEnumerator *e;
++  NSXMLNode *node;
++
++  doc = [[[NSXMLDocument alloc] initWithXMLString: text options: 0 error: NULL] autorelease];
++  t = (NSXMLElement *)[[doc rootElement] childAtIndex: 0];
++  replacement = [[[NSXMLElement alloc] initWithName: @"a:U" URI: @"urn:x"] autorelease];
++  e = [[t attributes] objectEnumerator];
++  while ((node = [e nextObject]) != nil)
++    {
++      [replacement addAttribute: [[node copy] autorelease]];
++    }
++  e = [[t children] objectEnumerator];
++  while ((node = [e nextObject]) != nil)
++    {
++      [replacement addChild: [[node copy] autorelease]];
++    }
++  [[doc rootElement] insertChild: replacement atIndex: [t index]];
++  [t detach];
++  PASS_EQUAL([[doc rootElement] XMLString],
++    @"<a:R xmlns:a=\"urn:x\"><a:U id=\"1\"><a:N>n</a:N><a:M></a:M></a:U></a:R>",
++    "copies of a parsed element's attributes and children move into another element and the document")
++  PASS_EQUAL([t XMLString], @"<a:T id=\"1\"><a:N>n</a:N><a:M></a:M></a:T>",
++    "the element copied from keeps what it had")
++
++  [arp release]; arp = nil;
++  return 0;
++}
+diff --git a/Tests/base/NSXMLNode/detachedNamespaces.m b/Tests/base/NSXMLNode/detachedNamespaces.m
+new file mode 100644
+index 0000000..e954a6a
+--- /dev/null
++++ b/Tests/base/NSXMLNode/detachedNamespaces.m
+@@ -0,0 +1,47 @@
++#import <Foundation/Foundation.h>
++#import "Testing.h"
++
++int main()
++{
++  NSAutoreleasePool *arp = [NSAutoreleasePool new];
++  NSString *text = @"<a:R xmlns:a=\"urn:x\"><a:T a:k=\"v\"><a:N>n</a:N></a:T><b:S xmlns:b=\"urn:y\"/></a:R>";
++  NSXMLDocument *doc;
++  NSXMLElement *t;
++  NSXMLElement *p;
++  NSXMLElement *q;
++  NSXMLElement *copy;
++
++  doc = [[[NSXMLDocument alloc] initWithXMLString: text options: 0 error: NULL] autorelease];
++  t = (NSXMLElement *)[[doc rootElement] childAtIndex: 0];
++
++  /* Built while out of the tree, from parts taken out of it. */
++  p = [[[NSXMLElement alloc] initWithName: @"a:P" URI: @"urn:x"] autorelease];
++  [t addChild: p];
++  q = [[[NSXMLElement alloc] initWithName: @"a:Q" URI: @"urn:x"] autorelease];
++  [p addChild: q];
++  [p detach];
++  [q detach];
++  [p addChild: q];
++  [t addChild: p];
++  PASS_EQUAL([p XMLString], @"<a:P><a:Q></a:Q></a:P>",
++    "an element put into a detached one declares nothing when they are put back")
++  PASS_EQUAL([q URI], @"urn:x", "and it is still in its namespace")
++
++  /* Taken out, it still knows its namespaces. */
++  [t detach];
++  PASS_EQUAL([[t attributeForName: @"a:k"] stringValue], @"v",
++    "a detached element finds its attribute by its prefixed name")
++  [[doc rootElement] insertChild: t atIndex: 0];
++
++  /* A copy does not declare what was declared above the original. */
++  copy = [[t copy] autorelease];
++  PASS_EQUAL([copy XMLString], @"<a:T a:k=\"v\"><a:N>n</a:N><a:P><a:Q></a:Q></a:P></a:T>",
++    "a copy declares no namespace declared above the original")
++  PASS_EQUAL([copy URI], @"urn:x", "a copy is in the original's namespace")
++  copy = [[[[doc rootElement] childAtIndex: 1] copy] autorelease];
++  PASS_EQUAL([copy XMLString], @"<b:S xmlns:b=\"urn:y\"></b:S>",
++    "a copy keeps the original's own declaration")
++
++  [arp release]; arp = nil;
++  return 0;
++}
+-- 
+2.43.0
+
