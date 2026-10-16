@@ -1,0 +1,79 @@
+From 6a66a3a526a540875dfdb4151b1fb982d13b488d Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Fri, 16 Oct 2026 10:35:32 +0000
+Subject: [PATCH] NSValue: a nonretained object value is equal to another of
+ the same object
+
+-[NSValue valueWithNonretainedObject:] gave a value that compared the
+objects with -isEqual: and hashed them with -hash.  Apple compares and
+hashes the pointer: such a value is how an object is used as a key by
+identity, without retaining it.  Two distinct objects that are equal
+(two NSXMLNodes of the same content, two mutable strings) passed for one,
+so a set of such values lost members and a map keyed by them mixed them
+up.
+
+Compare and hash the pointers.  The test checks that values of distinct
+but equal objects stay apart, in a set too, and that values of one object
+are equal and hash alike.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/GSConcreteValueTemplate.m |  4 ++--
+ Tests/base/NSValue/nonretained.m | 23 +++++++++++++++++++++++
+ 2 files changed, 25 insertions(+), 2 deletions(-)
+ create mode 100644 Tests/base/NSValue/nonretained.m
+
+diff --git a/Source/GSConcreteValueTemplate.m b/Source/GSConcreteValueTemplate.m
+index 9e7fa12..2335013 100644
+--- a/Source/GSConcreteValueTemplate.m
++++ b/Source/GSConcreteValueTemplate.m
+@@ -144,7 +144,7 @@
+     {
+       _dt	val = [aValue TYPE_METHOD];
+ #if TYPE_ORDER == 0
+-      return [data isEqual: val];
++      return data == val;
+ #elif TYPE_ORDER == 1
+       if (data.x == val.x && data.y == val.y)
+ 	return YES;
+@@ -186,7 +186,7 @@
+ - (NSUInteger) hash
+ {
+ #if TYPE_ORDER == 0
+-  return [data hash];
++  return (NSUInteger)(uintptr_t)data;
+ #elif TYPE_ORDER == 1
+   union {
+     double d;
+diff --git a/Tests/base/NSValue/nonretained.m b/Tests/base/NSValue/nonretained.m
+new file mode 100644
+index 0000000..81809f8
+--- /dev/null
++++ b/Tests/base/NSValue/nonretained.m
+@@ -0,0 +1,23 @@
++#import <Foundation/Foundation.h>
++#import "Testing.h"
++
++int main()
++{
++  NSAutoreleasePool *arp = [NSAutoreleasePool new];
++  NSString *a = [NSMutableString stringWithString: @"x"];
++  NSString *b = [NSMutableString stringWithString: @"x"];
++  NSValue *va = [NSValue valueWithNonretainedObject: a];
++  NSValue *vb = [NSValue valueWithNonretainedObject: b];
++
++  PASS([va isEqual: [NSValue valueWithNonretainedObject: a]],
++    "values of the same nonretained object are equal")
++  PASS([va hash] == [[NSValue valueWithNonretainedObject: a] hash],
++    "values of the same nonretained object have the same hash")
++  PASS(![va isEqual: vb],
++    "values of distinct but equal nonretained objects are not equal")
++  PASS(([[NSSet setWithObjects: va, vb, nil] count]) == 2,
++    "a set keeps values of distinct but equal nonretained objects apart")
++
++  [arp release]; arp = nil;
++  return 0;
++}
+-- 
+2.43.0
+
