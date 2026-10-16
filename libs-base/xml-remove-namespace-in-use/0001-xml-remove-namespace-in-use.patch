@@ -1,0 +1,157 @@
+From b6493195bd6f953a92d51af8c6d89eccf96caf67 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Fri, 16 Oct 2026 16:48:57 +0000
+Subject: [PATCH] NSXMLElement: removing a namespace declaration in use leaves
+ no dangling pointers
+
+-removeNamespaceForPrefix: unlinked the declaration from the element and
+freed it, clearing only the element's own ns pointer.  Descendant
+elements and attributes in that namespace kept pointing at the freed
+xmlNs, so asking for their URI, name or XMLString, or detaching them
+(which copies the namespace into the detached tree), read freed memory.
+AddressSanitizer reports it as a heap-use-after-free in xmlStrdup under
+xmlNewNs, reached from -[NSXMLNode detach].
+
+Before freeing it, point every user in the subtree -- the element, its
+attributes, its descendants and theirs -- at a declaration of the same
+prefix and URI in scope above the element when there is one, and
+otherwise at a placeholder kept in the document's oldNs list, as a
+detached tree's nodes are.  Inserting the node again resolves the
+placeholder against the declarations in scope there.
+
+The test frees the declaration and then adds others, so that the
+allocator hands its memory to them: without the fix the element, its
+child and its attribute report another namespace, and the element
+another prefix.
+---
+ Source/NSXMLElement.m                         | 56 +++++++++++++++++--
+ .../base/NSXMLElement/removeNamespaceInUse.m  | 43 ++++++++++++++
+ 2 files changed, 95 insertions(+), 4 deletions(-)
+ create mode 100644 Tests/base/NSXMLElement/removeNamespaceInUse.m
+
+diff --git a/Source/NSXMLElement.m b/Source/NSXMLElement.m
+index 8f57e2b..3e821a0 100644
+--- a/Source/NSXMLElement.m
++++ b/Source/NSXMLElement.m
+@@ -635,6 +635,57 @@ searchPlaceholderNs(xmlNodePtr node, const xmlChar *prefix)
+   cleanup_namespaces(theNode, ns);
+ }
+ 
++/* The declaration in scope above node, else a placeholder in the document. */
++static xmlNsPtr
++replacement_ns(xmlNodePtr node, xmlNsPtr ns)
++{
++  xmlNsPtr      found;
++
++  found = xmlSearchNs(node->doc, node->parent, ns->prefix);
++  if (found != NULL && xmlStrEqual(found->href, ns->href))
++    {
++      return found;
++    }
++  if (node->doc == NULL || xmlSearchNs(node->doc, node, (const xmlChar *)"xml") == NULL)
++    {
++      return NULL;
++    }
++  for (found = node->doc->oldNs; found != NULL; found = found->next)
++    {
++      if (xmlStrEqual(found->prefix, ns->prefix) && xmlStrEqual(found->href, ns->href))
++        {
++          return found;
++        }
++    }
++  found = xmlNewNs(NULL, ns->href, ns->prefix);
++  found->next = node->doc->oldNs->next;
++  node->doc->oldNs->next = found;
++  return found;
++}
++
++/* Point the tree's users of one namespace at another. */
++static void
++rebind_ns(xmlNodePtr node, xmlNsPtr from, xmlNsPtr to)
++{
++  if ((node->type == XML_ELEMENT_NODE || node->type == XML_ATTRIBUTE_NODE) && node->ns == from)
++    {
++      node->ns = to;
++    }
++  if (node->type == XML_ELEMENT_NODE)
++    {
++      xmlNodePtr        child;
++
++      for (child = (xmlNodePtr)node->properties; child != NULL; child = child->next)
++        {
++          rebind_ns(child, from, to);
++        }
++      for (child = node->children; child != NULL; child = child->next)
++        {
++          rebind_ns(child, from, to);
++        }
++    }
++}
++
+ - (void) removeNamespaceForPrefix: (NSString*)name
+ {
+   xmlNodePtr theNode = internal->node.node;
+@@ -659,10 +710,7 @@ searchPlaceholderNs(xmlNodePtr node, const xmlChar *prefix)
+                   last->next = cur->next;
+                 }
+               cur->next = NULL;
+-              if (theNode->ns == cur)
+-                {
+-                  theNode->ns = NULL;
+-                }
++              rebind_ns(theNode, cur, replacement_ns(theNode, cur));
+               xmlFreeNs(cur);
+               return;
+             }
+diff --git a/Tests/base/NSXMLElement/removeNamespaceInUse.m b/Tests/base/NSXMLElement/removeNamespaceInUse.m
+new file mode 100644
+index 0000000..7b3f3d2
+--- /dev/null
++++ b/Tests/base/NSXMLElement/removeNamespaceInUse.m
+@@ -0,0 +1,43 @@
++#import <Foundation/Foundation.h>
++#import "Testing.h"
++
++int main()
++{
++  NSAutoreleasePool *arp = [NSAutoreleasePool new];
++  NSString *text = @"<R xmlns:a=\"urn:x\"><a:T a:k=\"v\"><a:N/></a:T></R>";
++  NSXMLDocument *doc;
++  NSXMLElement *root;
++  NSXMLElement *t;
++  NSXMLElement *n;
++  NSUInteger i;
++
++  doc = [[[NSXMLDocument alloc] initWithXMLString: text options: 0 error: NULL] autorelease];
++  root = [doc rootElement];
++  t = (NSXMLElement *)[root childAtIndex: 0];
++  n = (NSXMLElement *)[t childAtIndex: 0];
++
++  [root removeNamespaceForPrefix: @"a"];
++  /* What the declaration took is soon taken again. */
++  for (i = 0; i < 8; i++)
++    {
++      [root addNamespace: [NSXMLNode namespaceWithName:
++        [NSString stringWithFormat: @"b%lu", (unsigned long)i]
++        stringValue: [NSString stringWithFormat: @"urn:%lu", (unsigned long)i]]];
++    }
++
++  PASS_EQUAL([t URI], @"urn:x",
++    "an element keeps its namespace when its declaration is taken away")
++  PASS_EQUAL([n URI], @"urn:x", "and so does one below it")
++  PASS_EQUAL([[t attributeForName: @"a:k"] URI], @"urn:x", "and so does an attribute")
++  PASS_EQUAL([t name], @"a:T", "and the element keeps its prefix")
++
++  [t detach];
++  PASS_EQUAL([t URI], @"urn:x", "it keeps its namespace when it is then taken out")
++  [root addNamespace: [NSXMLNode namespaceWithName: @"a" stringValue: @"urn:x"]];
++  [root addChild: t];
++  PASS_EQUAL([t XMLString], @"<a:T a:k=\"v\"><a:N></a:N></a:T>",
++    "put back where its namespace is declared, it declares nothing")
++
++  [arp release];
++  return 0;
++}
+-- 
+2.43.0
+
