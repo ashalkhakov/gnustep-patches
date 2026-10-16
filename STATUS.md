@@ -270,6 +270,7 @@ gnustep-coredata (now FreeCoreData), listed for two of them, holds no copy.
 | `collection-copy-is-shallow` | libs-base | test | not sent yet | (none: FreeCoreData uses it from here) |
 | `nonretained-value-identity` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
 | `xml-detached-namespaces` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
+| `xml-remove-namespace-in-use` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
 | `tableview-column-autoresizing-style` | libs-gui | test | [#982](https://github.com/gnustep/libs-gui/pull/982) | gnustep-coredata |
 | `collectionview-make-item` | libs-gui | test | [#1001](https://github.com/gnustep/libs-gui/pull/1001) | (none: TopoText uses it from here) |
 | `collectionview-flow-layout` | libs-gui | test | [#1002](https://github.com/gnustep/libs-gui/pull/1002) | (none: TopoText uses it from here) |
