@@ -1,0 +1,186 @@
+From 35fcb593c62f64c55903355a4451aa0a64954cd8 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Fri, 16 Oct 2026 12:10:35 +0000
+Subject: [PATCH] NSTextField: a value binding shows nil and markers as the
+ placeholder
+
+A text field's value binding took the binding's placeholder for nil or a
+controller marker as the field's value: a bound number field with
+NSNullPlaceholder "1" showed "1" as if it were set, and ending its editing
+wrote that "1" back to the model. AppKit shows them as the field's
+placeholder and leaves the value empty: NSNullPlaceholder (or none) for
+nil, the marker's placeholder ("No Selection", "Multiple Values" unless
+given) for a marker, and any other value leaves the placeholder as it was.
+
+NSTextField's value binding is now a binding that does so. The test,
+Tests/gui/NSTextField/placeholderBinding.m, fails without the change and
+passes with it, and its cases were checked against AppKit on macOS.
+
+Co-authored-by: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/NSTextField.m                       | 36 ++++++++-
+ Tests/gui/NSTextField/placeholderBinding.m | 89 ++++++++++++++++++++++
+ 2 files changed, 123 insertions(+), 2 deletions(-)
+ create mode 100644 Tests/gui/NSTextField/placeholderBinding.m
+
+diff --git a/Source/NSTextField.m b/Source/NSTextField.m
+index 2ebd277..87fcb6f 100644
+--- a/Source/NSTextField.m
++++ b/Source/NSTextField.m
+@@ -50,6 +50,24 @@
+ 
+ static NSNotificationCenter *nc;
+ 
++@interface GSTextFieldValueBinding : GSKeyValueBinding
++@end
++
++@implementation GSTextFieldValueBinding
++
++- (id) transformValue: (id)value withOptions: (NSDictionary *)options
++{
++  if (NSIsControllerMarker(value) || value == nil || value == [NSNull null])
++    {
++      [src setPlaceholderString: [super transformValue: value
++                                           withOptions: options]];
++      return nil;
++    }
++  return [super transformValue: value withOptions: options];
++}
++
++@end
++
+ /*
+  * Class variables
+  */
+@@ -861,10 +879,10 @@ static Class textFieldCellClass;
+ 
+ /*
+  * Bindings implemented:
+- * alignment, hidden, editable, enabled, font, toolTip
++ * alignment, hidden, editable, enabled, font, toolTip, value
+  *
+  * Bindings left to implement:
+- * other font bindings, value, displayPatternValue1
++ * other font bindings, displayPatternValue1
+  */
+ 
+ - (void) bind: (NSString *)binding
+@@ -886,6 +904,20 @@ static Class textFieldCellClass;
+       // The binding will be retained in the binding table
+       RELEASE(kvb);
+     }
++  else if ([binding isEqual: NSValueBinding])
++    {
++      GSKeyValueBinding *kvb;
++
++      [self unbind: binding];
++      kvb = [[GSTextFieldValueBinding alloc] initWithBinding: @"objectValue"
++                                                    withName: NSValueBinding
++                                                    toObject: anObject
++                                                 withKeyPath: keyPath
++                                                     options: options
++                                                  fromObject: self];
++      // The binding will be retained in the binding table
++      RELEASE(kvb);
++    }
+   else
+     {
+       [super bind: binding
+diff --git a/Tests/gui/NSTextField/placeholderBinding.m b/Tests/gui/NSTextField/placeholderBinding.m
+new file mode 100644
+index 0000000..ed85c06
+--- /dev/null
++++ b/Tests/gui/NSTextField/placeholderBinding.m
+@@ -0,0 +1,89 @@
++/* A text field's value binding shows nil, and a controller's markers, as the
++   field's placeholder, not as its value: NSNullPlaceholder (or none) for nil,
++   the marker's placeholder ("No Selection" unless given) for a marker; any
++   other value leaves the placeholder as it was.  Checked against AppKit on
++   macOS.  The field uses the theme and font backend, so the set is skipped
++   when the backend is unavailable.
++*/
++#include "Testing.h"
++
++#include <Foundation/NSAutoreleasePool.h>
++#include <Foundation/NSDictionary.h>
++#include <Foundation/NSGeometry.h>
++#include <Foundation/NSString.h>
++
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSKeyValueBinding.h>
++#include <AppKit/NSTextField.h>
++
++int
++main(int argc, char **argv)
++{
++  START_SET("NSTextField value binding placeholders")
++
++  NS_DURING
++    {
++      [NSApplication sharedApplication];
++    }
++  NS_HANDLER
++    {
++      if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++        SKIP("It looks like GNUstep backend is not yet installed")
++    }
++  NS_ENDHANDLER
++
++  NS_DURING
++    {
++      NSMutableDictionary *model = [NSMutableDictionary dictionary];
++      NSTextField *tf;
++      NSDictionary *opts;
++
++      opts = [NSDictionary dictionaryWithObject: @"1"
++                                         forKey: NSNullPlaceholderBindingOption];
++      tf = AUTORELEASE([[NSTextField alloc]
++        initWithFrame: NSMakeRect(0, 0, 120, 22)]);
++      [tf setPlaceholderString: @"from the nib"];
++      [tf bind: NSValueBinding toObject: model withKeyPath: @"volume"
++       options: opts];
++      PASS_EQUAL([tf stringValue], @"", "nil is no value");
++      PASS_EQUAL([tf placeholderString], @"1", "nil shows the null placeholder");
++
++      [model setObject: @"5" forKey: @"volume"];
++      PASS_EQUAL([tf stringValue], @"5", "a value is the value");
++      PASS_EQUAL([tf placeholderString], @"1", "the null placeholder stays");
++
++      [model setValue: nil forKey: @"volume"];
++      PASS_EQUAL([tf stringValue], @"", "nil again is no value");
++
++      tf = AUTORELEASE([[NSTextField alloc]
++        initWithFrame: NSMakeRect(0, 0, 120, 22)]);
++      [tf setPlaceholderString: @"from the nib"];
++      [tf bind: NSValueBinding toObject: model withKeyPath: @"volume"
++       options: nil];
++      PASS_EQUAL([tf stringValue], @"",
++                 "nil without a null placeholder is no value");
++      PASS([tf placeholderString] == nil, "and no placeholder");
++
++      [model setObject: NSNoSelectionMarker forKey: @"volume"];
++      PASS_EQUAL([tf stringValue], @"", "a marker is no value");
++      PASS_EQUAL([tf placeholderString], @"No Selection",
++                 "no selection shows its placeholder");
++      [model setObject: NSMultipleValuesMarker forKey: @"volume"];
++      PASS_EQUAL([tf placeholderString], @"Multiple Values",
++                 "multiple values show theirs");
++      [model setObject: @"7" forKey: @"volume"];
++      PASS_EQUAL([tf stringValue], @"7", "a value after a marker is the value");
++      PASS_EQUAL([tf placeholderString], @"Multiple Values",
++                 "a value leaves the placeholder as it was");
++    }
++  NS_HANDLER
++    {
++      PASS(0, "unexpected exception %s",
++           [[localException description] UTF8String]);
++    }
++  NS_ENDHANDLER
++
++  END_SET("NSTextField value binding placeholders")
++
++  return 0;
++}
+-- 
+2.43.0
+
