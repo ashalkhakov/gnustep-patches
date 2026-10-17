@@ -1,0 +1,182 @@
+From 840a8ec0f971e1c71e009c3964dec4285a2f0b99 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Sat, 17 Oct 2026 18:48:21 +0000
+Subject: [PATCH] NSOpenGLView: a hidden view gives up its drawable, and draws
+ again shown
+
+On X, an NSOpenGLView draws into a window of its own (XGGLContext's
+subwindow) over the view's window.  Hiding the view, or a view it is in,
+left that window up, so it covered whatever was shown in its place - a
+text view swapped in for a GL canvas could not be seen.  A view told it
+was hidden (-viewDidHide, which -setHidden: sends down to the unhidden
+views under it) now clears its context's drawable, and shown again
+(-viewDidUnhide) is marked for display.
+
+Drawing then failed: -_lockFocusInContext:inRect: made the context
+current before giving it the view, and making a context with no view
+current raises "GL Context has no view attached".  It now gives the view
+first.  -_frameChanged: makes the context current only while it has the
+view, so a hidden view resized does not raise either.
+
+Reproduced on libs-gui fdc5cfe under Xvfb with Mesa's GLX: the new
+NSOpenGLView/hidden.m fails 3 of its 6 checks without the fix (the
+drawable kept twice, then the exception) and passes with it; the whole
+gui suite passes (4901, one dashed hope of upstream's).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/NSOpenGLView.m           | 19 ++++++-
+ Tests/gui/NSOpenGLView/hidden.m | 93 +++++++++++++++++++++++++++++++++
+ 2 files changed, 110 insertions(+), 2 deletions(-)
+ create mode 100644 Tests/gui/NSOpenGLView/hidden.m
+
+diff --git a/Source/NSOpenGLView.m b/Source/NSOpenGLView.m
+index 13c9afc..fe65155 100644
+--- a/Source/NSOpenGLView.m
++++ b/Source/NSOpenGLView.m
+@@ -212,7 +212,7 @@ static NSOpenGLPixelFormatAttribute attrs[] =
+ 
+ - (void) _frameChanged: (NSNotification *) aNot
+ {
+-  if (prepared)
++  if (prepared && [glcontext view] == self)
+     {
+       [[self openGLContext] makeCurrentContext];
+       [self update];
+@@ -228,11 +228,11 @@ static NSOpenGLPixelFormatAttribute attrs[] =
+   context = [self openGLContext];
+ 
+   [super _lockFocusInContext: ctxt inRect: rect];
+-  [context makeCurrentContext];
+   if ([context view] != self)
+     {
+       [context setView:self];
+     }
++  [context makeCurrentContext];
+   if (!prepared)
+     {
+       [self prepareOpenGL];
+@@ -241,6 +241,21 @@ static NSOpenGLPixelFormatAttribute attrs[] =
+     }
+ }
+ 
++- (void) viewDidHide
++{
++  [super viewDidHide];
++  if ([glcontext view] == self)
++    {
++      [glcontext clearDrawable];
++    }
++}
++
++- (void) viewDidUnhide
++{
++  [super viewDidUnhide];
++  [self setNeedsDisplay: YES];
++}
++
+ -(void) _viewWillMoveToWindow: (NSWindow *) newWindow
+ {
+   [super _viewWillMoveToWindow: newWindow];
+diff --git a/Tests/gui/NSOpenGLView/hidden.m b/Tests/gui/NSOpenGLView/hidden.m
+new file mode 100644
+index 0000000..fe256f0
+--- /dev/null
++++ b/Tests/gui/NSOpenGLView/hidden.m
+@@ -0,0 +1,93 @@
++#import "Testing.h"
++#import <AppKit/NSApplication.h>
++#import <AppKit/NSOpenGLView.h>
++#import <AppKit/NSOpenGL.h>
++#import <AppKit/NSWindow.h>
++
++/* A hidden NSOpenGLView, or one in a hidden view, gives up its drawable:
++   on X it is a window of its own over the view's, which would otherwise
++   stay up over whatever is shown instead.  Shown again, it draws: its
++   context takes the view before it is made current.  */
++
++int
++main(int argc, const char **argv)
++{
++  START_SET("NSOpenGLView hidden")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name] isEqualToString: @"SkipSet"])
++      [localException raise];
++    else if ([[localException name] isEqualToString: NSInternalInconsistencyException]
++      || [[localException name] isEqualToString: @"NSWindowServerCommunicationException"])
++      {
++        SKIP("It looks like GNUstep backend is not yet installed")
++      }
++    else
++      {
++        PASS(NO, "the application starts without an unexpected exception, "
++          "but %s was raised", [[localException name] UTF8String]);
++      }
++  NS_ENDHANDLER
++
++  if ([NSOpenGLView defaultPixelFormat] == nil)
++    {
++      SKIP("No OpenGL pixel format available on this display")
++    }
++
++  NS_DURING
++    {
++      NSWindow *window = AUTORELEASE([[NSWindow alloc]
++        initWithContentRect: NSMakeRect(100, 100, 200, 200)
++                  styleMask: NSTitledWindowMask
++                    backing: NSBackingStoreBuffered
++                      defer: NO]);
++      NSView *box = AUTORELEASE([[NSView alloc]
++        initWithFrame: NSMakeRect(0, 0, 200, 200)]);
++      NSOpenGLView *gl = AUTORELEASE([[NSOpenGLView alloc]
++        initWithFrame: NSMakeRect(50, 50, 100, 100)]);
++
++      [box addSubview: gl];
++      [[window contentView] addSubview: box];
++      [window orderFront: nil];
++      [window display];
++      PASS([[gl openGLContext] view] == gl, "a shown view has the drawable");
++
++      [gl setHidden: YES];
++      PASS([[gl openGLContext] view] == nil,
++        "a hidden view gives up its drawable");
++      [gl setHidden: NO];
++      [window display];
++      PASS([[gl openGLContext] view] == gl,
++        "shown again, it draws and has the drawable");
++
++      [box setHidden: YES];
++      PASS([[gl openGLContext] view] == nil,
++        "a view in a hidden view gives up its drawable");
++      [box setHidden: NO];
++      [window display];
++      PASS([[gl openGLContext] view] == gl,
++        "its superview shown again, it has the drawable");
++
++      [[gl openGLContext] clearDrawable];
++      [gl setNeedsDisplay: YES];
++      [window display];
++      PASS([[gl openGLContext] view] == gl,
++        "a view whose context has no drawable draws");
++      [window orderOut: nil];
++    }
++  NS_HANDLER
++    if ([[localException name] isEqualToString: @"SkipSet"])
++      [localException raise];
++    else
++      {
++        PASS(NO, "hiding and showing the view raises no exception, "
++          "but %s was raised: %s", [[localException name] UTF8String],
++          [[localException reason] UTF8String]);
++      }
++  NS_ENDHANDLER
++
++  END_SET("NSOpenGLView hidden")
++  return 0;
++}
+-- 
+2.43.0
+

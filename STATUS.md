@@ -321,6 +321,15 @@ fail; with it they pass, on libs-gui fdc5cfe.  The issue's third point,
 that a popover takes the keyboard, did not reproduce here: the panel cannot
 become key, and under Xvfb with no window manager the parent stays key.
 
+Added on 2026-10-17 for UDQuakeTools' GUI editor: `opengl-view-hidden`.
+On X an NSOpenGLView draws into an X window of its own over the view's,
+and hiding the view (or a view it is in) left that window up, over what
+was shown in its place.  A hidden view now clears its context's drawable;
+drawing again then raised, since -_lockFocusInContext:inRect: made the
+context current before giving it the view, which it now does first.
+`NSOpenGLView/hidden.m` fails 3 of its 6 checks without the fix and
+passes with it on libs-gui fdc5cfe, under Xvfb with Mesa's GLX.
+
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
 | `autoreleased-return-value` | libobjc2 | test | [#426](https://github.com/gnustep/libobjc2/pull/426) closed unmerged | (none: ODataStore works around it) |
@@ -335,6 +344,7 @@ become key, and under Xvfb with no window manager the parent stays key.
 | `tableview-prototype-copy` | libs-gui | test | not sent yet | (none: UDCodeKit's issues navigator is cell-based meanwhile) |
 | `tooltip-mouse-moved` | libs-gui | test | not sent yet | (none: UDCodeKit resets the flag itself) |
 | `view-overlapping-siblings` | libs-gui | test | not sent yet | (none: UDCodeKit's jump-to-line box needs it, ashalkhakov/UDCodeKit#43) |
+| `opengl-view-hidden` | libs-gui | test | not sent yet | (none: UDQuakeTools' GUI editor uses it from here; its workaround is gone) |
 | `tableview-column-autoresizing-style` | libs-gui | test | [#982](https://github.com/gnustep/libs-gui/pull/982) | gnustep-coredata |
 | `collectionview-make-item` | libs-gui | test | [#1001](https://github.com/gnustep/libs-gui/pull/1001) | (none: TopoText uses it from here) |
 | `collectionview-flow-layout` | libs-gui | test | [#1002](https://github.com/gnustep/libs-gui/pull/1002) | (none: TopoText uses it from here) |
