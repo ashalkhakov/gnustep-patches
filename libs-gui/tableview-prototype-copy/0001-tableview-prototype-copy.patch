@@ -1,0 +1,146 @@
+From 5526d8b585ffe9696e09fc66d1e40a8b4c264df9 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Sat, 17 Oct 2026 08:58:01 +0000
+Subject: [PATCH] NSTableView: make each view from a prototype whole, not by
+ -copy
+
+-makeViewWithIdentifier:owner: and the view a column falls back on made
+a view from its registered prototype with -copy, which for a view is
+shallow: the new view has none of the prototype's subviews, and its
+outlets still point into the prototype.  Every row of a view-based
+table therefore showed nothing, and text set through a cell view's
+textField went to the prototype's field, which no row shows.  The copy
+was also never released.
+
+Make each view the way AppKit does, as a new instance of the prototype:
+archive it and unarchive the result, which brings its subviews along
+and connects its outlets to them, and give it the prototype's
+identifier, which -[NSView encodeWithCoder:] does not keep.
+
+Tests/gui/NSTableView/makeViewWithIdentifier.m registers a cell view
+with a text field as a column's prototype and makes two views from it.
+Without the change five of its six checks fail (no identifier, no
+subviews, the prototype's text field); with it they pass.
+---
+ Source/NSTableView.m                          | 18 ++++-
+ .../gui/NSTableView/makeViewWithIdentifier.m  | 65 +++++++++++++++++++
+ 2 files changed, 80 insertions(+), 3 deletions(-)
+ create mode 100644 Tests/gui/NSTableView/makeViewWithIdentifier.m
+
+diff --git a/Source/NSTableView.m b/Source/NSTableView.m
+index f1c47df..4f7223e 100644
+--- a/Source/NSTableView.m
++++ b/Source/NSTableView.m
+@@ -2026,6 +2026,19 @@ static void computeNewSelection
+ @end
+ 
+ 
++/* A new view made from a prototype, with its subviews and the outlets
++ * among them, which -copy does not make.
++ */
++static NSView *
++viewFromPrototype(NSView *prototype)
++{
++  NSView	*view = [NSKeyedUnarchiver unarchiveObjectWithData:
++    [NSKeyedArchiver archivedDataWithRootObject: prototype]];
++
++  [view setIdentifier: [prototype identifier]];
++  return view;
++}
++
+ @implementation NSTableView
+ 
+ + (void) initialize
+@@ -7301,7 +7314,7 @@ For a more detailed explanation, -setSortDescriptors:. */
+ 
+   if (view != nil)
+     {
+-      view = [view copy];
++      view = viewFromPrototype(view);
+       [view awakeFromNib];
+       [owner awakeFromNib];
+     }
+@@ -7346,8 +7359,7 @@ For a more detailed explanation, -setSortDescriptors:. */
+   // it seems there is always one prototype...
+   if ([protoCellViews count] > 0)
+     {
+-      view = [protoCellViews objectAtIndex: 0];
+-      view = [view copy]; // instantiate the prototype...
++      view = viewFromPrototype([protoCellViews objectAtIndex: 0]);
+     }
+ 
+   return view;
+diff --git a/Tests/gui/NSTableView/makeViewWithIdentifier.m b/Tests/gui/NSTableView/makeViewWithIdentifier.m
+new file mode 100644
+index 0000000..03db879
+--- /dev/null
++++ b/Tests/gui/NSTableView/makeViewWithIdentifier.m
+@@ -0,0 +1,65 @@
++/* -makeViewWithIdentifier:owner: makes each view from a registered
++   prototype as a whole new view, subviews and outlets included: the text
++   field a row's cell view shows is its own, not the prototype's.  The
++   prototype is registered through its column in code, as one from a xib
++   is. */
++#import "Testing.h"
++#import <Foundation/Foundation.h>
++#import <AppKit/AppKit.h>
++
++int main()
++{
++  START_SET("NSTableView makeViewWithIdentifier:owner:")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name]
++      isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  NSTableView           *table;
++  NSTableColumn         *column;
++  NSTableCellView       *prototype;
++  NSTextField           *field;
++  NSTableCellView       *first;
++  NSTableCellView       *second;
++
++  prototype = AUTORELEASE([[NSTableCellView alloc]
++    initWithFrame: NSMakeRect(0, 0, 100, 17)]);
++  [prototype setIdentifier: @"Cell"];
++  field = AUTORELEASE([[NSTextField alloc]
++    initWithFrame: NSMakeRect(0, 0, 100, 17)]);
++  [prototype addSubview: field];
++  [prototype setTextField: field];
++
++  column = AUTORELEASE([[NSTableColumn alloc] initWithIdentifier: @"Column"]);
++  [column setValue: [NSArray arrayWithObject: prototype]
++            forKey: @"prototypeCellViews"];
++  table = AUTORELEASE([[NSTableView alloc]
++    initWithFrame: NSMakeRect(0, 0, 100, 100)]);
++  [table addTableColumn: column];
++
++  first = (NSTableCellView *)[table makeViewWithIdentifier: @"Cell"
++                                                     owner: nil];
++  second = (NSTableCellView *)[table makeViewWithIdentifier: @"Cell"
++                                                      owner: nil];
++
++  PASS(first != nil && first != prototype,
++    "a view is made from the prototype")
++  PASS_EQUAL([first identifier], @"Cell", "with the prototype's identifier")
++  PASS([[first subviews] count] == 1, "with the prototype's subviews")
++  PASS([first textField] != nil && [first textField] != field
++    && [[first subviews] containsObject: [first textField]],
++    "and its outlets connected to its own subviews")
++  PASS([first textField] != [second textField],
++    "each view made has a text field of its own")
++
++  [[first textField] setStringValue: @"first"];
++  PASS_EQUAL([field stringValue], @"",
++    "and setting it leaves the prototype alone")
++
++  END_SET("NSTableView makeViewWithIdentifier:owner:")
++  return 0;
++}
+-- 
+2.43.0
+
