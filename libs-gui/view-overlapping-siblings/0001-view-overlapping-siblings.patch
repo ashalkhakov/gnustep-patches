@@ -1,0 +1,239 @@
+From 89da5836ca9f83aeda9031a7a1866fc3da3d0e1b Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Sat, 17 Oct 2026 09:46:18 +0000
+Subject: [PATCH] NSView: draw a view stacked over a redrawn sibling again
+
+A view that overlaps a sibling stacked under it was painted over
+whenever that sibling redrew: marking a view as needing display marks
+its ancestors, but no sibling above it, so the window drew the sibling's
+invalid area and left the view on top of it as it was, under fresh
+pixels.  A box laid over a scroll view - a find bar, a "go to line"
+field - vanished as soon as the text under it redrew, on every
+keystroke.
+
+When a view's invalid area grows, also mark the part of each sibling
+stacked above it, and above each of its ancestors, that lies over that
+area.  Such a sibling is marked itself rather than through its opaque
+ancestor, whose area would be drawn before the sibling under it and so
+covered again; what is under it is being drawn in the same pass, so
+drawing it on top is all that is needed.  A sibling that does not
+overlap the area is left alone.
+
+On macOS each view is drawn into a layer of its own and the layers are
+composited, so an overlapping view stays visible without being drawn
+again; drawing it again in order is how a single backing store gets the
+same picture.
+
+Tests/gui/NSView/overlappingSiblings.m lays a box over a scroll view's
+text and redraws the text.  Without the change the box is not drawn
+again and its pixels are gone (2 of its 4 checks fail); with it all 4
+pass, and the gui tests pass as before.
+---
+ Source/NSView.m                        |  59 +++++++++++++
+ Tests/gui/NSView/overlappingSiblings.m | 117 +++++++++++++++++++++++++
+ 2 files changed, 176 insertions(+)
+ create mode 100644 Tests/gui/NSView/overlappingSiblings.m
+
+diff --git a/Source/NSView.m b/Source/NSView.m
+index abacebc..876e62a 100644
+--- a/Source/NSView.m
++++ b/Source/NSView.m
+@@ -2945,6 +2945,64 @@ in the main thread.
+ }
+ 
+ 
++/* Marks aRect of the receiver itself as needing display, rather than of
++ * its opaque ancestor: what is under it is being drawn again anyway, and
++ * the receiver must be drawn after it, not with its ancestor before it.
++ */
++- (void) _setOwnNeedsDisplayInRect: (NSRect)aRect
++{
++  NSView	*v;
++
++  aRect = NSIntersectionRect(aRect, _bounds);
++  if (NSIsEmptyRect(aRect))
++    {
++      return;
++    }
++  _invalidRect = NSUnionRect(_invalidRect, aRect);
++  _rFlags.needs_display = YES;
++  for (v = _super_view; v != nil; v = v->_super_view)
++    {
++      v->_rFlags.needs_display = YES;
++    }
++  [_window setViewsNeedDisplay: YES];
++}
++
++/* Marks the part of each sibling stacked above the receiver, and above
++ * each of its ancestors, that lies over aRect, so that it is drawn again
++ * after what is under it.
++ */
++- (void) _setSiblingsAboveNeedDisplayInRect: (NSRect)aRect
++{
++  NSView	*view = self;
++  NSView	*sup;
++
++  while ((sup = view->_super_view) != nil)
++    {
++      NSUInteger	count = [sup->_sub_views count];
++      NSUInteger	i;
++
++      aRect = NSIntersectionRect([view convertRect: aRect toView: sup],
++	[sup bounds]);
++      if (NSIsEmptyRect(aRect))
++	{
++	  return;
++	}
++      i = [sup->_sub_views indexOfObjectIdenticalTo: view];
++      while (++i < count)
++	{
++	  NSView	*above = [sup->_sub_views objectAtIndex: i];
++	  NSRect	r = NSIntersectionRect(aRect, [above frame]);
++
++	  if (NSIsEmptyRect(r) == NO && [above isHidden] == NO)
++	    {
++	      [above _setOwnNeedsDisplayInRect: [above convertRect: r
++							   fromView: sup]];
++	    }
++	}
++      view = sup;
++    }
++}
++
+ - (void) _setNeedsDisplayInRect_real: (NSValue *)v
+ {
+   NSRect invalidRect;
+@@ -2978,6 +3036,7 @@ in the main thread.
+ 	  _invalidRect = [self convertRectFromBase: inBaseRounded];
+ 
+           [_window setViewsNeedDisplay: YES];
++          [self _setSiblingsAboveNeedDisplayInRect: _invalidRect];
+         }
+       else
+         {
+diff --git a/Tests/gui/NSView/overlappingSiblings.m b/Tests/gui/NSView/overlappingSiblings.m
+new file mode 100644
+index 0000000..84703c8
+--- /dev/null
++++ b/Tests/gui/NSView/overlappingSiblings.m
+@@ -0,0 +1,117 @@
++/* A view stacked above a sibling stays visible when the sibling redraws
++   underneath it: the part of it over the redrawn area is drawn again,
++   after the sibling.  Without that, a box laid over a scroll view (a
++   find bar, a "go to line" field) is painted over whenever the text
++   under it redraws.  A sibling that does not overlap the redrawn area is
++   left alone.  The window's own pixels are read back, so the set keeps
++   the backend skip guard. */
++#import "Testing.h"
++#import <Foundation/Foundation.h>
++#import <AppKit/AppKit.h>
++
++@interface Box : NSView
++{
++@public
++  int draws;
++}
++@end
++
++@implementation Box
++- (void) drawRect: (NSRect)r
++{
++  draws++;
++  [[NSColor redColor] set];
++  NSRectFill([self bounds]);
++}
++@end
++
++/* Whether the window's backing holds the box's red at p. */
++static BOOL
++redAt(NSWindow *w, NSPoint p)
++{
++  NSView		*cv = [w contentView];
++  NSBitmapImageRep	*rep;
++  NSColor		*c;
++
++  [cv lockFocus];
++  rep = AUTORELEASE([[NSBitmapImageRep alloc]
++    initWithFocusedViewRect: NSMakeRect(p.x, p.y, 1, 1)]);
++  [cv unlockFocus];
++  c = [[rep colorAtX: 0 y: 0] colorUsingColorSpaceName: NSDeviceRGBColorSpace];
++  return [c redComponent] > 0.9 && [c greenComponent] < 0.1
++    && [c blueComponent] < 0.1;
++}
++
++int main()
++{
++  START_SET("NSView overlapping siblings")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name]
++      isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  NS_DURING
++    {
++      NSWindow		*w;
++      NSScrollView	*sv;
++      NSTextView	*tv;
++      Box		*over;
++      Box		*apart;
++      NSMutableString	*s = [NSMutableString string];
++      int		i;
++      int		overDraws;
++      int		apartDraws;
++
++      w = AUTORELEASE([[NSWindow alloc]
++        initWithContentRect: NSMakeRect(100, 100, 400, 300)
++                  styleMask: NSWindowStyleMaskTitled
++                    backing: NSBackingStoreBuffered
++                      defer: NO]);
++      sv = AUTORELEASE([[NSScrollView alloc]
++        initWithFrame: NSMakeRect(0, 0, 300, 300)]);
++      tv = AUTORELEASE([[NSTextView alloc]
++        initWithFrame: NSMakeRect(0, 0, 300, 300)]);
++      for (i = 1; i <= 100; i++)
++        {
++          [s appendFormat: @"line %d of the text under the box\n", i];
++        }
++      [tv setString: s];
++      [sv setDocumentView: tv];
++      [[w contentView] addSubview: sv];
++      over = AUTORELEASE([[Box alloc]
++        initWithFrame: NSMakeRect(50, 240, 200, 30)]);
++      [[w contentView] addSubview: over];
++      apart = AUTORELEASE([[Box alloc]
++        initWithFrame: NSMakeRect(320, 20, 60, 30)]);
++      [[w contentView] addSubview: apart];
++      [w orderFront: nil];
++      [w display];
++      PASS(redAt(w, NSMakePoint(150, 255)), "the box shows over the text")
++
++      overDraws = over->draws;
++      apartDraws = apart->draws;
++      [tv setNeedsDisplay: YES];
++      [w displayIfNeeded];
++      PASS(over->draws > overDraws,
++        "the text redrawing under the box draws the box again")
++      PASS(redAt(w, NSMakePoint(150, 255)), "so the box still shows")
++      PASS(apart->draws == apartDraws,
++        "and a sibling away from the redrawn text is not drawn again")
++
++      [w orderOut: nil];
++    }
++  NS_HANDLER
++    if ([[localException name]
++      isEqualToString: NSInternalInconsistencyException]
++      || [[localException name]
++        isEqualToString: @"NSWindowServerCommunicationException"])
++      SKIP("No display available")
++  NS_ENDHANDLER
++
++  END_SET("NSView overlapping siblings")
++  return 0;
++}
+-- 
+2.43.0
+
