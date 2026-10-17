@@ -262,6 +262,19 @@ Before they left, the copies here were the older revisions, which neither
 applied nor reverse-applied, and stopped every build of the stack.
 gnustep-coredata (now FreeCoreData), listed for two of them, holds no copy.
 
+Added on 2026-10-17 for UDCodeKit's jump-to-line box
+([UDCodeKit#43](https://github.com/ashalkhakov/UDCodeKit/issues/43)):
+`view-overlapping-siblings`.  A view laid over a sibling (a box over a
+scroll view's text) was painted over whenever the sibling redrew:
+invalidation marked a view's ancestors but no sibling stacked above it.
+Scrolling was not the cause; with copiesOnScroll on or off, small scrolls
+leave the box intact.  The overlapping part of each sibling above is now
+marked too, on the sibling itself so that it is drawn after what is under
+it.  macOS composites a layer per view instead, so there nothing is drawn
+again.  `NSView/overlappingSiblings.m` fails 2 of its 4 checks without the
+fix and passes with it; the whole gui suite (4896) passes on libs-gui
+fdc5cfe.
+
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
 | `autoreleased-return-value` | libobjc2 | test | [#426](https://github.com/gnustep/libobjc2/pull/426) closed unmerged | (none: ODataStore works around it) |
@@ -271,6 +284,7 @@ gnustep-coredata (now FreeCoreData), listed for two of them, holds no copy.
 | `nonretained-value-identity` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
 | `xml-detached-namespaces` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
 | `xml-remove-namespace-in-use` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
+| `view-overlapping-siblings` | libs-gui | test | not sent yet | (none: UDCodeKit's jump-to-line box needs it, ashalkhakov/UDCodeKit#43) |
 | `tableview-column-autoresizing-style` | libs-gui | test | [#982](https://github.com/gnustep/libs-gui/pull/982) | gnustep-coredata |
 | `collectionview-make-item` | libs-gui | test | [#1001](https://github.com/gnustep/libs-gui/pull/1001) | (none: TopoText uses it from here) |
 | `collectionview-flow-layout` | libs-gui | test | [#1002](https://github.com/gnustep/libs-gui/pull/1002) | (none: TopoText uses it from here) |
