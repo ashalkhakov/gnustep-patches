@@ -286,6 +286,17 @@ in `simpleTaskTests.m` redirects with a lower-case `location`; downloading
 through it fails 6 checks without the fix and passes with it, and the
 NSURLSession tests pass 147 of 147 on libs-base a767a16.
 
+Added on 2026-10-17 for [#27](https://github.com/ashalkhakov/gnustep-patches/issues/27):
+`tooltip-mouse-moved`.  A pending tooltip turned its window's
+acceptsMouseMovedEvents on and, when it ended, off again if it had been
+off, so a view that turned the flag on in between (a text view showing
+hovers) lost its mouseMoved: after the pointer crossed any view with a
+tooltip.  The window now sends mouse movements to a pending or shown
+tooltip whatever the flag says, and tooltips leave the flag alone, as on
+macOS.  `NSWindow/toolTipMouseMoved.m` fails its 3 checks without the fix
+and passes with it; NSWindow (37), NSView and the NSMatrix and NSTabView
+tooltip tests pass, on libs-gui fdc5cfe.
+
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
 | `autoreleased-return-value` | libobjc2 | test | [#426](https://github.com/gnustep/libobjc2/pull/426) closed unmerged | (none: ODataStore works around it) |
@@ -296,6 +307,7 @@ NSURLSession tests pass 147 of 147 on libs-base a767a16.
 | `nonretained-value-identity` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
 | `xml-detached-namespaces` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
 | `xml-remove-namespace-in-use` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
+| `tooltip-mouse-moved` | libs-gui | test | not sent yet | (none: UDCodeKit resets the flag itself) |
 | `view-overlapping-siblings` | libs-gui | test | not sent yet | (none: UDCodeKit's jump-to-line box needs it, ashalkhakov/UDCodeKit#43) |
 | `tableview-column-autoresizing-style` | libs-gui | test | [#982](https://github.com/gnustep/libs-gui/pull/982) | gnustep-coredata |
 | `collectionview-make-item` | libs-gui | test | [#1001](https://github.com/gnustep/libs-gui/pull/1001) | (none: TopoText uses it from here) |
