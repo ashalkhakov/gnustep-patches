@@ -275,9 +275,21 @@ again.  `NSView/overlappingSiblings.m` fails 2 of its 4 checks without the
 fix and passes with it; the whole gui suite (4896) passes on libs-gui
 fdc5cfe.
 
+Added on 2026-10-17 for [#24](https://github.com/ashalkhakov/gnustep-patches/issues/24):
+`urlsession-lowercase-location`.  NSURLSession followed a 3xx response
+only when its Location header was spelled that way, since the response
+headers were gathered in a case-sensitive dictionary; HTTP/2 sends header
+names in lower case, so over HTTP/2 no redirect was followed and a
+download task finished with no file.  The headers now go into the
+case-insensitive dictionary the request headers already use.  A new route
+in `simpleTaskTests.m` redirects with a lower-case `location`; downloading
+through it fails 6 checks without the fix and passes with it, and the
+NSURLSession tests pass 147 of 147 on libs-base a767a16.
+
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
 | `autoreleased-return-value` | libobjc2 | test | [#426](https://github.com/gnustep/libobjc2/pull/426) closed unmerged | (none: ODataStore works around it) |
+| `urlsession-lowercase-location` | libs-base | test | not sent yet | (none: UDCodeKit follows 3xx itself) |
 | `predicate-secure-coding` | libs-base | test | not sent yet ([#766](https://github.com/gnustep/libs-base/issues/766)) | (none: FreeCoreData will use it from here) |
 | `arc4random-glibc` | libs-base | test | not sent yet | (none: every app built on the stack uses it from here; HomeRow's and UDCalc's shims are gone) |
 | `collection-copy-is-shallow` | libs-base | test | not sent yet | (none: FreeCoreData uses it from here) |
