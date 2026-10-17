@@ -1,0 +1,228 @@
+From 735441e5b7088a417a57d67c757b72f30b33b895 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Sat, 17 Oct 2026 08:53:28 +0000
+Subject: [PATCH] Tooltips leave acceptsMouseMovedEvents to the application
+
+A tooltip follows the mouse through mouseMoved:, which the window sent
+only while its acceptsMouseMovedEvents was on, so GSToolTips turned the
+flag on when a tooltip became pending and, if it had been off, turned
+it off again when the tooltip ended.  A view that turned the flag on in
+between, to follow the mouse itself (a text view that shows hovers),
+had it turned off under it, and got no mouseMoved: once the pointer had
+crossed any view with a tooltip.
+
+The window now sends mouse movements to a pending or shown tooltip
+whatever the flag says, as it already sends them to it instead of the
+view under the mouse, and tooltips no longer touch the flag.  It is the
+application's alone, as on macOS, where hovering a tooltip does not
+change it.
+
+Tests/gui/NSWindow/toolTipMouseMoved.m crosses a view with a tooltip
+while another view turns the flag on; it fails all three of its checks
+without the change and passes with it.
+---
+ Source/GSToolTips.m                    |  15 ----
+ Source/NSWindow.m                      |  26 ++----
+ Tests/gui/NSWindow/toolTipMouseMoved.m | 111 +++++++++++++++++++++++++
+ 3 files changed, 119 insertions(+), 33 deletions(-)
+ create mode 100644 Tests/gui/NSWindow/toolTipMouseMoved.m
+
+diff --git a/Source/GSToolTips.m b/Source/GSToolTips.m
+index 3c0d985..48ff86c 100644
+--- a/Source/GSToolTips.m
++++ b/Source/GSToolTips.m
+@@ -224,7 +224,6 @@ static GSTTPanel	*window = nil;
+ // Prevent Windows callback API from attempting to dismiss tooltip as its in the process of appearing
+ static BOOL   isOpening = NO;
+ static NSSize		offset;
+-static BOOL		restoreMouseMoved;
+ 
+ static void
+ GSSyncToolTipParentWindow(NSWindow *toolTipWindow, NSWindow *ownerWindow)
+@@ -400,15 +399,6 @@ GSDetachToolTipParentWindow(NSWindow *toolTipWindow)
+   [[NSRunLoop currentRunLoop] addTimer: timer forMode: NSModalPanelRunLoopMode];
+   timedObject = self;
+   timedTag = [theEvent trackingNumber];
+-  if ([[view window] acceptsMouseMovedEvents] == YES)
+-    {
+-      restoreMouseMoved = NO;
+-    }
+-  else
+-    {
+-      restoreMouseMoved = YES;
+-      [[view window] setAcceptsMouseMovedEvents: YES];
+-    }
+   [NSWindow _setToolTipVisible: self];
+ }
+ 
+@@ -597,11 +587,6 @@ GSDetachToolTipParentWindow(NSWindow *toolTipWindow)
+       [window orderOut:self];
+       GSDetachToolTipParentWindow(window);
+     }
+-  if (restoreMouseMoved == YES)
+-    {
+-      restoreMouseMoved = NO;
+-      [[view window] setAcceptsMouseMovedEvents: NO];
+-    }
+ }
+ 
+ /* The delay timed out -- display the tooltip */
+diff --git a/Source/NSWindow.m b/Source/NSWindow.m
+index effa7e5..56babd5 100644
+--- a/Source/NSWindow.m
++++ b/Source/NSWindow.m
+@@ -4306,26 +4306,16 @@ checkCursorRectanglesExited(NSView *theView,  NSEvent *theEvent, NSPoint lastPoi
+               [_lastRightMouseDownView rightMouseDragged: theEvent];
+               break;
+             default:
+-              if (_f.accepts_mouse_moved)
++              /* A tooltip follows the mouse whatever the window's flag says.
++               */
++              if (toolTipVisible != nil)
++                {
++                  [toolTipVisible mouseMoved: theEvent];
++                }
++              else if (_f.accepts_mouse_moved)
+                 {
+-                  /*
+-                   * If the window is set to accept mouse movements, we need to
+-                   * forward the mouse movement to the correct view.
+-                   */
+                   v = [_wv hitTest: [theEvent locationInWindow]];
+-
+-                  /* If the view is displaying a tooltip, we should
+-                   * send mouse movements to the tooltip system so
+-                   * that the window can track the mouse.
+-                   */
+-                  if (toolTipVisible != nil)
+-                    {
+-                      [toolTipVisible mouseMoved: theEvent];
+-                    }
+-                  else
+-                    {
+-                      [v mouseMoved: theEvent];
+-                    }
++                  [v mouseMoved: theEvent];
+                 }
+               break;
+           }
+diff --git a/Tests/gui/NSWindow/toolTipMouseMoved.m b/Tests/gui/NSWindow/toolTipMouseMoved.m
+new file mode 100644
+index 0000000..d326dcb
+--- /dev/null
++++ b/Tests/gui/NSWindow/toolTipMouseMoved.m
+@@ -0,0 +1,111 @@
++/* A tooltip leaves the window's acceptsMouseMovedEvents to the application.
++   Tooltips used to turn the flag on while one was pending and off again when
++   it ended, so a view that turned it on in between, to follow the mouse,
++   stopped getting mouseMoved: once the pointer had crossed a view with a
++   tooltip.  The tooltip is driven with synthesised mouse-moved events, which
++   -[NSWindow sendEvent:] only takes for a visible window, so the window is
++   ordered in and the set keeps the backend skip guard. */
++#include "Testing.h"
++
++#include <Foundation/NSGeometry.h>
++
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSEvent.h>
++#include <AppKit/NSView.h>
++#include <AppKit/NSWindow.h>
++
++@interface MovedView : NSView
++{
++@public
++  int moved;
++}
++@end
++
++@implementation MovedView
++- (void) mouseMoved: (NSEvent *)theEvent
++{
++  moved++;
++}
++@end
++
++static void
++moveMouseTo(NSWindow *w, NSPoint p)
++{
++  NSEvent *e = [NSEvent mouseEventWithType: NSMouseMoved
++                                  location: p
++                             modifierFlags: 0
++                                 timestamp: 0
++                              windowNumber: [w windowNumber]
++                                   context: nil
++                               eventNumber: 0
++                                clickCount: 0
++                                  pressure: 0];
++
++  [w sendEvent: e];
++}
++
++int
++main(int argc, const char **argv)
++{
++  START_SET("NSWindow tooltips and mouse-moved events")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name]
++      isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  NS_DURING
++    {
++      NSWindow *w;
++      NSView *tipped;
++      MovedView *follower;
++
++      w = AUTORELEASE([[NSWindow alloc]
++        initWithContentRect: NSMakeRect(0, 0, 400, 200)
++                  styleMask: NSWindowStyleMaskBorderless
++                    backing: NSBackingStoreBuffered
++                      defer: NO]);
++      tipped = AUTORELEASE([[NSView alloc]
++        initWithFrame: NSMakeRect(20, 20, 80, 40)]);
++      [tipped setToolTip: @"a tooltip"];
++      follower = AUTORELEASE([[MovedView alloc]
++        initWithFrame: NSMakeRect(200, 20, 150, 100)]);
++      [[w contentView] addSubview: tipped];
++      [[w contentView] addSubview: follower];
++      [w setAcceptsMouseMovedEvents: NO];
++      [w orderFront: nil];
++
++      moveMouseTo(w, NSMakePoint(150, 170));
++      moveMouseTo(w, NSMakePoint(40, 40));
++      PASS(![w acceptsMouseMovedEvents],
++        "a pending tooltip does not turn the window's flag on")
++
++      /* A view turns the flag on while the tooltip is pending. */
++      [w setAcceptsMouseMovedEvents: YES];
++      moveMouseTo(w, NSMakePoint(150, 170));
++      PASS([w acceptsMouseMovedEvents],
++        "the tooltip ending leaves the flag a view turned on")
++
++      follower->moved = 0;
++      moveMouseTo(w, NSMakePoint(250, 60));
++      moveMouseTo(w, NSMakePoint(260, 70));
++      PASS(follower->moved == 2,
++        "and that view goes on getting mouseMoved:")
++
++      [w orderOut: nil];
++    }
++  NS_HANDLER
++    if ([[localException name]
++      isEqualToString: NSInternalInconsistencyException]
++      || [[localException name]
++        isEqualToString: @"NSWindowServerCommunicationException"])
++      SKIP("No display available")
++  NS_ENDHANDLER
++
++  END_SET("NSWindow tooltips and mouse-moved events")
++
++  return 0;
++}
+-- 
+2.43.0
+
