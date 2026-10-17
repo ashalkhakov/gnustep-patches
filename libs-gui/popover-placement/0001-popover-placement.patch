@@ -1,0 +1,251 @@
+From b4d69eea907daca1730d295b3b6a73af5afb6164 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Sat, 17 Oct 2026 09:01:24 +0000
+Subject: [PATCH] NSPopover: show beside the positioning rect, on the edge
+ asked for
+
+-showRelativeToRect:ofView:preferredEdge: converted the rect to the
+screen as though it were in its window's coordinates, though it is in
+the positioning view's, so a popover shown from a view away from the
+window's origin appeared far from it.  The edges were exchanged as
+well: NSMinXEdge and NSMaxXEdge moved the popover up and down, and
+NSMinYEdge and NSMaxYEdge sideways.  Its window was always dark grey.
+And the window released itself when closed while the popover kept it,
+so showing a popover again after closing it used the freed window.
+
+Convert the rect from the positioning view, then put the popover
+beside the edge asked for, centred on it: NSMinXEdge to the left,
+NSMaxXEdge to the right, NSMinYEdge and NSMaxYEdge below and above in
+an unflipped view and above and below in a flipped one.  Keep the
+window for the next showing, and release it with the popover.  Leave
+its background to the window's default.
+
+Tests/gui/NSPopover/show.m shows one popover on each edge of a rect in
+an unflipped view and above one in a flipped view.  Without the change
+the first check fails and showing the popover again crashes; with a new
+popover for each showing, all six checks fail.  With the change they
+pass.
+---
+ Source/NSPopover.m         |  39 ++++++-----
+ Tests/gui/NSPopover/show.m | 133 +++++++++++++++++++++++++++++++++++++
+ 2 files changed, 156 insertions(+), 16 deletions(-)
+ create mode 100644 Tests/gui/NSPopover/show.m
+
+diff --git a/Source/NSPopover.m b/Source/NSPopover.m
+index e88f66b..a3bad69 100644
+--- a/Source/NSPopover.m
++++ b/Source/NSPopover.m
+@@ -141,6 +141,14 @@
+   return self;
+ }
+ 
++- (void) dealloc
++{
++  [_realPanel setDelegate: nil];
++  [_realPanel orderOut: self];
++  RELEASE(_realPanel);
++  [super dealloc];
++}
++
+ /* Properties */
+ 
+ - (void) setAnimates: (BOOL)flag
+@@ -262,6 +270,7 @@
+   NSRect screenRect;
+   NSRect windowFrame;
+   NSRect viewFrame;
++  BOOL flipped = [positioningView isFlipped];
+ 
+   [_contentViewController loadView];
+   view = [_contentViewController view];
+@@ -274,8 +283,7 @@
+ 							backing: NSBackingStoreRetained
+ 							  defer: NO];
+ 
+-      [_realPanel setBackgroundColor: [NSColor darkGrayColor]];
+-      [_realPanel setReleasedWhenClosed: YES];
++      [_realPanel setReleasedWhenClosed: NO];
+       [_realPanel setExcludedFromWindowsMenu: YES];
+       [_realPanel setLevel: NSPopUpMenuWindowLevel];
+       [_realPanel setAutodisplay: NO];
+@@ -283,25 +291,24 @@
+       [_realPanel setContentView: view];
+     }
+ 
+-  screenRect = [[positioningView window] convertRectToScreen:positioningRect];
++  screenRect = [[positioningView window] convertRectToScreen:
++    [positioningView convertRect: positioningRect toView: nil]];
+   windowFrame = [_realPanel frame];
+-  windowFrame.origin = screenRect.origin;
+ 
+-  if(NSMinXEdge == preferredEdge)
+-    {
+-      windowFrame.origin.y -= viewFrame.size.height;
+-    }
+-  else if(NSMaxXEdge == preferredEdge)
+-    {
+-      windowFrame.origin.y += viewFrame.size.height;
+-    }
+-  else if(NSMinYEdge == preferredEdge)
++  /* Beside the edge of the rect, centred on it; in a flipped view the
++   * rect's MinY edge is its top.
++   */
++  if (NSMinXEdge == preferredEdge || NSMaxXEdge == preferredEdge)
+     {
+-      windowFrame.origin.x -= viewFrame.size.width;
++      windowFrame.origin.x = (NSMinXEdge == preferredEdge)
++        ? NSMinX(screenRect) - NSWidth(windowFrame) : NSMaxX(screenRect);
++      windowFrame.origin.y = NSMidY(screenRect) - NSHeight(windowFrame) / 2;
+     }
+-  else if(NSMaxYEdge == preferredEdge)
++  else
+     {
+-      windowFrame.origin.x += viewFrame.size.width;
++      windowFrame.origin.x = NSMidX(screenRect) - NSWidth(windowFrame) / 2;
++      windowFrame.origin.y = ((NSMaxYEdge == preferredEdge) != flipped)
++        ? NSMaxY(screenRect) : NSMinY(screenRect) - NSHeight(windowFrame);
+     }
+ 
+   [_realPanel setFrame: windowFrame display: YES];
+diff --git a/Tests/gui/NSPopover/show.m b/Tests/gui/NSPopover/show.m
+new file mode 100644
+index 0000000..3c49d8c
+--- /dev/null
++++ b/Tests/gui/NSPopover/show.m
+@@ -0,0 +1,133 @@
++/* -showRelativeToRect:ofView:preferredEdge: places the popover beside the
++   rect, which is in the positioning view's coordinates, on the edge asked
++   for: NSMinXEdge to its left, NSMaxXEdge to its right, NSMinYEdge and
++   NSMaxYEdge below and above it, or above and below it in a flipped view.
++   A popover can be shown again once closed, and its window keeps the
++   ordinary background. */
++#import "Testing.h"
++#import <Foundation/Foundation.h>
++#import <AppKit/AppKit.h>
++
++@interface FlippedView : NSView
++@end
++
++@implementation FlippedView
++- (BOOL) isFlipped
++{
++  return YES;
++}
++@end
++
++/* Where the rect is on the screen. */
++static NSRect
++screenRect(NSView *view, NSRect rect)
++{
++  return [[view window] convertRectToScreen:
++    [view convertRect: rect toView: nil]];
++}
++
++/* Shows the popover on edge and answers its window's frame. */
++static NSRect
++show(NSPopover *popover, NSView *view, NSRect rect, NSRectEdge edge)
++{
++  NSRect	frame;
++
++  [popover showRelativeToRect: rect ofView: view preferredEdge: edge];
++  frame = [[[[popover contentViewController] view] window] frame];
++  [popover close];
++  return frame;
++}
++
++static BOOL
++near(CGFloat a, CGFloat b)
++{
++  return a >= b - 0.5 && a <= b + 20;
++}
++
++int main()
++{
++  START_SET("NSPopover showRelativeToRect:ofView:preferredEdge:")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name]
++      isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  NS_DURING
++    {
++      NSWindow		*w;
++      NSView		*plain;
++      NSView		*flipped;
++      NSViewController	*vc;
++      NSPopover		*popover;
++      NSRect		rect = NSMakeRect(10, 10, 20, 10);
++      NSRect		r;
++      NSRect		f;
++      NSWindow		*panel;
++
++      w = AUTORELEASE([[NSWindow alloc]
++        initWithContentRect: NSMakeRect(100, 100, 500, 300)
++                  styleMask: NSWindowStyleMaskTitled
++                    backing: NSBackingStoreBuffered
++                      defer: NO]);
++      plain = AUTORELEASE([[NSView alloc]
++        initWithFrame: NSMakeRect(200, 150, 100, 50)]);
++      flipped = AUTORELEASE([[FlippedView alloc]
++        initWithFrame: NSMakeRect(50, 40, 100, 50)]);
++      [[w contentView] addSubview: plain];
++      [[w contentView] addSubview: flipped];
++      [w makeKeyAndOrderFront: nil];
++
++      vc = AUTORELEASE([[NSViewController alloc] init]);
++      [vc setView: AUTORELEASE([[NSView alloc]
++        initWithFrame: NSMakeRect(0, 0, 80, 40)])];
++      popover = AUTORELEASE([[NSPopover alloc] init]);
++      [popover setContentViewController: vc];
++
++      r = screenRect(plain, rect);
++      f = show(popover, plain, rect, NSMaxXEdge);
++      PASS(near(NSMinX(f), NSMaxX(r))
++        && NSMinY(f) < NSMidY(r) && NSMaxY(f) > NSMidY(r),
++        "NSMaxXEdge is to the right of the rect in the positioning view")
++      f = show(popover, plain, rect, NSMinXEdge);
++      PASS(near(NSMinX(r), NSMaxX(f))
++        && NSMinY(f) < NSMidY(r) && NSMaxY(f) > NSMidY(r),
++        "NSMinXEdge is to its left")
++      f = show(popover, plain, rect, NSMaxYEdge);
++      PASS(near(NSMinY(f), NSMaxY(r))
++        && NSMinX(f) < NSMidX(r) && NSMaxX(f) > NSMidX(r),
++        "NSMaxYEdge is above it")
++      f = show(popover, plain, rect, NSMinYEdge);
++      PASS(near(NSMinY(r), NSMaxY(f))
++        && NSMinX(f) < NSMidX(r) && NSMaxX(f) > NSMidX(r),
++        "NSMinYEdge is below it")
++
++      r = screenRect(flipped, rect);
++      f = show(popover, flipped, rect, NSMaxYEdge);
++      PASS(near(NSMinY(r), NSMaxY(f))
++        && NSMinX(f) < NSMidX(r) && NSMaxX(f) > NSMidX(r),
++        "NSMaxYEdge is below the rect in a flipped view")
++
++      [popover showRelativeToRect: rect ofView: plain
++                    preferredEdge: NSMaxYEdge];
++      panel = [[vc view] window];
++      PASS_EQUAL([panel backgroundColor], [NSColor windowBackgroundColor],
++        "its window has the ordinary background")
++      [popover close];
++
++      [w orderOut: nil];
++    }
++  NS_HANDLER
++    if ([[localException name]
++      isEqualToString: NSInternalInconsistencyException]
++      || [[localException name]
++        isEqualToString: @"NSWindowServerCommunicationException"])
++      SKIP("No display available")
++  NS_ENDHANDLER
++
++  END_SET("NSPopover showRelativeToRect:ofView:preferredEdge:")
++  return 0;
++}
+-- 
+2.43.0
+

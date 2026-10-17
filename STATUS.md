@@ -308,6 +308,19 @@ the prototype and unarchived anew, with the prototype's identifier.
 fix and passes with it on libs-gui fdc5cfe; with `tableview-prototype-identifier`
 as well, a xib loaded through NSNib gives each row its own text field.
 
+Added on 2026-10-17 for [#25](https://github.com/ashalkhakov/gnustep-patches/issues/25):
+`popover-placement`.  NSPopover converted its positioning rect as though
+it were in window coordinates, exchanged the X and Y edges, forced a dark
+grey background, and used its freed window when shown again after a close
+(the window released itself when closed).  It now converts the rect from
+the positioning view, sits beside the edge asked for (flipped views
+respected), keeps and later releases its window, and leaves the background
+alone.  `NSPopover/show.m`: without the fix the first check fails and the
+second showing crashes, and with a fresh popover each time all 6 checks
+fail; with it they pass, on libs-gui fdc5cfe.  The issue's third point,
+that a popover takes the keyboard, did not reproduce here: the panel cannot
+become key, and under Xvfb with no window manager the parent stays key.
+
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
 | `autoreleased-return-value` | libobjc2 | test | [#426](https://github.com/gnustep/libobjc2/pull/426) closed unmerged | (none: ODataStore works around it) |
@@ -318,6 +331,7 @@ as well, a xib loaded through NSNib gives each row its own text field.
 | `nonretained-value-identity` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
 | `xml-detached-namespaces` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
 | `xml-remove-namespace-in-use` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
+| `popover-placement` | libs-gui | test | not sent yet | (none: UDCodeKit places its own child windows meanwhile) |
 | `tableview-prototype-copy` | libs-gui | test | not sent yet | (none: UDCodeKit's issues navigator is cell-based meanwhile) |
 | `tooltip-mouse-moved` | libs-gui | test | not sent yet | (none: UDCodeKit resets the flag itself) |
 | `view-overlapping-siblings` | libs-gui | test | not sent yet | (none: UDCodeKit's jump-to-line box needs it, ashalkhakov/UDCodeKit#43) |
