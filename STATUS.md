@@ -297,6 +297,17 @@ macOS.  `NSWindow/toolTipMouseMoved.m` fails its 3 checks without the fix
 and passes with it; NSWindow (37), NSView and the NSMatrix and NSTabView
 tooltip tests pass, on libs-gui fdc5cfe.
 
+Added on 2026-10-17 for [#26](https://github.com/ashalkhakov/gnustep-patches/issues/26):
+`tableview-prototype-copy`.  -makeViewWithIdentifier:owner: (and the
+view a column falls back on) made each view from its prototype with
+-copy, which for a view is shallow: no subviews, and outlets still into
+the prototype, so a view-based table's rows were empty and text set
+through textField went to the prototype.  Each view is now archived from
+the prototype and unarchived anew, with the prototype's identifier.
+`NSTableView/makeViewWithIdentifier.m` fails 5 of its 6 checks without the
+fix and passes with it on libs-gui fdc5cfe; with `tableview-prototype-identifier`
+as well, a xib loaded through NSNib gives each row its own text field.
+
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
 | `autoreleased-return-value` | libobjc2 | test | [#426](https://github.com/gnustep/libobjc2/pull/426) closed unmerged | (none: ODataStore works around it) |
@@ -307,6 +318,7 @@ tooltip tests pass, on libs-gui fdc5cfe.
 | `nonretained-value-identity` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
 | `xml-detached-namespaces` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
 | `xml-remove-namespace-in-use` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
+| `tableview-prototype-copy` | libs-gui | test | not sent yet | (none: UDCodeKit's issues navigator is cell-based meanwhile) |
 | `tooltip-mouse-moved` | libs-gui | test | not sent yet | (none: UDCodeKit resets the flag itself) |
 | `view-overlapping-siblings` | libs-gui | test | not sent yet | (none: UDCodeKit's jump-to-line box needs it, ashalkhakov/UDCodeKit#43) |
 | `tableview-column-autoresizing-style` | libs-gui | test | [#982](https://github.com/gnustep/libs-gui/pull/982) | gnustep-coredata |
