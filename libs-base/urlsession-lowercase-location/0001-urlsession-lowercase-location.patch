@@ -1,0 +1,153 @@
+From 4fdf9dee38dab34a6ba8c823203ff3b89e6f2862 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Sat, 17 Oct 2026 08:50:18 +0000
+Subject: [PATCH] NSURLSession: follow a redirect whose Location header is
+ lower case
+
+A task follows a 3xx response by looking up its Location header, but
+the dictionary the response headers are gathered in was an ordinary,
+case-sensitive one, so the lookup found the header only when it was
+spelled Location.  HTTP/2 sends every header name in lower case, so over
+HTTP/2 no redirect was followed: the 3xx response was taken as the
+final answer, and a download task finished with no file.  Header names
+are case-insensitive (RFC 9110, section 5.1).
+
+Gather them in the case-insensitive dictionary the request headers
+already use, so that Location is found however it is spelled.
+
+The new route in Tests/base/NSURLSession/simpleTaskTests.m redirects
+with a lower-case location header; downloading through it fails six of
+its checks without the change and passes with it.
+---
+ Source/NSURLSessionTask.m                 |  5 +-
+ Tests/base/NSURLSession/simpleTaskTests.m | 57 ++++++++++++++++++++++-
+ 2 files changed, 59 insertions(+), 3 deletions(-)
+
+diff --git a/Source/NSURLSessionTask.m b/Source/NSURLSessionTask.m
+index aa6e9d4..c14a5de 100644
+--- a/Source/NSURLSessionTask.m
++++ b/Source/NSURLSessionTask.m
+@@ -1026,8 +1026,9 @@ write_callback(char *ptr, size_t size, size_t nmemb, void *userdata)
+ 
+       /* Configure initial task data
+        */
+-      [internal->_taskData setObject: [NSMutableDictionary dictionary]
+-			      forKey: @"headers"];
++      [internal->_taskData
++	setObject: [_GSMutableInsensitiveDictionary dictionary]
++	   forKey: @"headers"];
+     }
+ 
+   return self;
+diff --git a/Tests/base/NSURLSession/simpleTaskTests.m b/Tests/base/NSURLSession/simpleTaskTests.m
+index 453fd51..67f595a 100644
+--- a/Tests/base/NSURLSession/simpleTaskTests.m
++++ b/Tests/base/NSURLSession/simpleTaskTests.m
+@@ -99,12 +99,14 @@ createRoutes(Class routeClass, NSURL *baseURL)
+   Route *routeOKWithContent;
+   Route *routeTmpRedirectToOK;
+   Route *routeTmpRelativeRedirectToOK;
++  Route *routeTmpLowercaseRedirectToOK;
+   Route *routeSetCookiesOK;
+   Route *routeFoldedHeaders;
+   Route *routeIncorrectlyFoldedHeaders;
+   NSURL *routeOKWithContentURL;
+   NSURL *routeTmpRedirectToOKURL;
+   NSURL *routeTmpRelativeRedirectToOKURL;
++  NSURL *routeTmpLowercaseRedirectToOKURL;
+   NSURL *routeSetCookiesOKURL;
+   NSURL *routeFoldedHeadersURL;
+   NSURL *routeIncorrectlyFoldedHeadersURL;
+@@ -113,6 +115,8 @@ createRoutes(Class routeClass, NSURL *baseURL)
+   routeTmpRedirectToOKURL = [NSURL URLWithString:@"/tmpRedirectToOK"];
+   routeTmpRelativeRedirectToOKURL =
+     [NSURL URLWithString:@"/tmpRelativeRedirectToOK"];
++  routeTmpLowercaseRedirectToOKURL =
++    [NSURL URLWithString:@"/tmpLowercaseRedirectToOK"];
+   routeSetCookiesOKURL = [NSURL URLWithString:@"/setCookiesOK"];
+   routeFoldedHeadersURL = [NSURL URLWithString:@"/foldedHeaders"];
+   routeIncorrectlyFoldedHeadersURL =
+@@ -139,6 +143,16 @@ createRoutes(Class routeClass, NSURL *baseURL)
+           @"HTTP/1.1 307 Temporary Redirect\r\nLocation: "
+           @"contentOK\r\nContent-Length: 0\r\n\r\n")];
+ 
++  /* Header names are case-insensitive, and HTTP/2 sends them in lower
++   * case. */
++  routeTmpLowercaseRedirectToOK = [routeClass
++    routeWithURL:routeTmpLowercaseRedirectToOKURL
++          method:@"GET"
++        response:asciiData([NSString
++          stringWithFormat:@"HTTP/1.1 307 Temporary Redirect\r\nlocation: "
++                           @"%@\r\nContent-Length: 0\r\n\r\n",
++            [baseURL URLByAppendingPathComponent:@"contentOK"]])];
++
+   cookieRoute = [CookieRoute new];
+   routeSetCookiesOK = [routeClass
+     routeWithURL:routeSetCookiesOKURL
+@@ -164,7 +178,8 @@ createRoutes(Class routeClass, NSURL *baseURL)
+ 
+   return [NSArray arrayWithObjects:
+     routeOKWithContent, routeTmpRedirectToOK, routeTmpRelativeRedirectToOK,
+-    routeSetCookiesOK, routeFoldedHeaders, routeIncorrectlyFoldedHeaders, nil];
++    routeTmpLowercaseRedirectToOK, routeSetCookiesOK, routeFoldedHeaders,
++    routeIncorrectlyFoldedHeaders, nil];
+ }
+ 
+ @interface URLManagerCheck : NSObject
+@@ -529,6 +544,45 @@ testDownloadTransferWithRedirect(NSURL *baseURL)
+   return mgr;
+ }
+ 
++static URLManager *
++testDownloadTransferWithLowercaseRedirect(NSURL *baseURL)
++{
++  NSURLSession              *session;
++  NSURLSessionConfiguration *configuration;
++  NSURLSessionDownloadTask  *task;
++  URLManager                *mgr;
++  URLManagerCheck           *check;
++  const char                *prefix = "<DownloadTransferWithLowercaseRedirect>";
++
++  NSURL *url;
++
++  /* URL Delegate Setup */
++  mgr = AUTORELEASE([URLManager new]);
++  mgr->numberOfExpectedTasksBeforeCheck = 1;
++  expectedCountOfTasksToComplete += 1;
++
++  /* URL Setup */
++  url = [baseURL URLByAppendingPathComponent:@"tmpLowercaseRedirectToOK"];
++
++  configuration = [NSURLSessionConfiguration defaultSessionConfiguration];
++  session = [NSURLSession sessionWithConfiguration:configuration
++                                          delegate:mgr
++                                     delegateQueue:serialDelegateQueue];
++
++  task = [session downloadTaskWithURL:url];
++  PASS(nil != task, "%s Session created a valid download task", prefix);
++
++  /* Setup Check */
++  check = [URLManagerCheck checkWithPrefix:prefix
++                                   session:session
++                                      task:task];
++  [mgr setCheckTarget:check selector:@selector(checkDownload:)];
++
++  [task resume];
++
++  return mgr;
++}
++
+ /* Tests the completion handler API, so it needs a compiler with
+  * blocks.  The same transfer is covered without one above. */
+ #if __has_feature(blocks)
+@@ -1070,6 +1124,7 @@ main(int argc, char *argv[])
+ 
+     // Redirects
+     testDownloadTransferWithRedirect(baseURL);
++    testDownloadTransferWithLowercaseRedirect(baseURL);
+ #if __has_feature(blocks)
+     testDataTransferWithRedirectAndBlock(baseURL);
+ #endif
+-- 
+2.43.0
+
