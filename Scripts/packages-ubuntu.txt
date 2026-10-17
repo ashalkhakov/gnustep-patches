@@ -47,6 +47,11 @@ libxft-dev
 libxrandr-dev
 libxfixes-dev
 libxcursor-dev
+# libs-back's configure builds NSOpenGLView's GLX support only when it finds
+# GL/glx.h, and says nothing when it does not; Mesa's drivers give xvfb a
+# (software) GL to test with.
+libgl-dev
+libgl1-mesa-dri
 libsndfile1-dev
 libao-dev
 xvfb
