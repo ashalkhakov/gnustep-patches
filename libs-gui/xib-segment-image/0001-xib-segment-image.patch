@@ -1,0 +1,158 @@
+From e3d0597f4830e558d971caa7134c4ba6bf1cedbc Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Sun, 18 Oct 2026 19:34:19 +0000
+Subject: [PATCH] GSXib5KeyedUnarchiver: decode a segment's image attribute as
+ an image
+
+A segment of a segmented control names its image in an attribute,
+<segment image="name"/>, which NSSegmentItem decodes under the key
+NSSegmentItemImage.  The key map table translated NSSegmentItemImage to
+the attribute name "image", so -decodeObjectForKey: answered with the
+attribute's string before it reached -decodeSegmentItemImageForElement:,
+the decoder registered for that key, and the segment was given an
+NSString as its image.  Laying out or drawing the segment then sends it
+-size, which raises.
+
+Drop the mapping so the registered decoder runs and looks the image up
+by name, and answer -containsValueForKey: for the key from the "image"
+attribute, as is done for NSToolbarItemImage.
+
+The test decodes a segmented control with one segment named by image
+and one by label.
+---
+ Source/GSXib5KeyedUnarchiver.m                |  5 +-
+ .../GSXib5KeyedUnarchiver/SegmentedCell.xib   | 22 ++++++
+ .../gui/GSXib5KeyedUnarchiver/segmentedCell.m | 69 +++++++++++++++++++
+ 3 files changed, 95 insertions(+), 1 deletion(-)
+ create mode 100644 Tests/gui/GSXib5KeyedUnarchiver/SegmentedCell.xib
+ create mode 100644 Tests/gui/GSXib5KeyedUnarchiver/segmentedCell.m
+
+diff --git a/Source/GSXib5KeyedUnarchiver.m b/Source/GSXib5KeyedUnarchiver.m
+index 58582b7f2..32a5a37c4 100644
+--- a/Source/GSXib5KeyedUnarchiver.m
++++ b/Source/GSXib5KeyedUnarchiver.m
+@@ -290,7 +290,6 @@ static NSArray      *XmlBoolDefaultYes  = nil;
+                                            @"allowsExpansionToolTips", @"NSControlAllowsExpansionToolTips",
+                                            @"segments", @"NSSegmentImages",
+                                            @"label", @"NSSegmentItemLabel",
+-                                           @"image", @"NSSegmentItemImage",
+                                            @"editable", @"NSIsEditable",
+                                            @"objectValues", @"NSPopUpListData",
+                                            @"prototypeCellViews", @"NSPrototypeCellViews",
+@@ -3690,6 +3689,10 @@ didStartElement: (NSString*)elementName
+         {
+           hasValue = [currentElement attributeForKey: @"image"] != nil;
+         }
++      else if ([@"NSSegmentItemImage" isEqualToString: key])
++        {
++          hasValue = [currentElement attributeForKey: @"image"] != nil;
++        }
+       else if ([@"NSSelectedIndex" isEqualToString: key])
+         {
+           hasValue = [currentElement attributeForKey: @"selectedItem"] != nil;
+diff --git a/Tests/gui/GSXib5KeyedUnarchiver/SegmentedCell.xib b/Tests/gui/GSXib5KeyedUnarchiver/SegmentedCell.xib
+new file mode 100644
+index 000000000..e86841990
+--- /dev/null
++++ b/Tests/gui/GSXib5KeyedUnarchiver/SegmentedCell.xib
+@@ -0,0 +1,22 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<document type="com.apple.InterfaceBuilder3.Cocoa.XIB" version="3.0" toolsVersion="21507" targetRuntime="MacOSX.Cocoa" propertyAccessControl="none" useAutolayout="YES" customObjectInstantitationMethod="direct">
++    <dependencies>
++        <deployment identifier="macosx"/>
++        <plugIn identifier="com.apple.InterfaceBuilder.CocoaPlugin" version="21507"/>
++    </dependencies>
++    <objects>
++        <customObject id="-2" userLabel="File's Owner" customClass="NSApplication"/>
++        <customObject id="-1" userLabel="First Responder" customClass="FirstResponder"/>
++        <customObject id="-3" userLabel="Application" customClass="NSObject"/>
++        <segmentedControl verticalHuggingPriority="750" id="segmented">
++            <rect key="frame" x="0.0" y="0.0" width="100" height="24"/>
++            <segmentedCell key="cell" borderStyle="border" alignment="left" style="rounded" trackingMode="selectOne" id="segmentedCell">
++                <font key="font" metaFont="system"/>
++                <segments>
++                    <segment image="NSSwitch" width="40" selected="YES"/>
++                    <segment label="Two" width="40" tag="1"/>
++                </segments>
++            </segmentedCell>
++        </segmentedControl>
++    </objects>
++</document>
+diff --git a/Tests/gui/GSXib5KeyedUnarchiver/segmentedCell.m b/Tests/gui/GSXib5KeyedUnarchiver/segmentedCell.m
+new file mode 100644
+index 000000000..6d74ed9ed
+--- /dev/null
++++ b/Tests/gui/GSXib5KeyedUnarchiver/segmentedCell.m
+@@ -0,0 +1,69 @@
++#import "ObjectTesting.h"
++
++#import <Foundation/NSData.h>
++#import <AppKit/NSApplication.h>
++#import <AppKit/NSImage.h>
++#import <AppKit/NSSegmentedControl.h>
++#import <Additions/GNUstepGUI/GSXibKeyedUnarchiver.h>
++
++int main()
++{
++  START_SET("GSXib5KeyedUnarchiver NSSegmentedCell tests")
++
++  NS_DURING
++    {
++      [NSApplication sharedApplication];
++    }
++  NS_HANDLER
++    {
++      if ([[localException name]
++	isEqualToString: NSInternalInconsistencyException ])
++	{
++	  SKIP("It looks like GNUstep backend is not yet installed")
++	}
++    }
++  NS_ENDHANDLER
++
++  NSData		*data;
++  GSXibKeyedUnarchiver	*unarchiver;
++  NSArray		*rootObjects = nil;
++  NSEnumerator		*enumerator;
++  NSSegmentedControl	*control = nil;
++  id			element;
++
++  data = [NSData dataWithContentsOfFile: @"SegmentedCell.xib"];
++  unarchiver = [GSXibKeyedUnarchiver unarchiverForReadingWithData: data];
++  NS_DURING
++    {
++      rootObjects = [unarchiver decodeObjectForKey: @"IBDocument.RootObjects"];
++    }
++  NS_HANDLER
++    {
++      NSLog(@"%@", localException);
++    }
++  NS_ENDHANDLER
++  PASS(rootObjects != nil, "A segment's image attribute is decoded without an exception")
++
++  enumerator = [rootObjects objectEnumerator];
++  while ((element = [enumerator nextObject]) != nil)
++    {
++      if ([element isKindOfClass: [NSSegmentedControl class]])
++	{
++	  control = (NSSegmentedControl*)element;
++	  break;
++	}
++    }
++
++  PASS(control != nil, "Top-level NSSegmentedControl was found")
++  PASS([control segmentCount] == 2, "It has both segments")
++  PASS([[control imageForSegment: 0] isKindOfClass: [NSImage class]],
++    "The image attribute gives the segment an image")
++  PASS_EQUAL([control imageForSegment: 0], [NSImage imageNamed: @"NSSwitch"],
++    "The segment's image is the one named")
++  PASS([control imageForSegment: 1] == nil, "A segment without one has none")
++  PASS_EQUAL([control labelForSegment: 1], @"Two", "A label is still a label")
++
++  END_SET("GSXib5KeyedUnarchiver NSSegmentedCell tests")
++
++  return 0;
++}
+-- 
+2.43.0
+
