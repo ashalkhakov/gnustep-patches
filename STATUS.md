@@ -330,6 +330,17 @@ context current before giving it the view, which it now does first.
 `NSOpenGLView/hidden.m` fails 3 of its 6 checks without the fix and
 passes with it on libs-gui fdc5cfe, under Xvfb with Mesa's GLX.
 
+Added on 2026-10-19 for UDCode's navigator bar: `xib-segment-image`.  A
+segment named its image in an attribute (`<segment image="name"/>`), and
+the xib unarchiver's key map turned the key NSSegmentItem decodes it under
+into that attribute's name, so the segment was given the name, a string,
+as its image, and laying it out sent the string -size, which raised: a
+window whose segmented control had images failed to load.  The image is
+now looked up by name, by the decoder already registered for the key.
+`GSXib5KeyedUnarchiver/segmentedCell.m` fails 2 of its 7 checks without
+the fix and passes with it on libs-gui 87c1129; the rest of the gui suite
+passes with it.
+
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
 | `autoreleased-return-value` | libobjc2 | test | [#426](https://github.com/gnustep/libobjc2/pull/426) closed unmerged | (none: ODataStore works around it) |
@@ -345,6 +356,7 @@ passes with it on libs-gui fdc5cfe, under Xvfb with Mesa's GLX.
 | `tooltip-mouse-moved` | libs-gui | test | not sent yet | (none: UDCodeKit resets the flag itself) |
 | `view-overlapping-siblings` | libs-gui | test | not sent yet | (none: UDCodeKit's jump-to-line box needs it, ashalkhakov/UDCodeKit#43) |
 | `opengl-view-hidden` | libs-gui | test | not sent yet | (none: UDQuakeTools' GUI editor uses it from here; its workaround is gone) |
+| `xib-segment-image` | libs-gui | test | not sent yet | (none: UDCode's navigator bar uses it from here) |
 | `tableview-column-autoresizing-style` | libs-gui | test | [#982](https://github.com/gnustep/libs-gui/pull/982) | gnustep-coredata |
 | `collectionview-make-item` | libs-gui | test | [#1001](https://github.com/gnustep/libs-gui/pull/1001) | (none: TopoText uses it from here) |
 | `collectionview-flow-layout` | libs-gui | test | [#1002](https://github.com/gnustep/libs-gui/pull/1002) | (none: TopoText uses it from here) |
