@@ -341,6 +341,13 @@ now looked up by name, by the decoder already registered for the key.
 the fix and passes with it on libs-gui 87c1129; the rest of the gui suite
 passes with it.
 
+On 2026-10-18 libs-gui merged #978 (0a4322d) as it was sent, and
+`graphicscontext-backend-recursion` left: on libs-gui master it
+reverse-applies whole, so `apply-patches.sh` was already skipping it.  The
+other eighteen libs-gui patches apply to master 87c1129.  RDLKit, which the table
+listed as carrying it, applies this repository at a pinned commit and holds
+no copy.
+
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
 | `autoreleased-return-value` | libobjc2 | test | [#426](https://github.com/gnustep/libobjc2/pull/426) closed unmerged | (none: ODataStore works around it) |
@@ -362,7 +369,6 @@ passes with it.
 | `collectionview-flow-layout` | libs-gui | test | [#1002](https://github.com/gnustep/libs-gui/pull/1002) | (none: TopoText uses it from here) |
 | `textview-attachment-double-click` | libs-gui | test | [#1004](https://github.com/gnustep/libs-gui/pull/1004) | (none: TopoText uses it from here) |
 | `splitview-set-position-did-resize` | libs-gui | test | not sent yet | (none: TopoText uses it from here) |
-| `graphicscontext-backend-recursion` | libs-gui | program | [#978](https://github.com/gnustep/libs-gui/pull/978) | RDLKit |
 | `tableview-bound-value-transform` | libs-gui | test | [#981](https://github.com/gnustep/libs-gui/pull/981) | (none: WorkflowKit uses it from here) |
 | `tableview-prototype-identifier` | libs-gui | test | [#1005](https://github.com/gnustep/libs-gui/pull/1005) | (none: UDCalc will use it from here) |
 | `scrollview-autohide-reentrancy` | libs-gui | test | not sent yet | (none: UDCalc will use it from here; Gershwin needs its own copy, see NOTES.md) |
@@ -579,7 +585,7 @@ these is a GNUstep bug; they are recorded so nobody else spends the afternoon:
 | --- | --- |
 | `NSXMLDocument` drops a text node that is only whitespace | Apple's Foundation only.  GNUstep reads all five cases correctly - whitespace-only content, with and without `xml:space="preserve"` and `NSXMLNodePreserveWhitespace`, and text with a trailing space - checked with RDLKit's own reproduction in the container |
 | `ibtool` aborts on three pieces of hand-written XIB markup | Xcode's `ibtool` only.  GNUstep's `GSXib5KeyedUnarchiver` loads all three - an `id` on `<tableHeaderCell>`, a `<splitView>` with no `<holdingPriorities>`, a `<tableHeaderView>` with no reference - and instantiates their top-level object |
-| ~~`-[NSView dataWithPDFInsideRect:]` never returns on a headless machine~~ | **Wrong: it is real, and it is now `graphicscontext-backend-recursion` above.**  The first pass called it unreproducible because every reproduction written to show it made an `NSApplication` first, which is exactly what hides it.  Run the same code in a tool that makes none -- a report generator -- and it spins for ever |
+| ~~`-[NSView dataWithPDFInsideRect:]` never returns on a headless machine~~ | **Wrong: it is real; it became `graphicscontext-backend-recursion`, merged upstream as #978.**  The first pass called it unreproducible because every reproduction written to show it made an `NSApplication` first, which is exactly what hides it.  Run the same code in a tool that makes none -- a report generator -- and it spins for ever |
 
 That correction is the lesson of the pass: a reproduction written by hand
 starts from the habits of the person writing it, and the missing
