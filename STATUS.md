@@ -392,6 +392,46 @@ master alone too.
 the fix and passes with it on libs-base 7c81d0c; with every libs-base
 patch here applied, the NSPredicate suite passes 433 of 433.
 
+Added on 2026-10-19 for Logbook, ORMKit's sample app, whose decimal
+fields lost their formatters' settings on GNUstep, so "12345" typed
+into one became a double instead of the NSDecimalNumber its Core Data
+attribute needs:
+
+- `formatter-keyed-attributes` (libs-base).  macOS archives a number or
+  date formatter's settings in an `NS.attributes` dictionary keyed by
+  property name (formatterBehavior, numberStyle, generatesDecimalNumbers,
+  maximumFractionDigits, dateStyle, timeStyle, dateFormat, minimum,
+  locale, ...; checked on macOS 15, with formatters archived directly and
+  loaded from an ibtool-compiled nib).  NSNumberFormatter read only the
+  10.0 keys, and NSDateFormatter read a keyed archive as an unkeyed one.
+  Both now set each property the dictionary names that they have a setter
+  for, the behavior, locale and style first; NSDateFormatter reads
+  `NS.format` and `NS.natural`.  `NSNumberFormatter/keyedAttributes.m`
+  fails 5 of its 10 checks without the fix and `NSDateFormatter/keyedAttributes.m`
+  7 of its 10; both pass with it.  Writing `NS.attributes` is not done.
+- `numberformatter-parse-decimal` (libs-base).  With
+  generatesDecimalNumbers set, -getObjectValue:forString:range:error: refused
+  every string: its unum_parseDecimal() call was under `#if 0` (it needs
+  ICU 4.4) and the branch ended in `result = NO`.  It is now used from ICU
+  4.4 on, and an older ICU parses a double into a decimal number (that path
+  was checked once by forcing it).  `NSNumberFormatter/parseDecimal.m`
+  fails 9 of its 10 checks without the fix and passes with it.
+- `xib-formatter-attributes` (libs-gui).  A xib's numberFormatter and
+  dateFormatter elements carry those settings as attributes and child
+  elements, and nothing presented them as `NS.attributes`; the xib
+  unarchiver now does, turning Interface Builder's names (custom10_4,
+  decimal, short, halfUp, ...) into values.  It needs
+  `formatter-keyed-attributes` to have an effect.
+  `GSXib5KeyedUnarchiver/formatters.m` checks Formatters.xib against what
+  macOS gives for it compiled by ibtool; with the libs-base fix, 18 of its
+  26 checks fail without this one and all pass with it.
+
+Each libs-base patch applies alone to libs-base 7b3a12c, and the libs-gui
+one to libs-gui 5c43a94; with every patch here applied, the base suite
+passes 14144 checks and the gui suite 5004.  One base file aborts,
+`GSMime/encoded-word-stack.m` (a segmentation fault), on unpatched
+master as well.
+
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
 | `autoreleased-return-value` | libobjc2 | test | [#426](https://github.com/gnustep/libobjc2/pull/426) closed unmerged | (none: ODataStore works around it) |
@@ -405,12 +445,15 @@ patch here applied, the NSPredicate suite passes 433 of 433.
 | `nonretained-value-identity` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
 | `xml-detached-namespaces` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
 | `xml-remove-namespace-in-use` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
+| `formatter-keyed-attributes` | libs-base | test | not sent yet | (none: ORMKit's apps use it from here) |
+| `numberformatter-parse-decimal` | libs-base | test | not sent yet | (none: ORMKit's apps use it from here) |
 | `popover-placement` | libs-gui | test | not sent yet | (none: UDCodeKit places its own child windows meanwhile) |
 | `tableview-prototype-copy` | libs-gui | test | not sent yet | (none: UDCodeKit's issues navigator is cell-based meanwhile) |
 | `tooltip-mouse-moved` | libs-gui | test | not sent yet | (none: UDCodeKit resets the flag itself) |
 | `view-overlapping-siblings` | libs-gui | test | not sent yet | (none: UDCodeKit's jump-to-line box needs it, ashalkhakov/UDCodeKit#43) |
 | `opengl-view-hidden` | libs-gui | test | not sent yet | (none: UDQuakeTools' GUI editor uses it from here; its workaround is gone) |
 | `xib-segment-image` | libs-gui | test | not sent yet | (none: UDCode's navigator bar uses it from here) |
+| `xib-formatter-attributes` | libs-gui | test | not sent yet | (none: ORMKit's apps use it from here) |
 | `tableview-column-autoresizing-style` | libs-gui | test | [#982](https://github.com/gnustep/libs-gui/pull/982) | gnustep-coredata |
 | `collectionview-make-item` | libs-gui | test | [#1001](https://github.com/gnustep/libs-gui/pull/1001) | (none: TopoText uses it from here) |
 | `collectionview-flow-layout` | libs-gui | test | [#1002](https://github.com/gnustep/libs-gui/pull/1002) | (none: TopoText uses it from here) |

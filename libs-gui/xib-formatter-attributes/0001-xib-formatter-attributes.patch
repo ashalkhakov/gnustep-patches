@@ -1,0 +1,382 @@
+From 011e3f8f8678b7e8db3bc4cb9821b065266948bb Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Mon, 19 Oct 2026 16:12:48 +0000
+Subject: [PATCH] GSXib5KeyedUnarchiver: give a xib's formatters their settings
+
+A numberFormatter or dateFormatter element carries its settings as
+attributes (formatterBehavior="custom10_4" numberStyle="decimal"
+generatesDecimalNumbers="YES" maximumFractionDigits="3", or
+dateStyle="short" timeStyle="short") and child elements
+(<real key="minimum" value="0.0"/>).  NSNumberFormatter and
+NSDateFormatter take those settings from the NS.attributes dictionary of
+a keyed archive, as a compiled nib carries it, and nothing presented a
+xib's attributes under that key, so every formatter in a xib came out
+with the defaults.
+
+NS.attributes is now decoded from the element: each attribute under its
+own name, but for id, key, customClass and userLabel, with Interface
+Builder's names for the behaviors, number styles, padding positions,
+rounding modes and date and time styles turned into their values, digit
+counts and widths into numbers and YES and NO into booleans; and each
+child element with a key, decoded as usual.  The names are the ones
+ibtool accepts; "10_0" is the 10.0 behavior.
+
+The formatters take the settings with the libs-base change that makes
+them read NS.attributes.  Tests/gui/GSXib5KeyedUnarchiver/formatters.m
+loads Formatters.xib and checks the values macOS gives for it, compiled
+by ibtool; with that libs-base change, 18 of its 26 checks fail without
+this one.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/GSXib5KeyedUnarchiver.m                | 109 ++++++++++++++++
+ .../gui/GSXib5KeyedUnarchiver/Formatters.xib  |  57 +++++++++
+ Tests/gui/GSXib5KeyedUnarchiver/formatters.m  | 117 ++++++++++++++++++
+ 3 files changed, 283 insertions(+)
+ create mode 100644 Tests/gui/GSXib5KeyedUnarchiver/Formatters.xib
+ create mode 100644 Tests/gui/GSXib5KeyedUnarchiver/formatters.m
+
+diff --git a/Source/GSXib5KeyedUnarchiver.m b/Source/GSXib5KeyedUnarchiver.m
+index 58582b7..b1e0156 100644
+--- a/Source/GSXib5KeyedUnarchiver.m
++++ b/Source/GSXib5KeyedUnarchiver.m
+@@ -37,6 +37,9 @@
+ #import "GNUstepGUI/GSXibLoading.h"
+ #import "GNUstepGUI/GSXibElement.h"
+ 
++#import <Foundation/NSDateFormatter.h>
++#import <Foundation/NSNumberFormatter.h>
++
+ #import "AppKit/NSApplication.h"
+ #import "AppKit/NSBox.h"
+ #import "AppKit/NSBrowser.h"
+@@ -183,6 +186,8 @@ static NSArray      *XmlReferenceAttributes  = nil;
+ static NSArray      *XmlConnectionRecordTags  = nil;
+ static NSArray      *XmlConstraintRecordTags  = nil;
+ static NSArray      *XmlBoolDefaultYes  = nil;
++static NSDictionary *XmlFormatterEnumerations = nil;
++static NSArray      *XmlFormatterNumericKeys = nil;
+ 
+ + (void) initialize
+ {
+@@ -191,6 +196,8 @@ static NSArray      *XmlBoolDefaultYes  = nil;
+       // Only check one since we're going to load all once...
+       if (XmlTagToObjectClassMap == nil)
+         {
++          NSDictionary *dateStyles;
++
+           // These define XML tags (i.e. <objects ...) that should be allocated as the
+           // associated class...
+           XmlTagToObjectClassMap =
+@@ -463,6 +470,7 @@ static NSArray      *XmlBoolDefaultYes  = nil;
+                @"decodeDatePickerStyleForElement:", @"NSDatePickerType",
+                @"decodeDatePickerModeForElement:", @"NSDatePickerMode",
+                @"decodeDatePickerDateValueForElement:", @"NSDateValue",
++               @"decodeFormatterAttributesForElement:", @"NS.attributes",
+                  nil];
+           RETAIN(XmlKeyToDecoderSelectorMap);
+ 
+@@ -475,6 +483,57 @@ static NSArray      *XmlBoolDefaultYes  = nil;
+                                                @"enabled",
+                                                @"canPropagateSelectedChildViewControllerTitle",
+                                                nil];
++
++          dateStyles = [NSDictionary dictionaryWithObjectsAndKeys:
++            [NSNumber numberWithInt: NSDateFormatterNoStyle], @"none",
++            [NSNumber numberWithInt: NSDateFormatterShortStyle], @"short",
++            [NSNumber numberWithInt: NSDateFormatterMediumStyle], @"medium",
++            [NSNumber numberWithInt: NSDateFormatterLongStyle], @"long",
++            [NSNumber numberWithInt: NSDateFormatterFullStyle], @"full",
++            nil];
++          XmlFormatterEnumerations = [[NSDictionary alloc] initWithObjectsAndKeys:
++            [NSDictionary dictionaryWithObjectsAndKeys:
++              [NSNumber numberWithInt: 1000], @"10_0",
++              [NSNumber numberWithInt: 1040], @"default10_4",
++              [NSNumber numberWithInt: 1040], @"custom10_4",
++              nil], @"formatterBehavior",
++            [NSDictionary dictionaryWithObjectsAndKeys:
++              [NSNumber numberWithInt: NSNumberFormatterNoStyle], @"none",
++              [NSNumber numberWithInt: NSNumberFormatterDecimalStyle], @"decimal",
++              [NSNumber numberWithInt: NSNumberFormatterCurrencyStyle], @"currency",
++              [NSNumber numberWithInt: NSNumberFormatterPercentStyle], @"percent",
++              [NSNumber numberWithInt: NSNumberFormatterScientificStyle], @"scientific",
++              [NSNumber numberWithInt: NSNumberFormatterSpellOutStyle], @"spellOut",
++              [NSNumber numberWithInt: 6], @"ordinal",
++              [NSNumber numberWithInt: 8], @"currencyISOCode",
++              [NSNumber numberWithInt: 9], @"currencyPlural",
++              [NSNumber numberWithInt: 10], @"currencyAccounting",
++              nil], @"numberStyle",
++            [NSDictionary dictionaryWithObjectsAndKeys:
++              [NSNumber numberWithInt: NSNumberFormatterPadBeforePrefix], @"beforePrefix",
++              [NSNumber numberWithInt: NSNumberFormatterPadAfterPrefix], @"afterPrefix",
++              [NSNumber numberWithInt: NSNumberFormatterPadBeforeSuffix], @"beforeSuffix",
++              [NSNumber numberWithInt: NSNumberFormatterPadAfterSuffix], @"afterSuffix",
++              nil], @"paddingPosition",
++            [NSDictionary dictionaryWithObjectsAndKeys:
++              [NSNumber numberWithInt: NSNumberFormatterRoundCeiling], @"ceiling",
++              [NSNumber numberWithInt: NSNumberFormatterRoundFloor], @"floor",
++              [NSNumber numberWithInt: NSNumberFormatterRoundDown], @"down",
++              [NSNumber numberWithInt: NSNumberFormatterRoundUp], @"up",
++              [NSNumber numberWithInt: NSNumberFormatterRoundHalfEven], @"halfEven",
++              [NSNumber numberWithInt: NSNumberFormatterRoundHalfDown], @"halfDown",
++              [NSNumber numberWithInt: NSNumberFormatterRoundHalfUp], @"halfUp",
++              nil], @"roundingMode",
++            dateStyles, @"dateStyle",
++            dateStyles, @"timeStyle",
++            nil];
++
++          XmlFormatterNumericKeys = [[NSArray alloc] initWithObjects:
++            @"formatWidth", @"groupingSize", @"secondaryGroupingSize",
++            @"minimumIntegerDigits", @"maximumIntegerDigits",
++            @"minimumFractionDigits", @"maximumFractionDigits",
++            @"minimumSignificantDigits", @"maximumSignificantDigits",
++            nil];
+         }
+     }
+ }
+@@ -2631,6 +2690,56 @@ didStartElement: (NSString*)elementName
+   return [self decodeObjectForKey: @"date"];
+ }
+ 
++- (id) decodeFormatterAttributesForElement: (GSXibElement*)element
++{
++  NSMutableDictionary	*attributes = [NSMutableDictionary dictionary];
++  NSDictionary		*xmlAttributes = [element attributes];
++  NSEnumerator		*keys = [xmlAttributes keyEnumerator];
++  NSString		*key;
++
++  while ((key = [keys nextObject]) != nil)
++    {
++      NSString		*value = [xmlAttributes objectForKey: key];
++      NSDictionary	*names = [XmlFormatterEnumerations objectForKey: key];
++      id		object = value;
++
++      if ([key isEqualToString: @"id"] || [key isEqualToString: @"key"]
++	|| [key isEqualToString: @"customClass"]
++	|| [key isEqualToString: @"userLabel"])
++	{
++	  continue;
++	}
++      if (names != nil)
++	{
++	  object = [names objectForKey: value];
++	}
++      else if ([XmlFormatterNumericKeys containsObject: key])
++	{
++	  object = [NSNumber numberWithInteger: [value integerValue]];
++	}
++      else if ([value isEqualToString: @"YES"] || [value isEqualToString: @"NO"])
++	{
++	  object = [NSNumber numberWithBool: [value boolValue]];
++	}
++      if (object != nil)
++	{
++	  [attributes setObject: object forKey: key];
++	}
++    }
++
++  keys = [[element elements] keyEnumerator];
++  while ((key = [keys nextObject]) != nil)
++    {
++      id	object = [self decodeObjectForKey: key];
++
++      if (object != nil)
++	{
++	  [attributes setObject: object forKey: key];
++	}
++    }
++  return attributes;
++}
++
+ - (id) decodeButtonFlags1ForElement: (GSXibElement*)element
+ {
+   NSNumber *value = nil;
+diff --git a/Tests/gui/GSXib5KeyedUnarchiver/Formatters.xib b/Tests/gui/GSXib5KeyedUnarchiver/Formatters.xib
+new file mode 100644
+index 0000000..7dca54c
+--- /dev/null
++++ b/Tests/gui/GSXib5KeyedUnarchiver/Formatters.xib
+@@ -0,0 +1,57 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<document type="com.apple.InterfaceBuilder3.Cocoa.XIB" version="3.0" toolsVersion="24127" targetRuntime="MacOSX.Cocoa" propertyAccessControl="none">
++    <dependencies>
++        <deployment identifier="macosx"/>
++        <plugIn identifier="com.apple.InterfaceBuilder.CocoaPlugin" version="24127"/>
++    </dependencies>
++    <objects>
++        <customObject id="-2" userLabel="File's Owner" customClass="NSApplication"/>
++        <customObject id="-1" userLabel="First Responder" customClass="FirstResponder"/>
++        <customObject id="-3" userLabel="Application" customClass="NSObject"/>
++        <textField id="mileage">
++            <rect key="frame" x="20" y="10" width="160" height="22"/>
++            <textFieldCell key="cell" selectable="YES" editable="YES" borderStyle="bezel" drawsBackground="YES" id="mileage-cell">
++                <numberFormatter key="formatter" formatterBehavior="custom10_4" numberStyle="decimal" generatesDecimalNumbers="YES" usesGroupingSeparator="NO" groupingSize="0" minimumIntegerDigits="1" maximumIntegerDigits="42" maximumFractionDigits="3" id="mileage-formatter"/>
++                <font key="font" metaFont="system"/>
++            </textFieldCell>
++        </textField>
++        <textField id="share">
++            <rect key="frame" x="20" y="50" width="160" height="22"/>
++            <textFieldCell key="cell" selectable="YES" editable="YES" borderStyle="bezel" drawsBackground="YES" id="share-cell">
++                <numberFormatter key="formatter" formatterBehavior="default10_4" numberStyle="percent" formatWidth="-1" minimumIntegerDigits="1" maximumIntegerDigits="2000000000" maximumFractionDigits="1" id="share-formatter"/>
++                <font key="font" metaFont="system"/>
++            </textFieldCell>
++        </textField>
++        <textField id="price">
++            <rect key="frame" x="20" y="90" width="160" height="22"/>
++            <textFieldCell key="cell" selectable="YES" editable="YES" borderStyle="bezel" drawsBackground="YES" id="price-cell">
++                <numberFormatter key="formatter" formatterBehavior="default10_4" positiveFormat="#,##0.###" negativeFormat="#,##0.###" numberStyle="decimal" paddingCharacter="*" minimumIntegerDigits="1" maximumIntegerDigits="309" maximumFractionDigits="3" decimalSeparator="." groupingSeparator="," currencyDecimalSeparator="." plusSign="+" minusSign="-" notANumberSymbol="NaN" perMillSymbol="‰" percentSymbol="%" exponentSymbol="E" positivePrefix="" positiveSuffix="" negativePrefix="-" negativeSuffix="" id="price-formatter">
++                    <real key="minimum" value="0.0"/>
++                    <real key="maximum" value="1000"/>
++                </numberFormatter>
++                <font key="font" metaFont="system"/>
++            </textFieldCell>
++        </textField>
++        <textField id="timestamp">
++            <rect key="frame" x="20" y="130" width="160" height="22"/>
++            <textFieldCell key="cell" selectable="YES" editable="YES" borderStyle="bezel" drawsBackground="YES" id="timestamp-cell">
++                <dateFormatter key="formatter" formatterBehavior="custom10_4" dateStyle="short" timeStyle="short" id="timestamp-formatter"/>
++                <font key="font" metaFont="system"/>
++            </textFieldCell>
++        </textField>
++        <textField id="day">
++            <rect key="frame" x="20" y="170" width="160" height="22"/>
++            <textFieldCell key="cell" selectable="YES" editable="YES" borderStyle="bezel" drawsBackground="YES" id="day-cell">
++                <dateFormatter key="formatter" formatterBehavior="custom10_4" dateStyle="long" timeStyle="none" id="day-formatter"/>
++                <font key="font" metaFont="system"/>
++            </textFieldCell>
++        </textField>
++        <textField id="iso">
++            <rect key="frame" x="20" y="210" width="160" height="22"/>
++            <textFieldCell key="cell" selectable="YES" editable="YES" borderStyle="bezel" drawsBackground="YES" id="iso-cell">
++                <dateFormatter key="formatter" formatterBehavior="custom10_4" dateFormat="yyyy-MM-dd" id="iso-formatter"/>
++                <font key="font" metaFont="system"/>
++            </textFieldCell>
++        </textField>
++    </objects>
++</document>
+diff --git a/Tests/gui/GSXib5KeyedUnarchiver/formatters.m b/Tests/gui/GSXib5KeyedUnarchiver/formatters.m
+new file mode 100644
+index 0000000..809a0cf
+--- /dev/null
++++ b/Tests/gui/GSXib5KeyedUnarchiver/formatters.m
+@@ -0,0 +1,117 @@
++#import "ObjectTesting.h"
++
++#import <Foundation/NSData.h>
++#import <Foundation/NSDateFormatter.h>
++#import <Foundation/NSDecimalNumber.h>
++#import <Foundation/NSNumberFormatter.h>
++#import <AppKit/NSApplication.h>
++#import <AppKit/NSTextField.h>
++#import <Additions/GNUstepGUI/GSXibKeyedUnarchiver.h>
++
++/* The values checked here are the ones AppKit gives for Formatters.xib
++ * when it is compiled by ibtool and loaded on macOS.
++ */
++static id
++formatterAt(NSArray *rootObjects, CGFloat y)
++{
++  NSEnumerator	*enumerator = [rootObjects objectEnumerator];
++  id		element;
++
++  while ((element = [enumerator nextObject]) != nil)
++    {
++      if ([element isKindOfClass: [NSTextField class]]
++	&& [element frame].origin.y == y)
++	{
++	  return [element formatter];
++	}
++    }
++  return nil;
++}
++
++int main()
++{
++  START_SET("GSXib5KeyedUnarchiver formatter tests")
++
++  NS_DURING
++    {
++      [NSApplication sharedApplication];
++    }
++  NS_HANDLER
++    {
++      if ([[localException name]
++	isEqualToString: NSInternalInconsistencyException ])
++	{
++	  SKIP("It looks like GNUstep backend is not yet installed")
++	}
++    }
++  NS_ENDHANDLER
++
++  NSData		*data;
++  GSXibKeyedUnarchiver	*unarchiver;
++  NSArray		*rootObjects;
++  NSNumberFormatter	*number;
++  NSDateFormatter	*date;
++
++  data = [NSData dataWithContentsOfFile: @"Formatters.xib"];
++  unarchiver = [GSXibKeyedUnarchiver unarchiverForReadingWithData: data];
++  rootObjects = [unarchiver decodeObjectForKey: @"IBDocument.RootObjects"];
++
++  number = formatterAt(rootObjects, 10);
++  PASS([number isKindOfClass: [NSNumberFormatter class]],
++    "a numberFormatter element is a number formatter")
++  PASS([number formatterBehavior] == NSNumberFormatterBehavior10_4,
++    "formatterBehavior custom10_4 is the 10.4 behavior")
++  PASS([number numberStyle] == NSNumberFormatterDecimalStyle,
++    "numberStyle decimal is the decimal style")
++  PASS([number generatesDecimalNumbers], "generatesDecimalNumbers is read")
++  PASS([number usesGroupingSeparator] == NO, "usesGroupingSeparator is read")
++  PASS([number minimumIntegerDigits] == 1, "minimumIntegerDigits is read")
++  PASS([number maximumIntegerDigits] == 42, "maximumIntegerDigits is read")
++  PASS([number maximumFractionDigits] == 3, "maximumFractionDigits is read")
++  PASS_EQUAL([number stringFromNumber:
++    [NSDecimalNumber decimalNumberWithString: @"12345.6789"]],
++    @"12345.679", "the number formatter formats with its settings")
++
++  number = formatterAt(rootObjects, 50);
++  PASS([number formatterBehavior] == NSNumberFormatterBehavior10_4,
++    "formatterBehavior default10_4 is the 10.4 behavior")
++  PASS([number numberStyle] == NSNumberFormatterPercentStyle,
++    "numberStyle percent is the percent style")
++  PASS([number maximumFractionDigits] == 1,
++    "maximumFractionDigits is read after the style")
++
++  number = formatterAt(rootObjects, 90);
++  PASS([number numberStyle] == NSNumberFormatterDecimalStyle,
++    "a formatter with its symbols spelt out has its style")
++  PASS([number maximumIntegerDigits] == 309, "its maximumIntegerDigits")
++  PASS_EQUAL([number minimum], [NSNumber numberWithInt: 0],
++    "a minimum element is the minimum")
++  PASS_EQUAL([number maximum], [NSNumber numberWithInt: 1000],
++    "a maximum element is the maximum")
++  PASS_EQUAL([number paddingCharacter], @"*", "paddingCharacter is read")
++  PASS_EQUAL([number negativePrefix], @"-", "negativePrefix is read")
++
++  date = formatterAt(rootObjects, 130);
++  PASS([date isKindOfClass: [NSDateFormatter class]],
++    "a dateFormatter element is a date formatter")
++  PASS([date formatterBehavior] == NSDateFormatterBehavior10_4,
++    "formatterBehavior custom10_4 is the 10.4 behavior")
++  PASS([date dateStyle] == NSDateFormatterShortStyle,
++    "dateStyle short is the short style")
++  PASS([date timeStyle] == NSDateFormatterShortStyle,
++    "timeStyle short is the short style")
++
++  date = formatterAt(rootObjects, 170);
++  PASS([date dateStyle] == NSDateFormatterLongStyle,
++    "dateStyle long is the long style")
++  PASS([date timeStyle] == NSDateFormatterNoStyle,
++    "timeStyle none is no style")
++
++  date = formatterAt(rootObjects, 210);
++  PASS([date formatterBehavior] == NSDateFormatterBehavior10_4,
++    "a date formatter with a format has the 10.4 behavior")
++  PASS_EQUAL([date dateFormat], @"yyyy-MM-dd", "dateFormat is read")
++
++  END_SET("GSXib5KeyedUnarchiver formatter tests")
++  return 0;
++}
+-- 
+2.43.0
+

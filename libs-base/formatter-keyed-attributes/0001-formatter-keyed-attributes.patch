@@ -1,0 +1,414 @@
+From aa55845814563cd8e407cfc5b0527a1b97aa8d05 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Mon, 19 Oct 2026 16:12:48 +0000
+Subject: [PATCH] Read a formatter's 10.4 settings from a keyed archive
+
+macOS archives a number or date formatter's settings in an NS.attributes
+dictionary keyed by property name (formatterBehavior, numberStyle,
+generatesDecimalNumbers, maximumFractionDigits, minimum, locale,
+dateStyle, timeStyle, dateFormat and so on), beside the 10.0 keys such as
+NS.positiveformat and NS.format.  NSNumberFormatter read only the 10.0
+keys, and NSDateFormatter read a keyed archive as though it were not
+keyed, so it got no format at all.  A formatter from a nib came out with
+the default style and digits: a decimal field that generates decimal
+numbers parsed to a double, and a date field lost its styles.
+
+Both now set each property NS.attributes names that they have a setter
+for, by key-value coding: the behavior, the locale and the style first,
+since a style resets the digits and the format, then the rest in the
+order of their names.  NSDateFormatter reads NS.format and NS.natural
+from a keyed archive.  Writing NS.attributes is left for later.
+
+The keys and values are those macOS 15 archives.
+Tests/base/NSNumberFormatter/keyedAttributes.m and
+Tests/base/NSDateFormatter/keyedAttributes.m write archives of that
+shape and read them back; 5 of the 10 number checks and 7 of the 10 date
+checks fail without the change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/GSPrivate.h                            |   8 ++
+ Source/NSDateFormatter.m                      |  17 +++
+ Source/NSFormatter.m                          |  49 ++++++++
+ Source/NSNumberFormatter.m                    |  10 ++
+ Tests/base/NSDateFormatter/keyedAttributes.m  | 113 ++++++++++++++++++
+ .../base/NSNumberFormatter/keyedAttributes.m  |  91 ++++++++++++++
+ 6 files changed, 288 insertions(+)
+ create mode 100644 Tests/base/NSDateFormatter/keyedAttributes.m
+ create mode 100644 Tests/base/NSNumberFormatter/keyedAttributes.m
+
+diff --git a/Source/GSPrivate.h b/Source/GSPrivate.h
+index bd9a476..7378331 100644
+--- a/Source/GSPrivate.h
++++ b/Source/GSPrivate.h
+@@ -31,6 +31,7 @@
+ @class	_GSInsensitiveDictionary;
+ @class	_GSMutableInsensitiveDictionary;
+ 
++@class	NSFormatter;
+ @class	NSNotification;
+ @class	NSPointerArray;
+ @class	NSRecursiveLock;
+@@ -486,6 +487,13 @@ typedef NSRange (*GSRSFunc)(id, id, unsigned, NSRange);
+ GSRSFunc
+ GSPrivateRangeOfString(NSString *receiver, NSString *target) GS_ATTRIB_PRIVATE;
+ 
++/* Sets a formatter's properties from the NS.attributes dictionary of a
++ * keyed archive: the keys in first, in that order, then the rest.
++ */
++void
++GSPrivateSetFormatterAttributes(NSFormatter *formatter,
++  NSDictionary *attributes, NSArray *first) GS_ATTRIB_PRIVATE;
++
+ /* Function to return the hash value for a small integer (used by NSNumber).
+  */
+ unsigned
+diff --git a/Source/NSDateFormatter.m b/Source/NSDateFormatter.m
+index e35ed6c..88f4ae2 100644
+--- a/Source/NSDateFormatter.m
++++ b/Source/NSDateFormatter.m
+@@ -45,6 +45,7 @@
+ #import "Foundation/NSFormatter.h"
+ #import "Foundation/NSDateFormatter.h"
+ #import "Foundation/NSCoder.h"
++#import "GSPrivate.h"
+ 
+ #if defined(HAVE_UNICODE_UDAT_H) && defined(HAVE_UNICODE_UDATPG_H)
+ #define id id_ucal
+@@ -276,6 +277,22 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+   NSString	*fmt;
+   BOOL		nl;
+ 
++  if ([aCoder allowsKeyedCoding])
++    {
++      NSDictionary	*attributes;
++
++      fmt = [aCoder decodeObjectForKey: @"NS.format"];
++      nl = [aCoder decodeBoolForKey: @"NS.natural"];
++      self = [self initWithDateFormat: fmt allowNaturalLanguage: nl];
++      attributes = [aCoder decodeObjectForKey: @"NS.attributes"];
++      if (self != nil && [attributes isKindOfClass: [NSDictionary class]])
++        {
++          GSPrivateSetFormatterAttributes(self, attributes,
++            [NSArray arrayWithObjects: @"formatterBehavior", @"locale",
++              @"calendar", @"timeZone", @"dateStyle", @"timeStyle", nil]);
++        }
++      return self;
++    }
+   [aCoder decodeValuesOfObjCTypes: "@C", &fmt, &nl];
+   return [self initWithDateFormat: AUTORELEASE(fmt) allowNaturalLanguage: nl];
+ }
+diff --git a/Source/NSFormatter.m b/Source/NSFormatter.m
+index 465b472..a20d3ea 100644
+--- a/Source/NSFormatter.m
++++ b/Source/NSFormatter.m
+@@ -26,6 +26,55 @@
+ 
+ #import "common.h"
+ #import "Foundation/NSFormatter.h"
++#import "Foundation/NSArray.h"
++#import "Foundation/NSDictionary.h"
++#import "Foundation/NSKeyValueCoding.h"
++#import "GSPrivate.h"
++
++void
++GSPrivateSetFormatterAttributes(NSFormatter *formatter,
++  NSDictionary *attributes, NSArray *first)
++{
++  NSMutableArray	*keys = [NSMutableArray array];
++  NSArray		*rest;
++  NSEnumerator		*e;
++  NSString		*key;
++
++  e = [first objectEnumerator];
++  while ((key = [e nextObject]) != nil)
++    {
++      if ([attributes objectForKey: key] != nil)
++	{
++	  [keys addObject: key];
++	}
++    }
++  rest = [[attributes allKeys] sortedArrayUsingSelector: @selector(compare:)];
++  e = [rest objectEnumerator];
++  while ((key = [e nextObject]) != nil)
++    {
++      if ([keys containsObject: key] == NO)
++	{
++	  [keys addObject: key];
++	}
++    }
++
++  e = [keys objectEnumerator];
++  while ((key = [e nextObject]) != nil)
++    {
++      NSString	*setter;
++
++      if ([key length] == 0)
++	{
++	  continue;
++	}
++      setter = [NSString stringWithFormat: @"set%@%@:",
++	[[key substringToIndex: 1] uppercaseString], [key substringFromIndex: 1]];
++      if ([formatter respondsToSelector: NSSelectorFromString(setter)])
++	{
++	  [formatter setValue: [attributes objectForKey: key] forKey: key];
++	}
++    }
++}
+ 
+ @implementation NSFormatter
+ 
+diff --git a/Source/NSNumberFormatter.m b/Source/NSNumberFormatter.m
+index 00aaa27..cc00ed4 100644
+--- a/Source/NSNumberFormatter.m
++++ b/Source/NSNumberFormatter.m
+@@ -46,6 +46,7 @@
+ 
+ #import "common.h"
+ #define	EXPOSE_NSNumberFormatter_IVARS	1
++#import "Foundation/NSArray.h"
+ #import "Foundation/NSAttributedString.h"
+ #import "Foundation/NSDecimalNumber.h"
+ #import "Foundation/NSDictionary.h"
+@@ -767,6 +768,8 @@ static NSUInteger _defaultBehavior = NSNumberFormatterBehavior10_4;
+ 
+ - (id) initWithCoder: (NSCoder*)decoder
+ {
++  NSDictionary	*attributes;
++
+   /* We can call our -init method to set up default values, then
+    * override settings with information from the archive.
+    */
+@@ -851,6 +854,13 @@ static NSUInteger _defaultBehavior = NSNumberFormatterBehavior10_4;
+ 	  [self setAttributedStringForZero:
+ 	    [decoder decodeObjectForKey: @"NS.zero"]];
+ 	}
++      attributes = [decoder decodeObjectForKey: @"NS.attributes"];
++      if ([attributes isKindOfClass: [NSDictionary class]])
++        {
++          GSPrivateSetFormatterAttributes(self, attributes,
++            [NSArray arrayWithObjects: @"formatterBehavior", @"locale",
++              @"numberStyle", nil]);
++        }
+     }
+   else
+     {
+diff --git a/Tests/base/NSDateFormatter/keyedAttributes.m b/Tests/base/NSDateFormatter/keyedAttributes.m
+new file mode 100644
+index 0000000..a2aefc2
+--- /dev/null
++++ b/Tests/base/NSDateFormatter/keyedAttributes.m
+@@ -0,0 +1,113 @@
++#import <Foundation/Foundation.h>
++#import "Testing.h"
++
++/* Writes what macOS writes for a date formatter: its 10.0 format and
++ * natural language flag, and its settings in NS.attributes.
++ */
++@interface	ArchivedDateFormatter : NSObject
++{
++  NSString	*format;
++  BOOL		natural;
++  NSDictionary	*attributes;
++}
++- (id) initWithFormat: (NSString*)f
++	      natural: (BOOL)n
++	   attributes: (NSDictionary*)a;
++@end
++
++@implementation	ArchivedDateFormatter
++- (id) initWithFormat: (NSString*)f
++	      natural: (BOOL)n
++	   attributes: (NSDictionary*)a
++{
++  if (nil != (self = [super init]))
++    {
++      format = [f copy];
++      natural = n;
++      attributes = [a copy];
++    }
++  return self;
++}
++- (void) dealloc
++{
++  [format release];
++  [attributes release];
++  [super dealloc];
++}
++- (void) encodeWithCoder: (NSCoder*)coder
++{
++  [coder encodeObject: attributes forKey: @"NS.attributes"];
++  [coder encodeObject: format forKey: @"NS.format"];
++  [coder encodeBool: natural forKey: @"NS.natural"];
++}
++@end
++
++static NSDateFormatter *
++unarchived(NSString *format, BOOL natural, NSDictionary *attributes)
++{
++  ArchivedDateFormatter	*archived;
++  NSKeyedArchiver	*archiver;
++  NSMutableData		*data = [NSMutableData data];
++
++  archived = [[[ArchivedDateFormatter alloc] initWithFormat: format
++						    natural: natural
++						 attributes: attributes]
++    autorelease];
++  archiver = [[NSKeyedArchiver alloc] initForWritingWithMutableData: data];
++  [archiver setClassName: @"NSDateFormatter"
++		forClass: [ArchivedDateFormatter class]];
++  [archiver encodeObject: archived forKey: @"root"];
++  [archiver finishEncoding];
++  [archiver release];
++  return [NSKeyedUnarchiver unarchiveObjectWithData: data];
++}
++
++int main()
++{
++  NSAutoreleasePool	*arp = [NSAutoreleasePool new];
++  NSDateFormatter	*fmt;
++
++  START_SET("NSDateFormatter keyed attributes")
++
++    fmt = unarchived(@"M/d/yy, h:mm a", NO,
++      [NSDictionary dictionaryWithObjectsAndKeys:
++	[NSNumber numberWithInt: 1040], @"formatterBehavior",
++	[NSNumber numberWithInt: 1], @"dateStyle",
++	[NSNumber numberWithInt: 1], @"timeStyle",
++	nil]);
++    PASS([fmt isKindOfClass: [NSDateFormatter class]],
++      "a date formatter is unarchived")
++    PASS([fmt formatterBehavior] == NSDateFormatterBehavior10_4,
++      "formatterBehavior is read from NS.attributes")
++    PASS([fmt dateStyle] == NSDateFormatterShortStyle,
++      "dateStyle is read from NS.attributes")
++    PASS([fmt timeStyle] == NSDateFormatterShortStyle,
++      "timeStyle is read from NS.attributes")
++
++    fmt = unarchived(@"yyyy-MM-dd", YES,
++      [NSDictionary dictionaryWithObjectsAndKeys:
++	[NSNumber numberWithInt: 1040], @"formatterBehavior",
++	@"yyyy-MM-dd", @"dateFormat",
++	[NSNumber numberWithBool: YES], @"lenient",
++	nil]);
++    PASS([fmt formatterBehavior] == NSDateFormatterBehavior10_4,
++      "a custom format keeps the 10.4 behavior")
++    PASS_EQUAL([fmt dateFormat], @"yyyy-MM-dd",
++      "dateFormat is read from NS.attributes")
++    PASS([fmt isLenient], "lenient is read from NS.attributes")
++
++    fmt = unarchived(@"%Y", YES,
++      [NSDictionary dictionaryWithObjectsAndKeys:
++	[NSNumber numberWithInt: 1000], @"formatterBehavior",
++	@"%Y", @"dateFormat_10_0",
++	nil]);
++    PASS([fmt formatterBehavior] == NSDateFormatterBehavior10_0,
++      "a 10.0 formatter keeps its behavior")
++    PASS_EQUAL([fmt dateFormat], @"%Y", "NS.format is read")
++    PASS([fmt allowsNaturalLanguage], "NS.natural is read")
++
++  END_SET("NSDateFormatter keyed attributes")
++
++  [arp release];
++  return 0;
++}
+diff --git a/Tests/base/NSNumberFormatter/keyedAttributes.m b/Tests/base/NSNumberFormatter/keyedAttributes.m
+new file mode 100644
+index 0000000..96aad3f
+--- /dev/null
++++ b/Tests/base/NSNumberFormatter/keyedAttributes.m
+@@ -0,0 +1,91 @@
++#import <Foundation/Foundation.h>
++#import "Testing.h"
++
++#if	defined(GS_USE_ICU)
++#define	NSLOCALE_SUPPORTED	GS_USE_ICU
++#else
++#define	NSLOCALE_SUPPORTED	1 /* Assume Apple support */
++#endif
++
++/* Writes what macOS writes for a number formatter set up as a nib's
++ * decimal field: the 10.0 keys, and the 10.4 settings in NS.attributes.
++ */
++@interface	ArchivedNumberFormatter : NSObject
++@end
++
++@implementation	ArchivedNumberFormatter
++- (void) encodeWithCoder: (NSCoder*)coder
++{
++  NSDictionary	*attributes;
++
++  attributes = [NSDictionary dictionaryWithObjectsAndKeys:
++    [NSNumber numberWithInt: 1040], @"formatterBehavior",
++    [NSNumber numberWithInt: 1], @"numberStyle",
++    [NSNumber numberWithBool: YES], @"generatesDecimalNumbers",
++    [NSNumber numberWithBool: NO], @"usesGroupingSeparator",
++    [NSNumber numberWithInt: 0], @"groupingSize",
++    [NSNumber numberWithInt: 1], @"minimumIntegerDigits",
++    [NSNumber numberWithInt: 42], @"maximumIntegerDigits",
++    [NSNumber numberWithInt: 3], @"maximumFractionDigits",
++    [NSNumber numberWithBool: YES], @"allowsFloats",
++    @"", @"nilSymbol",
++    nil];
++  [coder encodeBool: YES forKey: @"NS.allowsfloats"];
++  [coder encodeBool: NO forKey: @"NS.hasthousands"];
++  [coder encodeBool: YES forKey: @"NS.localized"];
++  [coder encodeObject: @"." forKey: @"NS.decimal"];
++  [coder encodeObject: @"," forKey: @"NS.thousand"];
++  [coder encodeObject: @"#########################################0.###"
++	       forKey: @"NS.positiveformat"];
++  [coder encodeObject: @"#########################################0.###"
++	       forKey: @"NS.negativeformat"];
++  [coder encodeObject: attributes forKey: @"NS.attributes"];
++}
++@end
++
++int main()
++{
++  NSAutoreleasePool	*arp = [NSAutoreleasePool new];
++  NSKeyedArchiver	*archiver;
++  NSMutableData		*data;
++  NSNumberFormatter	*fmt;
++  ArchivedNumberFormatter	*archived;
++
++  START_SET("NSNumberFormatter keyed attributes")
++    if (!NSLOCALE_SUPPORTED)
++      SKIP("NSLocale not supported\nThe ICU library was not available when GNUstep-base was built")
++
++    data = [NSMutableData data];
++    archiver = [[NSKeyedArchiver alloc] initForWritingWithMutableData: data];
++    [archiver setClassName: @"NSNumberFormatter"
++		  forClass: [ArchivedNumberFormatter class]];
++    archived = [[ArchivedNumberFormatter new] autorelease];
++    [archiver encodeObject: archived forKey: @"root"];
++    [archiver finishEncoding];
++    [archiver release];
++
++    fmt = [NSKeyedUnarchiver unarchiveObjectWithData: data];
++    PASS([fmt isKindOfClass: [NSNumberFormatter class]],
++      "a number formatter is unarchived")
++    PASS([fmt formatterBehavior] == NSNumberFormatterBehavior10_4,
++      "formatterBehavior is read from NS.attributes")
++    PASS([fmt numberStyle] == NSNumberFormatterDecimalStyle,
++      "numberStyle is read from NS.attributes")
++    PASS([fmt generatesDecimalNumbers],
++      "generatesDecimalNumbers is read from NS.attributes")
++    PASS([fmt usesGroupingSeparator] == NO,
++      "usesGroupingSeparator is read from NS.attributes")
++    PASS([fmt minimumIntegerDigits] == 1,
++      "minimumIntegerDigits is read from NS.attributes")
++    PASS([fmt maximumIntegerDigits] == 42,
++      "maximumIntegerDigits is read from NS.attributes")
++    PASS([fmt maximumFractionDigits] == 3,
++      "maximumFractionDigits is read from NS.attributes")
++    PASS([fmt allowsFloats], "allowsFloats is read")
++    PASS_EQUAL([fmt stringFromNumber: [NSNumber numberWithDouble: 12345.6789]],
++      @"12345.679", "the formatter formats with the settings read")
++  END_SET("NSNumberFormatter keyed attributes")
++
++  [arp release];
++  return 0;
++}
+-- 
+2.43.0
+
