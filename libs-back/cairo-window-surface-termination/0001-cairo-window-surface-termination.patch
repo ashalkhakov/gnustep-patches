@@ -1,0 +1,273 @@
+From 41cb7cf61a5ed65cc49de9102e7410e94ab07c49 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Tue, 20 Oct 2026 02:12:50 +0500
+Subject: [PATCH] Let the cairo window surface go before its X window is
+ destroyed
+
+Every window closed with the cairo backend gives an X error:
+
+  X-Windows error - RenderBadPicture (invalid Picture parameter)
+          request code: 139
+
+-termwindow: destroys the X window as soon as NSWindow lets go of it,
+but the XGCairoModernSurface drawn into it lives on in its gstate until
+an autorelease pool lets go of that. Cairo holds a Render picture on the
+window surface (made the first time the back buffer is copied to the
+window), and the X server frees a window's pictures with the window, so
+when the surface is finally destroyed and cairo frees its picture, the
+picture is no longer there. (Seen with breakpoints on XDestroyWindow
+and XRenderFreePicture: termwindow's XDestroyWindow comes first, the
+free from -[XGCairoModernSurface dealloc] after it.)
+
+Add a driver flag, GDriverHandlesTermination: a driver that sets it is
+sent -windowDeviceWillTerminate by -termwindow: before the window is
+destroyed. XGCairoModernSurface sets it, for buffered and unbuffered
+windows alike, and finishes its window surface there, which frees the
+picture while the window still exists; drawing to a finished surface
+does nothing. A surface that goes before its window clears the flag,
+so the window does not message a freed driver, and one that outlived
+its window no longer touches the freed device when it goes.
+
+Tests/x11/windowclose.m opens, draws and closes three windows and
+counts RenderBadPicture errors with its own error handler. Without the
+change it counts three; with it none. The x11 and cairo tests still
+pass.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Headers/cairo/XGCairoModernSurface.h |   1 +
+ Headers/x11/XGServerWindow.h         |   8 +-
+ Source/cairo/XGCairoModernSurface.m  |  14 ++-
+ Source/x11/XGServerWindow.m          |   5 ++
+ Tests/x11/windowclose.m              | 124 +++++++++++++++++++++++++++
+ 5 files changed, 150 insertions(+), 2 deletions(-)
+ create mode 100644 Tests/x11/windowclose.m
+
+diff --git a/Headers/cairo/XGCairoModernSurface.h b/Headers/cairo/XGCairoModernSurface.h
+index 9a02c62..27b3227 100644
+--- a/Headers/cairo/XGCairoModernSurface.h
++++ b/Headers/cairo/XGCairoModernSurface.h
+@@ -31,6 +31,7 @@
+ {
+   @private
+     cairo_surface_t *_windowSurface;
++    BOOL _deviceTerminated;
+ }
+ @end
+ 
+diff --git a/Headers/x11/XGServerWindow.h b/Headers/x11/XGServerWindow.h
+index adca517..302bcd1 100644
+--- a/Headers/x11/XGServerWindow.h
++++ b/Headers/x11/XGServerWindow.h
+@@ -77,9 +77,15 @@ typedef struct {
+ /* Graphics Driver protocol. Setup in [NSGraphicsContext-contextDevice:] */
+ enum {
+   GDriverHandlesBacking = 1,
+-  GDriverHandlesExpose = 2
++  GDriverHandlesExpose = 2,
++  /* -termwindow: sends the gdriver -windowDeviceWillTerminate */
++  GDriverHandlesTermination = 4
+ };
+ 
++@interface NSObject (GSWindowDriver)
++- (void) windowDeviceWillTerminate;
++@end
++
+ typedef struct _gswindow_device_t {
+   Display               *display;      /* Display this window is on */
+   Window                ident;         /* Window handle */
+diff --git a/Source/cairo/XGCairoModernSurface.m b/Source/cairo/XGCairoModernSurface.m
+index a722168..b22f17f 100644
+--- a/Source/cairo/XGCairoModernSurface.m
++++ b/Source/cairo/XGCairoModernSurface.m
+@@ -61,6 +61,9 @@ - (id) initWithDevice: (void *)device
+   }
+ 
+ 
++  GSWINDEVICE->gdriverProtocol |= GDriverHandlesTermination;
++  GSWINDEVICE->gdriver = self;
++
+   if (GSWINDEVICE->type == NSBackingStoreNonretained)
+     {
+       // Don't double-buffer:
+@@ -76,7 +79,6 @@ - (id) initWithDevice: (void *)device
+       // Ask XGServerWindow to call +[CairoContext handleExposeRect:forDriver:]
+       // to let us handle the back buffer -> front buffer copy using cairo.
+       GSWINDEVICE->gdriverProtocol |= GDriverHandlesExpose | GDriverHandlesBacking;
+-      GSWINDEVICE->gdriver = self;
+ 
+       _windowSurface = windowsurface;
+       _surface = cairo_surface_create_similar(windowsurface,
+@@ -97,6 +99,10 @@ - (id) initWithDevice: (void *)device
+ 
+ - (void) dealloc
+ {
++  if (!_deviceTerminated && GSWINDEVICE->gdriver == self)
++    {
++      GSWINDEVICE->gdriverProtocol &= ~GDriverHandlesTermination;
++    }
+   if (_windowSurface != NULL)
+     {
+       cairo_surface_destroy(_windowSurface);
+@@ -104,6 +110,12 @@ - (void) dealloc
+   [super dealloc];
+ }
+ 
++- (void) windowDeviceWillTerminate
++{
++  cairo_surface_finish(_windowSurface != NULL ? _windowSurface : _surface);
++  _deviceTerminated = YES;
++}
++
+ - (NSSize) size
+ {
+   return GSWINDEVICE->xframe.size;
+diff --git a/Source/x11/XGServerWindow.m b/Source/x11/XGServerWindow.m
+index 80ff8d5..82f6821 100644
+--- a/Source/x11/XGServerWindow.m
++++ b/Source/x11/XGServerWindow.m
+@@ -2376,6 +2376,11 @@ - (void) termwindow: (int)win
+     {
+       [inputServer ximCloseIC: window->ic];
+     }
++  if ((window->gdriverProtocol & GDriverHandlesTermination)
++    && window->gdriver != NULL)
++    {
++      [(id)window->gdriver windowDeviceWillTerminate];
++    }
+   if (window->ident)
+     {
+       XDestroyWindow(dpy, window->ident);
+diff --git a/Tests/x11/windowclose.m b/Tests/x11/windowclose.m
+new file mode 100644
+index 0000000..cf906d7
+--- /dev/null
++++ b/Tests/x11/windowclose.m
+@@ -0,0 +1,124 @@
++/* Closing a window frees the X resources drawn through it without an X
++ * error.  The cairo surface of a window keeps a Render picture on the X
++ * window; the server frees that picture with the window, so the surface has
++ * to let go of it before -termwindow: destroys the window, or freeing it
++ * afterwards fails with RenderBadPicture, once for every window closed.
++ *
++ * It needs an X display and the cairo graphics backend.
++ */
++#import <Foundation/Foundation.h>
++#import "Testing.h"
++#include "config.h"
++
++#if defined(BUILD_SERVER) && defined(SERVER_x11) \
++  && BUILD_SERVER == SERVER_x11 \
++  && defined(BUILD_GRAPHICS) && defined(GRAPHICS_cairo) \
++  && BUILD_GRAPHICS == GRAPHICS_cairo
++
++#import <AppKit/AppKit.h>
++#import <GNUstepGUI/GSDisplayServer.h>
++#include "x11/XGServer.h"
++#include <X11/extensions/Xrender.h>
++#include <X11/extensions/render.h>
++
++static int renderErrorBase;
++static int badPictures;
++static XErrorHandler previousHandler;
++
++static int
++countBadPictures(Display *display, XErrorEvent *err)
++{
++  if (err->error_code == renderErrorBase + BadPicture)
++    {
++      badPictures++;
++      return 0;
++    }
++  return previousHandler ? previousHandler(display, err) : 0;
++}
++
++static void
++spin(void)
++{
++  [[NSRunLoop currentRunLoop]
++    runUntilDate: [NSDate dateWithTimeIntervalSinceNow: 0.1]];
++}
++
++int
++main(int argc, const char **argv)
++{
++  START_SET("closing a window")
++  Display *dpy = NULL;
++  int eventBase;
++  int i;
++
++  NS_DURING
++    {
++      [NSApplication sharedApplication];
++      if (nil == GSCurrentServer())
++        {
++          SKIP("no window server available")
++        }
++    }
++  NS_HANDLER
++    {
++      SKIP("It looks like GNUstep backend is not yet installed")
++    }
++  NS_ENDHANDLER
++
++  dpy = [(XGServer *)GSCurrentServer() xDisplay];
++  if (!XRenderQueryExtension(dpy, &eventBase, &renderErrorBase))
++    {
++      SKIP("the X server has no Render extension")
++    }
++  previousHandler = XSetErrorHandler(countBadPictures);
++
++  for (i = 0; i < 3; i++)
++    {
++      NSAutoreleasePool *pool = [NSAutoreleasePool new];
++      NSWindow *w;
++      NSButton *b;
++
++      w = [[NSWindow alloc]
++        initWithContentRect: NSMakeRect(100, 100, 300, 200)
++                  styleMask: NSTitledWindowMask | NSClosableWindowMask
++                    backing: NSBackingStoreBuffered
++                      defer: NO];
++      [w setReleasedWhenClosed: NO];
++      b = [[NSButton alloc] initWithFrame: NSMakeRect(10, 10, 100, 24)];
++      [b setTitle: @"Draw"];
++      [[w contentView] addSubview: b];
++      [b release];
++      [w orderFront: nil];
++      [w display];
++      [w flushWindow];
++      spin();
++      [w close];
++      [w release];
++      spin();
++      [pool release];
++      spin();
++    }
++  XSync(dpy, False);
++  spin();
++
++  PASS(badPictures == 0,
++    "closing three drawn windows causes no RenderBadPicture (got %d)",
++    badPictures);
++
++  XSetErrorHandler(previousHandler);
++  END_SET("closing a window")
++  return 0;
++}
++
++#else
++
++int
++main(int argc, const char **argv)
++{
++  START_SET("closing a window")
++  SKIP("back is not built for x11 with cairo")
++  END_SET("closing a window")
++  return 0;
++}
++
++#endif
+-- 
+2.50.1 (Apple Git-155)
+
