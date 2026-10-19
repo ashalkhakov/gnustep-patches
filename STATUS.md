@@ -497,6 +497,19 @@ window can be adjusted (a field made first responder) before it is run;
 an alert laid out is run in that window.  `NSAlert/accessoryView.m` passes
 8 of 8 with the fix and on AppKit (macOS 15), and without it stops at the
 first check, NSAlert not recognising -layout.  On libs-gui 5c43a94.
+Added on 2026-10-19 for Logbook's self-test, which types into a field
+editor the way macOS input does: `textview-insert-replacement-range`.
+NSTextView answered only NSTextInput, so the NSTextInputClient methods
+raised: -insertText:replacementRange:, -setMarkedText:selectedRange:
+replacementRange:, -attributedSubstringForProposedRange:actualRange: and
+-firstRectForCharacterRange:actualRange:.  They are there now, as on
+macOS (an NSNotFound range is the marked text, or else the selection),
+and NSTextView declares the protocol; -insertText: and
+-setMarkedText:selectedRange: go through them, and the latter no longer
+takes its selected range for the range to replace.
+`NSTextView/insertTextReplacementRange.m` passes 18 of 18 with the fix and
+on AppKit (macOS 15); without it the conformance check fails and the set
+stops at the first -insertText:replacementRange:.  On libs-gui 5c43a94.
 
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
@@ -525,6 +538,7 @@ first check, NSAlert not recognising -layout.  On libs-gui 5c43a94.
 | `xib-formatter-attributes` | libs-gui | test | not sent yet | (none: ORMKit's apps use it from here) |
 | `popup-content-bindings` | libs-gui | test | not sent yet | (none: Logbook will use it from here; its LBObjectPopUpButton goes) |
 | `alert-accessory-view` | libs-gui | test | not sent yet | (none: Logbook will use it from here; its ConnectPanel.xib can go) |
+| `textview-insert-replacement-range` | libs-gui | test | not sent yet | (none: Logbook will use it from here; its #ifdef in LBSelfTest.m goes) |
 | `tableview-column-autoresizing-style` | libs-gui | test | [#982](https://github.com/gnustep/libs-gui/pull/982) | gnustep-coredata |
 | `collectionview-make-item` | libs-gui | test | [#1001](https://github.com/gnustep/libs-gui/pull/1001) | (none: TopoText uses it from here) |
 | `collectionview-flow-layout` | libs-gui | test | [#1002](https://github.com/gnustep/libs-gui/pull/1002) | (none: TopoText uses it from here) |
