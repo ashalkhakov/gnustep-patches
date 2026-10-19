@@ -308,6 +308,20 @@ the prototype and unarchived anew, with the prototype's identifier.
 fix and passes with it on libs-gui fdc5cfe; with `tableview-prototype-identifier`
 as well, a xib loaded through NSNib gives each row its own text field.
 
+Added on 2026-10-19 for Logbook's controllers:
+`arraycontroller-selection-kvo`.  NSArrayController's -addSelectedObjects:
+and -removeSelectedObjects: read as the add<Key>: and remove<Key>: set
+mutators of selectedObjects, and its selection setters as setters, though
+all return BOOL and the first two take arrays.  Once anything observed
+selectedObjects, gnustep-base's KVO swapped in a set mutation: an observer
+with old and new values had -member: sent to an NSArray, so -addObject:
+with selectsInsertedObjects raised, and the BOOLs returned were garbage.
+macOS declines automatic notification for those keys and notifies itself
+(checked on macOS 15); so does this now.  The fault is libs-gui's, not
+gnustep-base's: the KVO follows the accessor naming patterns as macOS's
+does.  `NSArrayController/selectionMutators.m` fails 10 of its 13 checks
+without the fix and passes with it on libs-gui 5c43a947f.
+
 Added on 2026-10-17 for [#25](https://github.com/ashalkhakov/gnustep-patches/issues/25):
 `popover-placement`.  NSPopover converted its positioning rect as though
 it were in window coordinates, exchanged the X and Y edges, forced a dark
@@ -544,6 +558,7 @@ the two where a window comes in the same event fail.  On libs-gui 5c43a94.
 | `nsnumberformatter-settings` | libs-base | test | not sent yet (needs `formatter-keyed-attributes`) | (none: ORMKit's apps use it from here) |
 | `popover-placement` | libs-gui | test | not sent yet | (none: UDCodeKit places its own child windows meanwhile) |
 | `tableview-prototype-copy` | libs-gui | test | not sent yet | (none: UDCodeKit's issues navigator is cell-based meanwhile) |
+| `arraycontroller-selection-kvo` | libs-gui | test | not sent yet | (none: Logbook's LBEntityController will drop its workaround) |
 | `tooltip-mouse-moved` | libs-gui | test | not sent yet | (none: UDCodeKit resets the flag itself) |
 | `view-overlapping-siblings` | libs-gui | test | not sent yet | (none: UDCodeKit's jump-to-line box needs it, ashalkhakov/UDCodeKit#43) |
 | `opengl-view-hidden` | libs-gui | test | not sent yet | (none: UDQuakeTools' GUI editor uses it from here; its workaround is gone) |

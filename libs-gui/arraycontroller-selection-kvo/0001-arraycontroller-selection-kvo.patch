@@ -1,0 +1,224 @@
+From b95b1f98bca58c44cd5adb5f43079f0e5c04e44c Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Mon, 19 Oct 2026 16:30:15 +0000
+Subject: [PATCH] Notify observers of an array controller's selection by hand
+
+NSArrayController left its selection to automatic key-value observing.
+Its names fit key-value coding's patterns without being its accessors:
+-addSelectedObjects: and -removeSelectedObjects: read as the add<Key>:
+and remove<Key>: set mutators of selectedObjects, and -setSelectionIndexes:,
+-setSelectionIndex: and -setSelectedObjects: as setters, but all of them
+return whether the selection changed, and the first two take arrays, not
+sets.
+
+So once anything observed selectedObjects, gnustep-base's KVO replaced
+-addSelectedObjects: with a set mutation: an observer asking for old and
+new values had -member: sent to the old selectedObjects, an NSArray, and
+the controller raised. That is the path -addObject: takes when
+selectsInsertedObjects is YES, the default, so adding a row to a table
+bound through such a controller raised. The replaced methods also return
+nothing, so the BOOL their callers read was whatever was left in the
+register.
+
+On macOS NSArrayController answers NO to
++automaticallyNotifiesObserversForKey: for selectionIndexes,
+selectionIndex and selectedObjects (and its other keys) and notifies
+observers itself. It now does so for these three here: -setSelectionIndexes:,
+which every selection change goes through, notifies of selectionIndexes,
+and the keys that depend on it follow as before.
+
+Tests/gui/NSArrayController/selectionMutators.m observes selectedObjects
+with old and new values while selecting, deselecting and adding; ten of its
+thirteen checks fail without the change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/NSArrayController.m                    |  13 ++
+ .../gui/NSArrayController/selectionMutators.m | 143 ++++++++++++++++++
+ 2 files changed, 156 insertions(+)
+ create mode 100644 Tests/gui/NSArrayController/selectionMutators.m
+
+diff --git a/Source/NSArrayController.m b/Source/NSArrayController.m
+index 682b4a387..b9080ca88 100644
+--- a/Source/NSArrayController.m
++++ b/Source/NSArrayController.m
+@@ -154,6 +154,17 @@
+     }
+ }
+ 
+++ (BOOL) automaticallyNotifiesObserversForKey: (NSString*)key
++{
++  if ([key isEqualToString: NSSelectionIndexesBinding]
++    || [key isEqualToString: @"selectionIndex"]
++    || [key isEqualToString: @"selectedObjects"])
++    {
++      return NO;
++    }
++  return [super automaticallyNotifiesObserversForKey: key];
++}
++
+ - (id) initWithContent: (id)content
+ {
+   if ((self = [super initWithContent: content]) != nil)
+@@ -329,7 +340,9 @@
+     }
+   else
+     {
++      [self willChangeValueForKey: NSSelectionIndexesBinding];
+       ASSIGNCOPY(_selection_indexes, idx);
++      [self didChangeValueForKey: NSSelectionIndexesBinding];
+       return YES;
+     }
+ }
+diff --git a/Tests/gui/NSArrayController/selectionMutators.m b/Tests/gui/NSArrayController/selectionMutators.m
+new file mode 100644
+index 000000000..2d75da872
+--- /dev/null
++++ b/Tests/gui/NSArrayController/selectionMutators.m
+@@ -0,0 +1,143 @@
++/* -addSelectedObjects:, -removeSelectedObjects: and the selection setters
++   return whether the selection changed, and the first two take arrays: they
++   are not the set mutators and setters of key-value coding that their names
++   suggest, so automatic observing must leave them alone, as it does on
++   macOS, where the controller notifies observers itself. */
++#include "Testing.h"
++
++#include <Foundation/NSArray.h>
++#include <Foundation/NSDictionary.h>
++#include <Foundation/NSException.h>
++#include <Foundation/NSIndexSet.h>
++#include <Foundation/NSKeyValueObserving.h>
++#include <Foundation/NSString.h>
++
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSArrayController.h>
++
++@interface SelectionCounter : NSObject
++{
++@public
++  int	selectedObjects;
++  int	selectionIndexes;
++}
++@end
++
++@implementation SelectionCounter
++- (void) observeValueForKeyPath: (NSString *)keyPath
++                       ofObject: (id)object
++                         change: (NSDictionary *)change
++                        context: (void *)context
++{
++  if ([keyPath isEqualToString: @"selectedObjects"])
++    selectedObjects++;
++  else
++    selectionIndexes++;
++}
++@end
++
++int
++main(int argc, const char **argv)
++{
++  NSKeyValueObservingOptions	options = NSKeyValueObservingOptionNew
++    | NSKeyValueObservingOptionOld;
++  SelectionCounter	*counter;
++  NSArrayController	*ac;
++  NSMutableDictionary	*ada;
++  NSMutableDictionary	*grace;
++  NSMutableDictionary	*linus;
++  NSIndexSet		*both;
++  BOOL			changed;
++  BOOL			raised;
++
++  START_SET("NSArrayController selection mutators")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  PASS([NSArrayController automaticallyNotifiesObserversForKey:
++    @"selectionIndexes"] == NO,
++    "selectionIndexes is not observed automatically")
++  PASS([NSArrayController automaticallyNotifiesObserversForKey:
++    @"selectedObjects"] == NO,
++    "selectedObjects is not observed automatically")
++  PASS([NSArrayController automaticallyNotifiesObserversForKey:
++    @"selectionIndex"] == NO,
++    "selectionIndex is not observed automatically")
++
++  ada = [NSMutableDictionary dictionaryWithObject: @"Ada" forKey: @"name"];
++  grace = [NSMutableDictionary dictionaryWithObject: @"Grace" forKey: @"name"];
++  linus = [NSMutableDictionary dictionaryWithObject: @"Linus" forKey: @"name"];
++  both = [NSIndexSet indexSetWithIndexesInRange: NSMakeRange(0, 2)];
++
++  ac = AUTORELEASE([[NSArrayController alloc] init]);
++  [ac setAutomaticallyRearrangesObjects: YES];
++  [ac setContent: [NSMutableArray arrayWithObjects: ada, grace, nil]];
++  [ac setSelectionIndexes: [NSIndexSet indexSetWithIndex: 0]];
++
++  counter = AUTORELEASE([[SelectionCounter alloc] init]);
++  [ac addObserver: counter forKeyPath: @"selectedObjects"
++          options: options context: NULL];
++  [ac addObserver: counter forKeyPath: @"selectionIndexes"
++          options: options context: NULL];
++
++  raised = NO;
++  changed = NO;
++  NS_DURING
++    changed = [ac addSelectedObjects: [NSArray arrayWithObject: grace]];
++  NS_HANDLER
++    raised = YES;
++  NS_ENDHANDLER
++  PASS(raised == NO, "-addSelectedObjects: with an observer of selectedObjects")
++  PASS(changed == YES, "-addSelectedObjects: says it changed the selection")
++  PASS_EQUAL([ac selectionIndexes], both, "-addSelectedObjects: selected it")
++  PASS(counter->selectedObjects == 1 && counter->selectionIndexes == 1,
++    "-addSelectedObjects: notified each observer once")
++
++  changed = YES;
++  NS_DURING
++    changed = [ac addSelectedObjects: [NSArray arrayWithObject: grace]];
++  NS_HANDLER
++  NS_ENDHANDLER
++  PASS(changed == NO, "-addSelectedObjects: of what is selected changes nothing")
++
++  changed = YES;
++  NS_DURING
++    changed = [ac setSelectionIndexes: both];
++  NS_HANDLER
++  NS_ENDHANDLER
++  PASS(changed == NO, "-setSelectionIndexes: of the selection changes nothing")
++
++  raised = NO;
++  changed = NO;
++  NS_DURING
++    changed = [ac removeSelectedObjects: [NSArray arrayWithObject: ada]];
++  NS_HANDLER
++    raised = YES;
++  NS_ENDHANDLER
++  PASS(raised == NO && changed == YES,
++    "-removeSelectedObjects: with an observer of selectedObjects")
++  PASS_EQUAL([ac selectedObjects], [NSArray arrayWithObject: grace],
++    "-removeSelectedObjects: deselected it")
++
++  raised = NO;
++  NS_DURING
++    [ac addObject: linus];
++  NS_HANDLER
++    raised = YES;
++  NS_ENDHANDLER
++  PASS(raised == NO, "-addObject: selects what it inserts without raising")
++  PASS([[ac selectedObjects] containsObject: linus],
++    "-addObject: selected what it inserted")
++
++  [ac removeObserver: counter forKeyPath: @"selectedObjects"];
++  [ac removeObserver: counter forKeyPath: @"selectionIndexes"];
++
++  END_SET("NSArrayController selection mutators")
++
++  return 0;
++}
+-- 
+2.43.0
+
