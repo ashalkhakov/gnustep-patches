@@ -1,0 +1,124 @@
+From 1c90012325b4b6f74ecd75f49e85b7a5edc600d3 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Mon, 19 Oct 2026 16:35:10 +0000
+Subject: [PATCH] Remove the selected objects in an array controller's remove:
+ action
+
+NSArrayController had no remove: of its own, so the action of a Remove
+button wired to one went to NSObjectController's, which removes the
+controller's content as a single object: -removeObject: was sent the
+content array, found no such element in it, and nothing was removed.
+
+On macOS the action removes the selected objects, through
+-removeObjectsAtArrangedObjectIndexes: with the selection indexes, when
+-canRemove allows it; it now does so here.
+
+Tests/gui/NSArrayController/removeAction.m removes a selection with the
+action through a subclass that counts calls of
+-removeObjectsAtArrangedObjectIndexes:; three of its four checks fail
+without the change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/NSArrayController.m                 |  8 +++
+ Tests/gui/NSArrayController/removeAction.m | 69 ++++++++++++++++++++++
+ 2 files changed, 77 insertions(+)
+ create mode 100644 Tests/gui/NSArrayController/removeAction.m
+
+diff --git a/Source/NSArrayController.m b/Source/NSArrayController.m
+index 682b4a387..a1470ac9f 100644
+--- a/Source/NSArrayController.m
++++ b/Source/NSArrayController.m
+@@ -586,6 +586,14 @@ atArrangedObjectIndexes: (NSIndexSet*)idx
+   [self removeObjects: [_arranged_objects objectsAtIndexes: idx]];
+ }
+ 
++- (void) remove: (id)sender
++{
++  if ([self canRemove])
++    {
++      [self removeObjectsAtArrangedObjectIndexes: [self selectionIndexes]];
++    }
++}
++
+ - (void) bind: (NSString *)binding
+      toObject: (id)anObject
+   withKeyPath: (NSString *)keyPath
+diff --git a/Tests/gui/NSArrayController/removeAction.m b/Tests/gui/NSArrayController/removeAction.m
+new file mode 100644
+index 000000000..230c742f0
+--- /dev/null
++++ b/Tests/gui/NSArrayController/removeAction.m
+@@ -0,0 +1,69 @@
++/* The remove: action of an array controller removes the selected objects,
++   by way of -removeObjectsAtArrangedObjectIndexes:, which a subclass may
++   override. */
++#include "Testing.h"
++
++#include <Foundation/NSArray.h>
++#include <Foundation/NSDictionary.h>
++#include <Foundation/NSIndexSet.h>
++#include <Foundation/NSString.h>
++
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSArrayController.h>
++
++@interface RemovalCounter : NSArrayController
++{
++@public
++  int	removals;
++}
++@end
++
++@implementation RemovalCounter
++- (void) removeObjectsAtArrangedObjectIndexes: (NSIndexSet*)indexes
++{
++  removals++;
++  [super removeObjectsAtArrangedObjectIndexes: indexes];
++}
++@end
++
++int
++main(int argc, const char **argv)
++{
++  RemovalCounter	*ac;
++  NSMutableDictionary	*ada;
++  NSMutableDictionary	*grace;
++  NSMutableDictionary	*linus;
++
++  START_SET("NSArrayController remove:")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  ada = [NSMutableDictionary dictionaryWithObject: @"Ada" forKey: @"name"];
++  grace = [NSMutableDictionary dictionaryWithObject: @"Grace" forKey: @"name"];
++  linus = [NSMutableDictionary dictionaryWithObject: @"Linus" forKey: @"name"];
++
++  ac = AUTORELEASE([[RemovalCounter alloc] init]);
++  [ac setContent: [NSMutableArray arrayWithObjects: ada, grace, linus, nil]];
++  [ac setSelectedObjects: [NSArray arrayWithObjects: ada, linus, nil]];
++  PASS([ac canRemove], "a controller with a selection can remove")
++
++  [ac remove: nil];
++  PASS_EQUAL([ac content], [NSArray arrayWithObject: grace],
++    "remove: removes the selected objects")
++  PASS(ac->removals == 1,
++    "remove: goes through -removeObjectsAtArrangedObjectIndexes:")
++
++  [ac setSelectionIndexes: [NSIndexSet indexSet]];
++  [ac remove: nil];
++  PASS_EQUAL([ac content], [NSArray arrayWithObject: grace],
++    "remove: without a selection removes nothing")
++
++  END_SET("NSArrayController remove:")
++
++  return 0;
++}
+-- 
+2.43.0
+
