@@ -473,6 +473,21 @@ set (archives leave it out, as macOS's do); a pattern with a suffix
 (`0.00 'u'`) parses only with the suffix, where macOS also takes it
 without; and `[NSDate dateWithTimeIntervalSinceReferenceDate: 0]` is 2
 seconds on GNUstep, a separate bug in NSDate's small dates.
+Added on 2026-10-19 for Logbook, ORMKit's sample app, whose pop-ups choose
+a related object (a unit, a kind of cost, a driver):
+`popup-content-bindings`.  NSPopUpButton did not expose content,
+NSContentObjectsBinding was not declared, contentValues replaced the items
+by their titles (dropping any title that repeats) and selectedObject
+selected by tag, sending the object -intValue.  The three content bindings
+now build the items as on macOS: content gives the represented objects,
+contentValues the titles, contentObjects what selectedObject is matched
+against and set to; NSInsertsNullPlaceholder adds a first item for nil;
+selectedObject follows the model both ways, a nil or an object not in the
+content shown as an extra last item as AppKit shows it; and selectedIndex
+counts the content, not the placeholder.  `NSPopUpButton/contentBindings.m`
+passes 28 of 28 with the fix and on AppKit (macOS 15); without it (the
+binding's name kept, so that it builds) 6 checks fail before the pop-up
+raises on -intValue and ends the set.  On libs-gui 5c43a94.
 
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
@@ -499,6 +514,7 @@ seconds on GNUstep, a separate bug in NSDate's small dates.
 | `opengl-view-hidden` | libs-gui | test | not sent yet | (none: UDQuakeTools' GUI editor uses it from here; its workaround is gone) |
 | `xib-segment-image` | libs-gui | test | not sent yet | (none: UDCode's navigator bar uses it from here) |
 | `xib-formatter-attributes` | libs-gui | test | not sent yet | (none: ORMKit's apps use it from here) |
+| `popup-content-bindings` | libs-gui | test | not sent yet | (none: Logbook will use it from here; its LBObjectPopUpButton goes) |
 | `tableview-column-autoresizing-style` | libs-gui | test | [#982](https://github.com/gnustep/libs-gui/pull/982) | gnustep-coredata |
 | `collectionview-make-item` | libs-gui | test | [#1001](https://github.com/gnustep/libs-gui/pull/1001) | (none: TopoText uses it from here) |
 | `collectionview-flow-layout` | libs-gui | test | [#1002](https://github.com/gnustep/libs-gui/pull/1002) | (none: TopoText uses it from here) |

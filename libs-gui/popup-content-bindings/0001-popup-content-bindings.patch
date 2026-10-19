@@ -1,0 +1,744 @@
+From 002ef4a96ce16fed2e7f73d367b6709ed45335cb Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Mon, 19 Oct 2026 16:27:19 +0000
+Subject: [PATCH] NSPopUpButton: content, contentObjects and contentValues
+ bindings
+
+A pop-up could not be bound to a list of objects to choose one from:
+content was not exposed, NSContentObjectsBinding was not declared,
+contentValues only replaced the items by titles (dropping any title that
+repeats), and selectedObject selected by tag, taking the object's
+-intValue. An application had to fill the items and set the model
+itself.
+
+The pop-up now does what AppKit does (checked on macOS 15):
+
+- content gives the items' represented objects, titled by their
+  descriptions; contentValues gives the titles, which may repeat;
+  contentObjects, when bound, gives the represented objects instead, and
+  so what selectedObject is matched against and set to.  The items follow
+  the arrays as they change.
+- NSInsertsNullPlaceholderBindingOption on any of the three adds a first
+  item for nil, titled by that binding's NSNullPlaceholderBindingOption or
+  "No Value".
+- selectedObject selects the item whose represented object is equal to
+  the model's, and choosing an item sets the model to that object (nil for
+  the placeholder).  A nil the pop-up has no placeholder for, or an object
+  not in the content, is shown as an extra last item ("No Value", or the
+  object's description), taken away again once a content item is chosen
+  or set; a controller marker selects nothing.
+- With content bound, selectedIndex is an index into the content, not
+  into the items: the placeholder is not counted, and choosing it sets nil.
+
+Bound values reach the pop-up as they are: nil and the markers are not
+turned into placeholder strings, which is what a selected object needs.
+A pop-up with none of the content bindings keeps its items and
+selectedIndex as before, and selectedObject is matched against the items'
+represented objects.
+
+Tests/gui/NSPopUpButton/contentBindings.m passes 28 of 28 with this and on
+AppKit; without it (the binding names kept, so that it builds), 6 checks
+fail and the rest are not reached, the pop-up raising on -intValue.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Headers/AppKit/NSKeyValueBinding.h        |   1 +
+ Source/NSPopUpButton.m                    | 314 +++++++++++++++++++++-
+ Source/NSPopUpButtonCell.m                |   9 +
+ Source/externs.m                          |   1 +
+ Tests/gui/NSPopUpButton/contentBindings.m | 250 +++++++++++++++++
+ 5 files changed, 569 insertions(+), 6 deletions(-)
+ create mode 100644 Tests/gui/NSPopUpButton/contentBindings.m
+
+diff --git a/Headers/AppKit/NSKeyValueBinding.h b/Headers/AppKit/NSKeyValueBinding.h
+index 7a6ab895c..bfa387405 100644
+--- a/Headers/AppKit/NSKeyValueBinding.h
++++ b/Headers/AppKit/NSKeyValueBinding.h
+@@ -109,6 +109,7 @@ APPKIT_EXPORT NSString *NSContentArrayBinding;
+ APPKIT_EXPORT NSString *NSContentBinding;
+ APPKIT_EXPORT NSString *NSContentDictionaryBinding;
+ APPKIT_EXPORT NSString *NSContentObjectBinding;
++APPKIT_EXPORT NSString *NSContentObjectsBinding;
+ APPKIT_EXPORT NSString *NSContentSetBinding;
+ APPKIT_EXPORT NSString *NSContentValuesBinding;
+ APPKIT_EXPORT NSString *NSEditableBinding;
+diff --git a/Source/NSPopUpButton.m b/Source/NSPopUpButton.m
+index f364952e8..8e214321b 100644
+--- a/Source/NSPopUpButton.m
++++ b/Source/NSPopUpButton.m
+@@ -30,6 +30,7 @@
+ 
+ #import <Foundation/NSKeyValueCoding.h>
+ #import <Foundation/NSKeyValueObserving.h>
++#import <Foundation/NSNull.h>
+ #import <Foundation/NSValue.h>
+ #import "AppKit/NSApplication.h"
+ #import "AppKit/NSEvent.h"
+@@ -41,12 +42,52 @@
+ #import "AppKit/NSMenuItem.h"
+ #import "AppKit/NSMenuView.h"
+ #import "AppKit/NSWindow.h"
++#import "GSBindingHelpers.h"
++#import "GSGuiPrivate.h"
+ 
+ /*
+  * class variables
+  */
+ Class _nspopupbuttonCellClass = 0;
+ 
++@interface NSPopUpButtonCell (CocoaExtensions)
++- (void) _popUpItemAction: (id)sender;
++@end
++
++@interface GSPopUpButtonBinding : GSKeyValueBinding
++@end
++
++@implementation GSPopUpButtonBinding
++
++- (id) transformValue: (id)value withOptions: (NSDictionary *)options
++{
++  if (value == nil || value == [NSNull null])
++    {
++      return nil;
++    }
++  if (NSIsControllerMarker(value))
++    {
++      return value;
++    }
++  return [super transformValue: value withOptions: options];
++}
++
++@end
++
++static NSString *
++titleForContentValue(id value)
++{
++  if (value == nil || value == [NSNull null])
++    {
++      return @"";
++    }
++  if ([value isKindOfClass: [NSString class]])
++    {
++      return value;
++    }
++  return [value description];
++}
++
+ /*
+  * NSPopUpButton implementation
+  */
+@@ -68,6 +109,8 @@ Class _nspopupbuttonCellClass = 0;
+       [self exposeBinding: NSSelectedObjectBinding];
+       [self exposeBinding: NSSelectedTagBinding];
+       [self exposeBinding: NSSelectedValueBinding];
++      [self exposeBinding: NSContentBinding];
++      [self exposeBinding: NSContentObjectsBinding];
+       [self exposeBinding: NSContentValuesBinding];
+    } 
+ }
+@@ -560,11 +603,256 @@ this to return nil to indicate that we have no context menu.
+   [super keyDown: theEvent];
+ }
+ 
++- (void) bind: (NSString *)binding
++     toObject: (id)anObject
++  withKeyPath: (NSString *)keyPath
++      options: (NSDictionary *)options
++{
++  if ([binding isEqual: NSContentBinding]
++    || [binding isEqual: NSContentObjectsBinding]
++    || [binding isEqual: NSContentValuesBinding]
++    || [binding isEqual: NSSelectedObjectBinding]
++    || [binding isEqual: NSSelectedIndexBinding])
++    {
++      GSKeyValueBinding *kvb;
++
++      [self unbind: binding];
++      kvb = [[GSPopUpButtonBinding alloc] initWithBinding: binding
++                                                 withName: binding
++                                                 toObject: anObject
++                                              withKeyPath: keyPath
++                                                  options: options
++                                               fromObject: self];
++      // The binding will be retained in the binding table
++      RELEASE(kvb);
++    }
++  else
++    {
++      [super bind: binding
++         toObject: anObject
++      withKeyPath: keyPath
++          options: options];
++    }
++}
++
++- (BOOL) _hasContentBinding
++{
++  return [GSKeyValueBinding getBinding: NSContentBinding forObject: self] != nil
++    || [GSKeyValueBinding getBinding: NSContentObjectsBinding
++                           forObject: self] != nil
++    || [GSKeyValueBinding getBinding: NSContentValuesBinding
++                           forObject: self] != nil;
++}
++
++- (NSArray *) _contentForBinding: (NSString *)binding
++{
++  id value;
++
++  value = [[GSKeyValueBinding getBinding: binding forObject: self]
++            destinationValue];
++  return [value isKindOfClass: [NSArray class]] ? value : nil;
++}
++
++/* The title of the item NSInsertsNullPlaceholderBindingOption adds, or nil
++ * when there is none.
++ */
++- (NSString *) _nullPlaceholderTitle
++{
++  NSString *names[3] = {NSContentValuesBinding, NSContentBinding,
++                        NSContentObjectsBinding};
++  int i;
++
++  for (i = 0; i < 3; i++)
++    {
++      NSDictionary *options;
++
++      options = [[self infoForBinding: names[i]] objectForKey: NSOptionsKey];
++      if ([[options objectForKey: NSInsertsNullPlaceholderBindingOption]
++            boolValue])
++        {
++          NSString *title;
++
++          title = [options objectForKey: NSNullPlaceholderBindingOption];
++          return title != nil ? title : _(@"No Value");
++        }
++    }
++  return nil;
++}
++
++- (void) _addContentItemWithTitle: (NSString *)title
++                representedObject: (id)object
++{
++  NSMenuItem *item;
++
++  item = [[self menu] addItemWithTitle: title
++                                action: @selector(_popUpItemAction:)
++                         keyEquivalent: @""];
++  [item setTarget: _cell];
++  [item setOnStateImage: nil];
++  [item setMixedStateImage: nil];
++  [item setRepresentedObject: object];
++}
++
++/* Removes the item added for a selected object that is not in the content.
++ */
++- (void) _removeNoValueItem
++{
++  NSInteger last = [self numberOfItems] - 1;
++
++  if (last >= 0 && [self _hasContentBinding]
++    && [[self itemAtIndex: last] representedObject] == nil
++    && (last > 0 || [self _nullPlaceholderTitle] == nil))
++    {
++      [self removeItemAtIndex: last];
++    }
++}
++
++- (void) _removeNoValueItemUnlessSelected
++{
++  NSInteger last = [self numberOfItems] - 1;
++
++  if (last >= 0 && [self indexOfSelectedItem] != last)
++    {
++      [self _removeNoValueItem];
++    }
++}
++
++- (void) _selectObject: (id)object
++{
++  NSInteger index;
++
++  if ([self _hasContentBinding] == NO)
++    {
++      index = object == nil || NSIsControllerMarker(object) ? -1
++        : [self indexOfItemWithRepresentedObject: object];
++      [self selectItemAtIndex: index];
++      return;
++    }
++
++  [self _removeNoValueItem];
++  if (NSIsControllerMarker(object))
++    {
++      [self selectItemAtIndex: -1];
++      return;
++    }
++  if (object == nil)
++    {
++      if ([self _nullPlaceholderTitle] != nil)
++        {
++          [self selectItemAtIndex: 0];
++          return;
++        }
++      [self _addContentItemWithTitle: _(@"No Value") representedObject: nil];
++    }
++  else
++    {
++      index = [self indexOfItemWithRepresentedObject: object];
++      if (index >= 0)
++        {
++          [self selectItemAtIndex: index];
++          return;
++        }
++      [self _addContentItemWithTitle: titleForContentValue(object)
++                   representedObject: nil];
++    }
++  [self selectItemAtIndex: [self numberOfItems] - 1];
++}
++
++- (void) _selectIndex: (id)value
++{
++  NSInteger offset;
++  NSInteger index;
++
++  if ([self _hasContentBinding] == NO)
++    {
++      [self selectItemAtIndex: [value intValue]];
++      return;
++    }
++
++  offset = [self _nullPlaceholderTitle] != nil ? 1 : 0;
++  if (value != nil && NSIsControllerMarker(value) == NO
++    && [value respondsToSelector: @selector(integerValue)])
++    {
++      index = [value integerValue];
++      if (index >= 0 && index + offset < [self numberOfItems])
++        {
++          [self selectItemAtIndex: index + offset];
++          return;
++        }
++    }
++  [self selectItemAtIndex: offset > 0 ? 0 : -1];
++}
++
++- (void) _rebuildContent
++{
++  NSArray *content = [self _contentForBinding: NSContentBinding];
++  NSArray *objects = [self _contentForBinding: NSContentObjectsBinding];
++  NSArray *values = [self _contentForBinding: NSContentValuesBinding];
++  NSArray *primary = content;
++  NSString *placeholder = [self _nullPlaceholderTitle];
++  NSInteger selected = [self indexOfSelectedItem];
++  GSKeyValueBinding *binding;
++  NSUInteger count;
++  NSUInteger i;
++
++  if (primary == nil)
++    {
++      primary = objects != nil ? objects : values;
++    }
++  count = [primary count];
++
++  [self removeAllItems];
++  if (placeholder != nil)
++    {
++      [self _addContentItemWithTitle: placeholder representedObject: nil];
++    }
++  for (i = 0; i < count; i++)
++    {
++      id title = [primary objectAtIndex: i];
++      id object = title;
++
++      if (i < [values count])
++        {
++          title = [values objectAtIndex: i];
++        }
++      if (i < [objects count])
++        {
++          object = [objects objectAtIndex: i];
++        }
++      [self _addContentItemWithTitle: titleForContentValue(title)
++                   representedObject: object];
++    }
++
++  if ((binding = [GSKeyValueBinding getBinding: NSSelectedObjectBinding
++                                     forObject: self]) != nil)
++    {
++      [self _selectObject: [binding destinationValue]];
++    }
++  else if ((binding = [GSKeyValueBinding getBinding: NSSelectedIndexBinding
++                                          forObject: self]) != nil)
++    {
++      [self _selectIndex: [binding destinationValue]];
++    }
++  else if ((binding = [GSKeyValueBinding getBinding: NSSelectedValueBinding
++                                          forObject: self]) != nil)
++    {
++      [self selectItemWithTitle: [binding destinationValue]];
++    }
++  else if (selected >= 0 && selected < [self numberOfItems])
++    {
++      [self selectItemAtIndex: selected];
++    }
++  else
++    {
++      [self selectItemAtIndex: [self numberOfItems] > 0 ? 0 : -1];
++    }
++}
++
+ - (void) setValue: (id)anObject forKey: (NSString*)aKey
+ {
+   if ([aKey isEqual: NSSelectedIndexBinding])
+     {
+-      [self selectItemAtIndex: [anObject intValue]];
++      [self _selectIndex: anObject];
+     }
+   else if ([aKey isEqual: NSSelectedTagBinding])
+     {
+@@ -572,13 +860,18 @@ this to return nil to indicate that we have no context menu.
+     }
+   else if ([aKey isEqual: NSSelectedObjectBinding])
+     {
+-      // FIXME: This looks wrong to me
+-      [self selectItemWithTag: [anObject intValue]];
++      [self _selectObject: anObject];
+     }
+   else if ([aKey isEqual: NSSelectedValueBinding])
+     {
+       [self selectItemWithTitle: anObject];
+     }
++  else if ([aKey isEqual: NSContentBinding]
++    || [aKey isEqual: NSContentObjectsBinding]
++    || ([aKey isEqual: NSContentValuesBinding] && [self _hasContentBinding]))
++    {
++      [self _rebuildContent];
++    }
+   else if ([aKey isEqual: NSContentValuesBinding])
+     {
+       [self removeAllItems];
+@@ -594,7 +887,17 @@ this to return nil to indicate that we have no context menu.
+ {
+   if ([aKey isEqual: NSSelectedIndexBinding])
+     {
+-      return [NSNumber numberWithInt: [self indexOfSelectedItem]];
++      NSInteger index = [self indexOfSelectedItem];
++
++      if ([self _hasContentBinding])
++        {
++          index -= [self _nullPlaceholderTitle] != nil ? 1 : 0;
++          if (index < 0)
++            {
++              return nil;
++            }
++        }
++      return [NSNumber numberWithInteger: index];
+     }
+   else if ([aKey isEqual: NSSelectedTagBinding])
+     {
+@@ -602,8 +905,7 @@ this to return nil to indicate that we have no context menu.
+     }
+   else if ([aKey isEqual: NSSelectedObjectBinding])
+     {
+-      // FIXME
+-      return [NSNumber numberWithInt: [self selectedTag]];
++      return [[self selectedItem] representedObject];
+     }
+   else if ([aKey isEqual: NSSelectedValueBinding])
+     {
+diff --git a/Source/NSPopUpButtonCell.m b/Source/NSPopUpButtonCell.m
+index 63d3cafb2..a8481e4b4 100644
+--- a/Source/NSPopUpButtonCell.m
++++ b/Source/NSPopUpButtonCell.m
+@@ -1399,6 +1399,10 @@ static NSImage *_pbc_image[5];
+ 
+ @end
+ 
++@interface NSPopUpButton (GSContentBindings)
++- (void) _removeNoValueItemUnlessSelected;
++@end
++
+ @implementation NSPopUpButtonCell (CocoaExtensions)
+ 
+ /*
+@@ -1411,6 +1415,11 @@ static NSImage *_pbc_image[5];
+   if (index != NSNotFound)
+     [self selectItemAtIndex: index];
+ 
++  if ([_control_view isKindOfClass: [NSPopUpButton class]])
++    {
++      [(NSPopUpButton *)_control_view _removeNoValueItemUnlessSelected];
++    }
++
+   if (_control_view)
+     {
+       NSString *bindings[] = {NSSelectedIndexBinding, NSSelectedTagBinding,
+diff --git a/Source/externs.m b/Source/externs.m
+index dd85debc9..115657138 100644
+--- a/Source/externs.m
++++ b/Source/externs.m
+@@ -695,6 +695,7 @@ APPKIT_DECLARE NSString *NSContentArrayBinding = @"contentArray";
+ APPKIT_DECLARE NSString *NSContentBinding = @"content";
+ APPKIT_DECLARE NSString *NSContentDictionaryBinding = @"contentDictionary";
+ APPKIT_DECLARE NSString *NSContentObjectBinding = @"contentObject";
++APPKIT_DECLARE NSString *NSContentObjectsBinding = @"contentObjects";
+ APPKIT_DECLARE NSString *NSContentSetBinding = @"contentSet";
+ APPKIT_DECLARE NSString *NSContentValuesBinding = @"contentValues";
+ APPKIT_DECLARE NSString *NSEditableBinding = @"editable";
+diff --git a/Tests/gui/NSPopUpButton/contentBindings.m b/Tests/gui/NSPopUpButton/contentBindings.m
+new file mode 100644
+index 000000000..f1b5a721e
+--- /dev/null
++++ b/Tests/gui/NSPopUpButton/contentBindings.m
+@@ -0,0 +1,250 @@
++/* A pop-up's content bindings, as AppKit has them: content gives the items'
++   represented objects, contentValues their titles and contentObjects what
++   selectedObject is set to; selectedObject and selectedIndex follow the
++   model both ways, and NSInsertsNullPlaceholder adds a first item that
++   stands for nil.  Checked against AppKit on macOS.
++*/
++#include "Testing.h"
++
++#include <Foundation/NSArray.h>
++#include <Foundation/NSAutoreleasePool.h>
++#include <Foundation/NSDictionary.h>
++#include <Foundation/NSString.h>
++#include <Foundation/NSValue.h>
++
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSArrayController.h>
++#include <AppKit/NSKeyValueBinding.h>
++#include <AppKit/NSMenu.h>
++#include <AppKit/NSMenuItem.h>
++#include <AppKit/NSPopUpButton.h>
++#include <AppKit/NSWindow.h>
++
++static NSWindow *window;
++
++/* The cell learns its control view when drawn, as in an application.  */
++static NSPopUpButton *
++newPopUp(void)
++{
++  NSPopUpButton *p;
++
++  p = AUTORELEASE([[NSPopUpButton alloc]
++    initWithFrame: NSMakeRect(0, 0, 100, 20) pullsDown: NO]);
++  [[window contentView] addSubview: p];
++  [p display];
++  return p;
++}
++
++static NSDictionary *
++thing(NSString *name, int ident)
++{
++  return [NSDictionary dictionaryWithObjectsAndKeys: name, @"name",
++    [NSNumber numberWithInt: ident], @"ident", nil];
++}
++
++static NSArray *
++represented(NSPopUpButton *p)
++{
++  NSMutableArray *a = [NSMutableArray array];
++  NSInteger i;
++
++  for (i = 0; i < [p numberOfItems]; i++)
++    {
++      id o = [[p itemAtIndex: i] representedObject];
++
++      [a addObject: o != nil ? o : (id)@"nil"];
++    }
++  return a;
++}
++
++int
++main(int argc, char **argv)
++{
++  START_SET("NSPopUpButton content bindings")
++
++  NS_DURING
++    {
++      [NSApplication sharedApplication];
++    }
++  NS_HANDLER
++    {
++      if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++        SKIP("It looks like GNUstep backend is not yet installed")
++    }
++  NS_ENDHANDLER
++
++  window = [[NSWindow alloc] initWithContentRect: NSMakeRect(0, 0, 200, 200)
++                                       styleMask: NSTitledWindowMask
++                                         backing: NSBackingStoreBuffered
++                                           defer: NO];
++
++  NS_DURING
++    {
++      NSDictionary *a = thing(@"A", 1);
++      NSDictionary *b = thing(@"B", 2);
++      NSDictionary *c = thing(@"C", 3);
++      NSDictionary *d = thing(@"D", 4);
++      NSArray *things = [NSArray arrayWithObjects: a, b, c, nil];
++      NSArrayController *ac;
++      NSMutableDictionary *model;
++      NSDictionary *inserts;
++      NSPopUpButton *p;
++
++      inserts = [NSDictionary dictionaryWithObject: [NSNumber numberWithBool: YES]
++        forKey: NSInsertsNullPlaceholderBindingOption];
++      ac = AUTORELEASE([[NSArrayController alloc]
++        initWithContent: [NSMutableArray arrayWithArray: things]]);
++
++      p = AUTORELEASE([NSPopUpButton new]);
++      PASS([[p exposedBindings] containsObject: NSContentBinding]
++        && [[p exposedBindings] containsObject: NSContentObjectsBinding],
++        "content and contentObjects are exposed");
++
++      model = [NSMutableDictionary dictionary];
++      [model setObject: [NSArray arrayWithObjects: @"x", @"y", nil]
++                forKey: @"strings"];
++      p = newPopUp();
++      [p bind: NSContentBinding toObject: model withKeyPath: @"strings"
++      options: nil];
++      PASS_EQUAL([p itemTitles], ([NSArray arrayWithObjects: @"x", @"y", nil]),
++        "content alone titles its items by description");
++      PASS_EQUAL(represented(p), ([NSArray arrayWithObjects: @"x", @"y", nil]),
++        "content gives the represented objects");
++      PASS([p indexOfSelectedItem] == 0, "the first item is selected");
++
++      p = newPopUp();
++      [p bind: NSContentBinding toObject: ac withKeyPath: @"arrangedObjects"
++      options: nil];
++      [p bind: NSContentValuesBinding toObject: ac
++  withKeyPath: @"arrangedObjects.name" options: nil];
++      PASS_EQUAL([p itemTitles],
++        ([NSArray arrayWithObjects: @"A", @"B", @"C", nil]),
++        "contentValues titles the items");
++      PASS_EQUAL(represented(p), things,
++        "the represented objects are still the content");
++
++      [model setObject: b forKey: @"chosen"];
++      [p bind: NSSelectedObjectBinding toObject: model withKeyPath: @"chosen"
++      options: nil];
++      PASS([p indexOfSelectedItem] == 1, "selectedObject selects its object");
++      [model setObject: c forKey: @"chosen"];
++      PASS([p indexOfSelectedItem] == 2, "and follows the model");
++
++      [model removeObjectForKey: @"chosen"];
++      PASS([p numberOfItems] == 4
++        && [[p titleOfSelectedItem] isEqual: @"No Value"]
++        && [p indexOfSelectedItem] == 3,
++        "nil without a placeholder adds and selects a last item, No Value");
++      [[p menu] performActionForItemAtIndex: 0];
++      PASS([model objectForKey: @"chosen"] == a,
++        "choosing an item sets the model to its object");
++      PASS([p numberOfItems] == 3, "and takes the No Value item away");
++
++      [ac addObject: d];
++      PASS_EQUAL([p itemTitles],
++        ([NSArray arrayWithObjects: @"A", @"B", @"C", @"D", nil]),
++        "the items follow the content");
++      PASS([p indexOfSelectedItem] == 0, "the selection stays");
++
++      [model setObject: thing(@"E", 5) forKey: @"chosen"];
++      PASS([p numberOfItems] == 5 && [p indexOfSelectedItem] == 4
++        && [[p titleOfSelectedItem]
++             isEqual: [[model objectForKey: @"chosen"] description]]
++        && [[p selectedItem] representedObject] == nil,
++        "an object not in the content is shown as an extra last item");
++      [model setObject: b forKey: @"chosen"];
++      PASS([p numberOfItems] == 4 && [p indexOfSelectedItem] == 1,
++        "which goes when the object is in the content again");
++      [ac removeObject: d];
++
++      /* NSInsertsNullPlaceholder */
++      model = [NSMutableDictionary dictionary];
++      p = newPopUp();
++      [p bind: NSContentBinding toObject: ac withKeyPath: @"arrangedObjects"
++      options: inserts];
++      [p bind: NSContentValuesBinding toObject: ac
++  withKeyPath: @"arrangedObjects.name" options: nil];
++      [p bind: NSSelectedObjectBinding toObject: model withKeyPath: @"chosen"
++      options: nil];
++      PASS_EQUAL([p itemTitles],
++        ([NSArray arrayWithObjects: @"No Value", @"A", @"B", @"C", nil]),
++        "the null placeholder is a first item");
++      PASS([[p itemAtIndex: 0] representedObject] == nil,
++        "which stands for no object");
++      PASS([p indexOfSelectedItem] == 0, "nil selects it");
++      [[p menu] performActionForItemAtIndex: 2];
++      PASS([model objectForKey: @"chosen"] == b, "choosing B sets B");
++      [[p menu] performActionForItemAtIndex: 0];
++      PASS([model objectForKey: @"chosen"] == nil,
++        "choosing the placeholder sets nil");
++      [model setObject: c forKey: @"chosen"];
++      PASS([p indexOfSelectedItem] == 3, "a model object selects its item");
++
++      p = newPopUp();
++      [p bind: NSContentBinding toObject: ac withKeyPath: @"arrangedObjects"
++      options: nil];
++      [p bind: NSContentValuesBinding toObject: ac
++  withKeyPath: @"arrangedObjects.name"
++      options: [NSDictionary dictionaryWithObjectsAndKeys:
++        [NSNumber numberWithBool: YES], NSInsertsNullPlaceholderBindingOption,
++        @"None", NSNullPlaceholderBindingOption, nil]];
++      PASS_EQUAL([p itemTitles],
++        ([NSArray arrayWithObjects: @"None", @"A", @"B", @"C", nil]),
++        "the placeholder is titled by its binding's null placeholder");
++
++      /* contentObjects */
++      model = [NSMutableDictionary dictionary];
++      [model setObject: [NSNumber numberWithInt: 2] forKey: @"chosen"];
++      p = newPopUp();
++      [p bind: NSContentBinding toObject: ac withKeyPath: @"arrangedObjects"
++      options: nil];
++      [p bind: NSContentObjectsBinding toObject: ac
++  withKeyPath: @"arrangedObjects.ident" options: nil];
++      [p bind: NSContentValuesBinding toObject: ac
++  withKeyPath: @"arrangedObjects.name" options: nil];
++      [p bind: NSSelectedObjectBinding toObject: model withKeyPath: @"chosen"
++      options: nil];
++      PASS([p indexOfSelectedItem] == 1,
++        "selectedObject is matched against contentObjects");
++      [[p menu] performActionForItemAtIndex: 2];
++      PASS_EQUAL([model objectForKey: @"chosen"], [NSNumber numberWithInt: 3],
++        "and set from them");
++
++      /* selectedIndex counts the content, not the placeholder */
++      model = [NSMutableDictionary dictionary];
++      [model setObject: [NSNumber numberWithInt: 1] forKey: @"index"];
++      p = newPopUp();
++      [p bind: NSContentBinding toObject: ac withKeyPath: @"arrangedObjects"
++      options: inserts];
++      [p bind: NSSelectedIndexBinding toObject: model withKeyPath: @"index"
++      options: nil];
++      PASS([p indexOfSelectedItem] == 2, "selectedIndex 1 selects B");
++      [[p menu] performActionForItemAtIndex: 3];
++      PASS_EQUAL([model objectForKey: @"index"], [NSNumber numberWithInt: 2],
++        "choosing C sets 2");
++      [[p menu] performActionForItemAtIndex: 0];
++      PASS([model objectForKey: @"index"] == nil,
++        "choosing the placeholder sets nil");
++
++      /* titles may repeat */
++      model = [NSMutableDictionary dictionary];
++      [model setObject: [NSArray arrayWithObjects: @"x", @"z", @"x", nil]
++                forKey: @"strings"];
++      p = newPopUp();
++      [p bind: NSContentValuesBinding toObject: model withKeyPath: @"strings"
++      options: nil];
++      PASS_EQUAL([p itemTitles],
++        ([NSArray arrayWithObjects: @"x", @"z", @"x", nil]),
++        "contentValues may repeat a title");
++    }
++  NS_HANDLER
++    {
++      PASS(0, "unexpected exception %s",
++        [[localException description] UTF8String]);
++    }
++  NS_ENDHANDLER
++
++  END_SET("NSPopUpButton content bindings")
++
++  return 0;
++}
+-- 
+2.43.0
+
