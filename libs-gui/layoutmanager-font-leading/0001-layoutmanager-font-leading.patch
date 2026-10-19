@@ -1,0 +1,637 @@
+From f25736a03f5b6abbc30eaa9636e4cf3ef21519eb Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Tue, 20 Oct 2026 02:05:03 +0500
+Subject: [PATCH] Text system: line heights as macOS lays them out, and
+ usesFontLeading
+
+GNUstep laid each line out at the font's -defaultLineHeightForFont,
+which the cairo backend gives as the font's own line height, ascender,
+descender and line gap added unrounded: Arial at 10 points made lines of
+11.499 points.  NSFont's -leading was always 0, NSLayoutManager had no
+-usesFontLeading, and lineHeightMultiple was ignored.  On macOS 15
+(TextKit 1) the same text makes lines of 11.327, or 11.0 when the layout
+manager does not use the font leading; measured over Arial, Times New
+Roman and Georgia at 9, 10, 12, 14.5 and 20 points, with and without a
+paragraph style:
+
+- a line is the ascender and the descender, each rounded to a whole
+  point, and its baseline is the rounded ascender below its top
+  (Arial 10: 9 + 2, baseline at 9);
+- the font's leading (its line gap, 0.327 for Arial 10) goes below that,
+  unrounded, when -usesFontLeading is YES, the default;
+- lineHeightMultiple scales the rounded height, and the extra goes above
+  the baseline (Arial 10 at 1.5: 16.5, baseline at 14.5); minimum and
+  maximum line heights then clamp it, as before;
+- lineSpacing takes the place of the leading where it is larger, except
+  under the last line of the text, which keeps only the leading;
+- -defaultLineHeightForFont: is the rounded ascender and descender plus
+  the leading rounded, when it is used (Times New Roman 12: 11 + 3 + 1),
+  and the extra line fragment after a final newline is that high;
+- string drawing (-sizeWithAttributes:, -boundingRectWithSize:options:,
+  -drawInRect:...) leaves the leading out unless the options include
+  NSStringDrawingUsesFontLeading.
+
+Make the typesetter do the same, give NSFont a -leading (the backend's
+line height less the ascender and descender, so 0 where the backend has
+no line gap), add -usesFontLeading and -setUsesFontLeading: (YES by
+default) to the layout manager, and pass the string drawing option to
+the layout manager string drawing uses.  With it the layout of every case
+measured above matches macOS to the thousandth of a point, apart from
+paragraph spacing, which this leaves as it was.
+
+The test lays text out in the user font at two sizes, and in Arial,
+Liberation Sans, Times New Roman and Liberation Serif where installed,
+and checks each rule above against the font's own metrics.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../Additions/GNUstepGUI/GSLayoutManager.h    |   6 +
+ Source/GSHorizontalTypesetter.m               |  78 ++++++--
+ Source/GSLayoutManager.m                      |  25 ++-
+ Source/NSFont.m                               |   6 +-
+ Source/NSStringDrawing.m                      |  26 ++-
+ Tests/gui/NSLayoutManager/fontLeading.m       | 186 ++++++++++++++++++
+ 6 files changed, 300 insertions(+), 27 deletions(-)
+ create mode 100644 Tests/gui/NSLayoutManager/fontLeading.m
+
+diff --git a/Headers/Additions/GNUstepGUI/GSLayoutManager.h b/Headers/Additions/GNUstepGUI/GSLayoutManager.h
+index bdb4fa5ef..dbdbde91b 100644
+--- a/Headers/Additions/GNUstepGUI/GSLayoutManager.h
++++ b/Headers/Additions/GNUstepGUI/GSLayoutManager.h
+@@ -72,6 +72,7 @@ APPKIT_EXPORT_CLASS
+   BOOL backgroundLayoutEnabled;
+   BOOL showsInvisibleCharacters;
+   BOOL showsControlCharacters;
++  BOOL usesFontLeading;
+ 
+   GSTypesetter *typesetter;
+ 
+@@ -151,6 +152,11 @@ how it's supposed to work. It's functional and correct, but it isn't fast. */
+ - (BOOL) usesScreenFonts;
+ - (void) setUsesScreenFonts: (BOOL)flag;
+ 
++#if OS_API_VERSION(MAC_OS_X_VERSION_10_5, GS_API_LATEST)
++- (BOOL) usesFontLeading;
++- (void) setUsesFontLeading: (BOOL)flag;
++#endif
++
+ - (NSFont *) substituteFontForFont: (NSFont *)originalFont;
+ 
+ 
+diff --git a/Source/GSHorizontalTypesetter.m b/Source/GSHorizontalTypesetter.m
+index 380d6963e..d5043197a 100644
+--- a/Source/GSHorizontalTypesetter.m
++++ b/Source/GSHorizontalTypesetter.m
+@@ -546,6 +546,7 @@ -(BOOL) _reuseSoftInvalidatedLayout
+ 
+ - (NSRect)_getProposedRectForNewParagraph: (BOOL)newParagraph
+                            withLineHeight: (CGFloat) lineHeight
++                                  leading: (CGFloat) leading
+ {
+   CGFloat headIndent;
+   CGFloat tailIndent = [currentParagraphStyle tailIndent];
+@@ -566,7 +567,27 @@ - (NSRect)_getProposedRectForNewParagraph: (BOOL)newParagraph
+   return NSMakeRect(headIndent,
+                     currentPoint.y,
+                     tailIndent - headIndent,
+-                    lineHeight + [currentParagraphStyle lineSpacing]);
++                    lineHeight + MAX([currentParagraphStyle lineSpacing], leading));
++}
++
++/* A font's ascender and descender as lines are laid out with them: in whole
++   points, as on macOS. */
++static inline CGFloat
++lineAscender(NSFont *font)
++{
++  return floor([font ascender] + 0.5);
++}
++
++static inline CGFloat
++lineDescender(NSFont *font)
++{
++  return floor(-[font descender] + 0.5);
++}
++
++static inline CGFloat
++lineLeading(GSLayoutManager *layoutManager, NSFont *font)
++{
++  return [layoutManager usesFontLeading] ? [font leading] : 0.0;
+ }
+ 
+ - (void) _addExtraLineFragment
+@@ -598,7 +619,7 @@ - (void) _addExtraLineFragment
+ 
+   if (currentFont)
+     {
+-      lineHeight = [currentFont defaultLineHeightForFont];
++      lineHeight = [currentLayoutManager defaultLineHeightForFont: currentFont];
+     }
+   else
+     {
+@@ -606,7 +627,8 @@ - (void) _addExtraLineFragment
+     }
+ 
+   rect = [self _getProposedRectForNewParagraph: YES
+-                                withLineHeight: lineHeight];
++                                withLineHeight: lineHeight
++                                       leading: 0.0];
+   rect = [currentTextContainer lineFragmentRectForProposedRect: rect
+                                                 sweepDirection: NSLineSweepRight
+                                              movementDirection: NSLineMovesDown
+@@ -622,9 +644,10 @@ - (void) _addExtraLineFragment
+     }
+ }
+ 
+-static inline BOOL wantNewLineHeight(CGFloat height, CGFloat *lineHeight, CGFloat maxLineHeight)
++static inline BOOL wantNewLineHeight(CGFloat height, CGFloat *lineHeight, CGFloat maxLineHeight,
++                                     CGFloat multiple)
+ {
+-  CGFloat newHeight = height;
++  CGFloat newHeight = multiple > 0 ? height * multiple : height;
+ 
+   if (maxLineHeight > 0 && newHeight > maxLineHeight)
+     {
+@@ -645,6 +668,7 @@ - (BOOL)_baseLayoutBlockNewParagraph:(BOOL *)newParagraph
+                          considering:(CGFloat)maxLineHeight
+                        usingAscender:(CGFloat *)ascender
+                         andDescender:(CGFloat *)descender
++                             leading:(CGFloat *)leading
+           returningLineFragmentIndex:(int *)lineFragmentIndex
+                  returningGlyphIndex:(unsigned int*)glyphIndex
+                    returningPosition:(NSPoint *)position
+@@ -655,8 +679,9 @@ - (BOOL)_baseLayoutBlockNewParagraph:(BOOL *)newParagraph
+   NSFont *font = glyphCache->font;
+ 
+   CGFloat baseline; /* Baseline position (0 is top of line-height, positive is down). */
+-  CGFloat fontAscender = [font ascender];
+-  CGFloat fontDescender = -[font descender];
++  CGFloat fontAscender = lineAscender(font);
++  CGFloat fontDescender = lineDescender(font);
++  CGFloat multiple = [currentParagraphStyle lineHeightMultiple];
+ 
+   NSGlyph lastGlyph = NSNullGlyph;
+   NSPoint lastPosition;
+@@ -728,8 +753,8 @@ - (BOOL)_baseLayoutBlockNewParagraph:(BOOL *)newParagraph
+       if (glyphEntry->font != font)
+         {
+           font = glyphEntry->font;
+-          fontAscender = [font ascender];
+-          fontDescender = -[font descender];
++          fontAscender = lineAscender(font);
++          fontDescender = lineDescender(font);
+           lastGlyph = NSNullGlyph;
+         }
+ 
+@@ -789,7 +814,12 @@ - (BOOL)_baseLayoutBlockNewParagraph:(BOOL *)newParagraph
+           if (yOffset > 0 && fontDescender + yOffset > *descender)
+             *descender = fontDescender + yOffset;
+ 
+-          if (wantNewLineHeight(*ascender + *descender, lineHeight, maxLineHeight))
++          if (lineLeading(currentLayoutManager, font) > *leading)
++            {
++              *leading = lineLeading(currentLayoutManager, font);
++              return YES;
++            }
++          if (wantNewLineHeight(*ascender + *descender, lineHeight, maxLineHeight, multiple))
+             return YES;
+         }
+ 
+@@ -922,7 +952,7 @@ the first tab would move (exactly) to the next tab
+               /* Update ascender and descender. Adjust line height and
+                  baseline if necessary. */
+ 
+-              if (wantNewLineHeight(*ascender + *descender, lineHeight, maxLineHeight))
++              if (wantNewLineHeight(*ascender + *descender, lineHeight, maxLineHeight, multiple))
+                 return YES;
+             }
+ 
+@@ -1244,6 +1274,7 @@ -(int) layoutLineNewParagraph: (BOOL)newParagraph
+   CGFloat maxLineHeight;   /* Maximum line height (usually from the paragraph style). */
+   CGFloat ascender;        /* Amount of space we want above the baseline (always>=0). */
+   CGFloat descender;       /* Amount of space we want below the baseline (always>=0). */
++  CGFloat leading;         /* The fonts' leading, when the layout manager uses it. */
+ 
+   /*
+      These are values for the line as a whole. We start out by initializing
+@@ -1296,9 +1327,12 @@ -(int) layoutLineNewParagraph: (BOOL)newParagraph
+     if (maxLineHeight > 0 && maxLineHeight < min)
+       maxLineHeight = min;
+ 
+-    lineHeight = [glyphCache->font defaultLineHeightForFont];
+-    ascender = [glyphCache->font ascender];
+-    descender = -[glyphCache->font descender];
++    ascender = lineAscender(glyphCache->font);
++    descender = lineDescender(glyphCache->font);
++    leading = lineLeading(currentLayoutManager, glyphCache->font);
++    lineHeight = ascender + descender;
++    if ([currentParagraphStyle lineHeightMultiple] > 0)
++      lineHeight *= [currentParagraphStyle lineHeightMultiple];
+ 
+     if (lineHeight < min)
+       lineHeight = min;
+@@ -1332,7 +1366,8 @@ -(int) layoutLineNewParagraph: (BOOL)newParagraph
+           NSRect remain;
+ 
+           remain = [self _getProposedRectForNewParagraph: newParagraph
+-                                          withLineHeight: lineHeight];
++                                          withLineHeight: lineHeight
++                                                 leading: leading];
+ 
+           /*
+             Build a list of all line fragment rects for this line.
+@@ -1385,6 +1420,7 @@ -(int) layoutLineNewParagraph: (BOOL)newParagraph
+                                                      considering: maxLineHeight
+                                                    usingAscender: &ascender
+                                                     andDescender: &descender
++                                                         leading: &leading
+                                       returningLineFragmentIndex: &lineFragmentIndex
+                                              returningGlyphIndex: &lastGlyphIndex
+                                                returningPosition: &position];
+@@ -1394,6 +1430,18 @@ -(int) layoutLineNewParagraph: (BOOL)newParagraph
+ 
+   /* Basic layout is done. */
+ 
++  /* The last line of the text keeps its leading but has no line spacing. */
++  if ([currentParagraphStyle lineSpacing] > leading
++    && ![currentLayoutManager isValidGlyphIndex: cacheBase + lastGlyphIndex])
++    {
++      int i;
++
++      for (i = 0; i < lineFragmentCount; i++)
++        {
++          lineFragments[i].rect.size.height = lineHeight + leading;
++        }
++    }
++
+   /* Take care of the alignments. */
+   if (lineFragmentIndex != lineFragmentCount)
+     {
+diff --git a/Source/GSLayoutManager.m b/Source/GSLayoutManager.m
+index f6d652c76..55ba0d306 100644
+--- a/Source/GSLayoutManager.m
++++ b/Source/GSLayoutManager.m
+@@ -2961,6 +2961,7 @@ @implementation GSLayoutManager
+   [self setGlyphGenerator: [NSGlyphGenerator sharedGlyphGenerator]];
+ 
+   usesScreenFonts = YES;
++  usesFontLeading = YES;
+   [self _initGlyphs];
+ 
+   return self;
+@@ -3100,6 +3101,21 @@ - (void) setUsesScreenFonts: (BOOL)flag
+   [self _didInvalidateLayout];
+ }
+ 
++- (BOOL) usesFontLeading
++{
++  return usesFontLeading;
++}
++
++- (void) setUsesFontLeading: (BOOL)flag
++{
++  flag = !!flag;
++  if (flag == usesFontLeading)
++    return;
++  usesFontLeading = flag;
++  [self _invalidateEverything];
++  [self _didInvalidateLayout];
++}
++
+ - (NSFont *) substituteFontForFont: (NSFont *)originalFont
+ {
+   NSFont *f;
+@@ -3159,7 +3175,14 @@ - (BOOL) showsControlCharacters
+ 
+ - (CGFloat) defaultLineHeightForFont: (NSFont*)theFont
+ {
+-  return [theFont defaultLineHeightForFont];
++  CGFloat height = floor([theFont ascender] + 0.5)
++    + floor(-[theFont descender] + 0.5);
++
++  if (usesFontLeading)
++    {
++      height += floor([theFont leading] + 0.5);
++    }
++  return height;
+ }
+ 
+ - (CGFloat) defaultBaselineOffsetForFont: (NSFont*)theFont
+diff --git a/Source/NSFont.m b/Source/NSFont.m
+index 2cbb83565..e1adeb583 100644
+--- a/Source/NSFont.m
++++ b/Source/NSFont.m
+@@ -1136,8 +1136,10 @@ - (CGFloat) defaultLineHeightForFont { return [fontInfo defaultLineHeightForFont
+ 
+ - (CGFloat) leading
+ {
+-  // FIXME
+-  return 0.0;
++  CGFloat leading = [fontInfo defaultLineHeightForFont]
++    - ([fontInfo ascender] - [fontInfo descender]);
++
++  return leading > 0.0 ? leading : 0.0;
+ }
+ 
+ /* Computing font metrics attributes*/
+diff --git a/Source/NSStringDrawing.m b/Source/NSStringDrawing.m
+index 6bb0ff40f..82ed0673d 100644
+--- a/Source/NSStringDrawing.m
++++ b/Source/NSStringDrawing.m
+@@ -67,7 +67,7 @@
+ {
+   int used;
+   NSUInteger string_hash;
+-  BOOL hasSize, useScreenFonts;
++  BOOL hasSize, useScreenFonts, useFontLeading;
+ 
+   NSTextStorage *textStorage;
+   NSLayoutManager *layoutManager;
+@@ -173,7 +173,8 @@ static inline BOOL is_size_match(cache_t *c, cache_t *scratch)
+ static inline BOOL is_match(cache_t *c, cache_t *scratch)
+ {
+   if (c->string_hash != scratch->string_hash
+-      || c->useScreenFonts != scratch->useScreenFonts)
++      || c->useScreenFonts != scratch->useScreenFonts
++      || c->useFontLeading != scratch->useFontLeading)
+     return NO;
+ 
+ #ifdef STATS
+@@ -256,7 +257,8 @@ cases on certain matching use patterns (where the cache is full of old
+   return cache + replace;
+ }
+ 
+-static cache_t *cache_lookup(BOOL hasSize, NSSize size, BOOL useScreenFonts)
++static cache_t *cache_lookup(BOOL hasSize, NSSize size, BOOL useScreenFonts,
++                             BOOL useFontLeading)
+ {
+   BOOL hit;
+   cache_t *c;
+@@ -266,6 +268,7 @@ cases on certain matching use patterns (where the cache is full of old
+   scratch->string_hash = [[scratch->textStorage string] hash];
+   scratch->hasSize = hasSize;
+   scratch->useScreenFonts = useScreenFonts;
++  scratch->useFontLeading = useFontLeading;
+   scratch->givenSize = size;
+   
+   c = cache_match(scratch, &hit);
+@@ -288,6 +291,7 @@ cases on certain matching use patterns (where the cache is full of old
+           [c->textContainer setContainerSize: NSMakeSize(LARGE_SIZE, LARGE_SIZE)];
+         }
+       [c->layoutManager setUsesScreenFonts: useScreenFonts];
++      [c->layoutManager setUsesFontLeading: useFontLeading];
+       // Layout the whole container
+       [c->layoutManager glyphRangeForTextContainer: c->textContainer];
+       c->usedRect = [c->layoutManager usedRectForTextContainer: c->textContainer];
+@@ -450,7 +454,7 @@ - (void) drawAtPoint: (NSPoint)point
+   NS_DURING
+     {
+       prepare_attributed_string(self);
+-      c = cache_lookup(NO, NSZeroSize, use_screen_fonts());
++      c = cache_lookup(NO, NSZeroSize, use_screen_fonts(), NO);
+ 
+       draw_at_point(c, point);
+     }
+@@ -482,7 +486,8 @@ - (void) drawWithRect: (NSRect)rect
+   NS_DURING
+     {
+       prepare_attributed_string(self);
+-      c = cache_lookup(YES, rect.size, use_screen_fonts());
++      c = cache_lookup(YES, rect.size, use_screen_fonts(),
++                       (options & NSStringDrawingUsesFontLeading) != 0);
+       draw_in_rect(c, rect);
+     }
+   NS_HANDLER
+@@ -513,7 +518,8 @@ - (NSRect) boundingRectWithSize: (NSSize)size
+   NS_DURING
+     {    
+       prepare_attributed_string(self);
+-      c = cache_lookup(hasSize, size, YES);
++      c = cache_lookup(hasSize, size, YES,
++                       (options & NSStringDrawingUsesFontLeading) != 0);
+       result = c->usedRect;
+       /* A paragraph head indent shifts the laid out glyphs to the right, so it
+          appears in the used rect origin.  AppKit does not fold that offset into
+@@ -545,7 +551,7 @@ - (void) drawAtPoint: (NSPoint)point withAttributes: (NSDictionary *)attrs
+   NS_DURING
+     {
+       prepare_string(self, attrs);
+-      c = cache_lookup(NO, NSZeroSize, use_screen_fonts());
++      c = cache_lookup(NO, NSZeroSize, use_screen_fonts(), NO);
+       draw_at_point(c, point);
+     }
+   NS_HANDLER
+@@ -578,7 +584,8 @@ - (void) drawWithRect: (NSRect)rect
+   NS_DURING
+     {    
+       prepare_string(self, attrs);
+-      c = cache_lookup(YES, rect.size, use_screen_fonts());
++      c = cache_lookup(YES, rect.size, use_screen_fonts(),
++                       (options & NSStringDrawingUsesFontLeading) != 0);
+       draw_in_rect(c, rect);
+     }
+   NS_HANDLER
+@@ -611,7 +618,8 @@ - (NSRect) boundingRectWithSize: (NSSize)size
+   NS_DURING
+     {
+       prepare_string(self, attrs);
+-      c = cache_lookup(hasSize, size, YES);
++      c = cache_lookup(hasSize, size, YES,
++                       (options & NSStringDrawingUsesFontLeading) != 0);
+       result = c->usedRect;
+     }
+   NS_HANDLER
+diff --git a/Tests/gui/NSLayoutManager/fontLeading.m b/Tests/gui/NSLayoutManager/fontLeading.m
+new file mode 100644
+index 000000000..11962034a
+--- /dev/null
++++ b/Tests/gui/NSLayoutManager/fontLeading.m
+@@ -0,0 +1,186 @@
++/* Line heights as macOS lays them out (TextKit 1, NSLayoutManager on macOS
++ * 15), with whatever fonts are installed:
++ *
++ * - a line is the font's ascender and descender, each rounded to a whole
++ *   point, and its baseline is the rounded ascender below its top;
++ * - the font's leading goes below that when -usesFontLeading is YES, the
++ *   default, and not when it is NO;
++ * - -defaultLineHeightForFont: is the same sum, with the leading rounded;
++ * - lineHeightMultiple scales the rounded height and puts the extra above
++ *   the baseline;
++ * - lineSpacing replaces the leading when it is larger, except under the
++ *   last line;
++ * - string drawing adds the leading only with
++ *   NSStringDrawingUsesFontLeading.
++ *
++ * For Arial at 10 points (ascender 9.05, descender 2.12, leading 0.33)
++ * that is lines of 11.33, or 11 without the leading, and a baseline at 9.
++ */
++#import "Testing.h"
++#import <Foundation/Foundation.h>
++#import <AppKit/AppKit.h>
++#include <math.h>
++
++@interface NSLayoutManager (FontLeading)
++- (BOOL) usesFontLeading;
++- (void) setUsesFontLeading: (BOOL)flag;
++@end
++
++#define CLOSE(a, b) (fabs((double)(a) - (double)(b)) < 0.001)
++
++static NSLayoutManager *
++laidOut(NSString *text, NSFont *font, NSParagraphStyle *style, BOOL leading,
++  CGFloat width)
++{
++  NSMutableDictionary *attrs = [NSMutableDictionary dictionary];
++  NSTextStorage *storage;
++  NSLayoutManager *lm = AUTORELEASE([[NSLayoutManager alloc] init]);
++  NSTextContainer *tc;
++
++  [attrs setObject: font forKey: NSFontAttributeName];
++  if (style != nil)
++    [attrs setObject: style forKey: NSParagraphStyleAttributeName];
++  storage = AUTORELEASE([[NSTextStorage alloc] initWithString: text
++                                                   attributes: attrs]);
++  if ([lm respondsToSelector: @selector(setUsesFontLeading:)])
++    [lm setUsesFontLeading: leading];
++  tc = AUTORELEASE([[NSTextContainer alloc]
++    initWithContainerSize: NSMakeSize(width, 1e6)]);
++  [tc setLineFragmentPadding: 0];
++  [lm addTextContainer: tc];
++  [storage addLayoutManager: lm];
++  [lm glyphRangeForTextContainer: tc];
++  return lm;
++}
++
++static NSRect
++lineRect(NSLayoutManager *lm, NSUInteger line)
++{
++  NSUInteger glyph = 0;
++  NSUInteger count = [lm numberOfGlyphs];
++  NSRange range;
++  NSRect rect = NSZeroRect;
++
++  while (glyph < count)
++    {
++      rect = [lm lineFragmentRectForGlyphAtIndex: glyph effectiveRange: &range];
++      if (line-- == 0)
++        break;
++      glyph = NSMaxRange(range);
++    }
++  return rect;
++}
++
++static void
++check(NSFont *f)
++{
++  NSString *name = [NSString stringWithFormat: @"%@ %g", [f fontName],
++    [f pointSize]];
++  CGFloat asc = floor([f ascender] + 0.5);
++  CGFloat desc = floor(-[f descender] + 0.5);
++  CGFloat lead = [f leading];
++  NSLayoutManager *lm;
++  NSMutableParagraphStyle *ps;
++  NSString *three = @"one\ntwo\nthree";
++  NSDictionary *attrs;
++  NSRect r;
++
++  PASS(lead >= 0, "%s: the leading is not negative", [name UTF8String]);
++
++  lm = AUTORELEASE([[NSLayoutManager alloc] init]);
++  PASS([lm respondsToSelector: @selector(usesFontLeading)]
++    && [lm usesFontLeading], "a layout manager uses the font leading at first");
++  PASS(CLOSE([lm defaultLineHeightForFont: f], asc + desc + floor(lead + 0.5)),
++    "%s: the default line height is rounded, with the leading",
++    [name UTF8String]);
++  if ([lm respondsToSelector: @selector(setUsesFontLeading:)])
++    [lm setUsesFontLeading: NO];
++  PASS(CLOSE([lm defaultLineHeightForFont: f], asc + desc),
++    "%s: the default line height is rounded, without the leading",
++    [name UTF8String]);
++
++  lm = laidOut(three, f, nil, YES, 1000);
++  PASS(CLOSE(NSHeight(lineRect(lm, 0)), asc + desc + lead)
++    && CLOSE(NSMinY(lineRect(lm, 2)), 2 * (asc + desc + lead)),
++    "%s: a line is the rounded ascender and descender and the leading",
++    [name UTF8String]);
++  PASS(CLOSE([lm locationForGlyphAtIndex: 0].y, asc),
++    "%s: the baseline is the rounded ascender below the top", [name UTF8String]);
++
++  lm = laidOut(three, f, nil, NO, 1000);
++  PASS(CLOSE(NSHeight(lineRect(lm, 0)), asc + desc)
++    && CLOSE(NSHeight([lm usedRectForTextContainer:
++      [[lm textContainers] objectAtIndex: 0]]), 3 * (asc + desc)),
++    "%s: without the leading a line is the rounded ascender and descender",
++    [name UTF8String]);
++
++  ps = AUTORELEASE([[NSMutableParagraphStyle alloc] init]);
++  [ps setLineHeightMultiple: 1.5];
++  lm = laidOut(three, f, ps, NO, 1000);
++  PASS(CLOSE(NSHeight(lineRect(lm, 0)), 1.5 * (asc + desc))
++    && CLOSE([lm locationForGlyphAtIndex: 0].y, asc + 0.5 * (asc + desc)),
++    "%s: a line height multiple scales the line, the extra above the baseline",
++    [name UTF8String]);
++
++  ps = AUTORELEASE([[NSMutableParagraphStyle alloc] init]);
++  [ps setLineSpacing: lead + 2];
++  lm = laidOut(three, f, ps, YES, 1000);
++  PASS(CLOSE(NSHeight(lineRect(lm, 0)), asc + desc + lead + 2)
++    && CLOSE(NSHeight(lineRect(lm, 2)), asc + desc + lead),
++    "%s: line spacing larger than the leading replaces it, but not under the last line",
++    [name UTF8String]);
++
++  attrs = [NSDictionary dictionaryWithObject: f forKey: NSFontAttributeName];
++  r = [@"one\ntwo" boundingRectWithSize: NSMakeSize(1000, 1000)
++                                options: NSStringDrawingUsesLineFragmentOrigin
++                             attributes: attrs];
++  PASS(CLOSE(NSHeight(r), 2 * (asc + desc)),
++    "%s: string drawing leaves the leading out", [name UTF8String]);
++  r = [@"one\ntwo" boundingRectWithSize: NSMakeSize(1000, 1000)
++                                options: NSStringDrawingUsesLineFragmentOrigin
++                                         | NSStringDrawingUsesFontLeading
++                             attributes: attrs];
++  PASS(CLOSE(NSHeight(r), 2 * (asc + desc + lead)),
++    "%s: string drawing adds the leading when asked", [name UTF8String]);
++}
++
++int
++main(int argc, char **argv)
++{
++  CREATE_AUTORELEASE_POOL(arp);
++  START_SET("font leading and line heights")
++
++  NSEnumerator *e;
++  NSString *name;
++
++  NS_DURING
++    {
++      [NSApplication sharedApplication];
++    }
++  NS_HANDLER
++    {
++      if ([[localException name]
++        isEqualToString: NSInternalInconsistencyException])
++        SKIP("It looks like GNUstep backend is not yet installed")
++    }
++  NS_ENDHANDLER
++
++    {
++      check([NSFont userFontOfSize: 10]);
++      check([NSFont userFontOfSize: 13]);
++      /* Fonts with a leading of their own, where installed. */
++      e = [[NSArray arrayWithObjects: @"ArialMT", @"LiberationSans",
++        @"TimesNewRomanPSMT", @"LiberationSerif", nil] objectEnumerator];
++      while ((name = [e nextObject]) != nil)
++        {
++          NSFont *f = [NSFont fontWithName: name size: 12];
++
++          if (f != nil)
++            check(f);
++        }
++    }
++
++  END_SET("font leading and line heights")
++  DESTROY(arp);
++  return 0;
++}
+-- 
+2.50.1 (Apple Git-155)
+
