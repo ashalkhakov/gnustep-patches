@@ -373,6 +373,21 @@ left alone: a date ordered against a tagged string or double (NSDate's
 isSmallDate takes any tagged pointer for a date, a bug of NSDate's own)
 and BETWEEN with numeric bounds on a date or on a class with its own
 -compare: (macOS sends the bound -compare: there).
+
+Added on 2026-10-19 for ORMKit's apps over FreeCoreData:
+`predicate-string-escapes`.  A quoted string in a predicate format was
+taken verbatim up to the next quote; macOS reads its backslash escapes
+(`\\`, `\"`, `\'`, `\n`, `\t`, `\r`, `\uXXXX`, `\xHH`, `\ooo`, and any
+other escaped character as itself; checked on macOS 15).  -predicateFormat
+escapes a backslash and a double quote, so a predicate read back from its
+description doubled every backslash: FreeCoreData keeps an attribute's
+validation predicates as their formats, and Logbook's volume unit pattern
+`^(?:L|gal \(US\)|gal \(imp\))$` refused 'gal (US)'.  The format walker
+that collects the arguments now skips an escaped quote too.
+`NSPredicate/stringEscapes.m` fails 11 of its 13 checks without the fix
+and passes with it; the NSPredicate suite passes 446 of 446 on libs-base
+b5cb2a6 with every libs-base patch here, and the patch applies to that
+master alone too.
 `NSPredicate/orderingWithoutCompare.m` fails 30 of its 36 checks without
 the fix and passes with it on libs-base 7c81d0c; with every libs-base
 patch here applied, the NSPredicate suite passes 433 of 433.
@@ -384,6 +399,7 @@ patch here applied, the NSPredicate suite passes 433 of 433.
 | `predicate-secure-coding` | libs-base | test | not sent yet ([#766](https://github.com/gnustep/libs-base/issues/766)) | (none: FreeCoreData will use it from here) |
 | `predicate-aggregate-of-nil` | libs-base | test | not sent yet | (none: FreeCoreData will use it from here) |
 | `predicate-ordering-without-compare` | libs-base | test | not sent yet | (none: FreeCoreData will use it from here) |
+| `predicate-string-escapes` | libs-base | test | not sent yet | (none: FreeCoreData and ORMKit's apps use it from here) |
 | `arc4random-glibc` | libs-base | test | not sent yet | (none: every app built on the stack uses it from here; HomeRow's and UDCalc's shims are gone) |
 | `collection-copy-is-shallow` | libs-base | test | not sent yet | (none: FreeCoreData uses it from here) |
 | `nonretained-value-identity` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |

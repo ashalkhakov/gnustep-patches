@@ -1,0 +1,273 @@
+From fe18325c3eab3ca873f82eb1c8b2eee93b607cec Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Mon, 19 Oct 2026 11:42:07 +0000
+Subject: [PATCH] Read backslash escapes in a predicate format's quoted strings
+
+A quoted literal in a predicate format was taken verbatim up to the next
+quote character. macOS reads backslash escapes there: \\ is a backslash,
+\" and \' are quotes that do not end the literal, \n, \t and \r are
+control characters, \uXXXX, \xHH and \ooo name a character, and any other
+escaped character is itself.
+
+-predicateFormat writes a string constant with its backslashes and double
+quotes escaped, so a predicate read back from its own description got
+every backslash doubled, and one whose string held a double quote did not
+parse at all. Core Data stores validation predicates as their formats, so
+an attribute's pattern such as "gal \(US\)" came back as "gal \\(US\\)"
+and refused the value it was written to accept.
+
+The format walker that collects the variadic arguments skips quoted text;
+it now skips an escaped quote too, so an argument after one is not lost.
+
+Tests/base/NSPredicate/stringEscapes.m covers each escape, a pattern and a
+quoted string surviving their description, and an argument after an
+escaped quote; eleven of its thirteen checks fail without the change.
+---
+ Source/NSPredicate.m                   | 128 ++++++++++++++++---------
+ Tests/base/NSPredicate/stringEscapes.m |  65 +++++++++++++
+ 2 files changed, 149 insertions(+), 44 deletions(-)
+ create mode 100644 Tests/base/NSPredicate/stringEscapes.m
+
+diff --git a/Source/NSPredicate.m b/Source/NSPredicate.m
+index a9bfc83..6bacd7c 100644
+--- a/Source/NSPredicate.m
++++ b/Source/NSPredicate.m
+@@ -170,6 +170,7 @@ extern void     GSPropertyListMake(id,NSDictionary*,BOOL,BOOL,unsigned,id*);
+ - (NSExpression *) parseAdditionExpression;
+ - (NSExpression *) parseBinaryExpression;
+ - (NSExpression *) parseSimpleExpression;
++- (NSString *) parseQuotedLiteral: (unichar)quote;
+ 
+ @end
+ 
+@@ -556,21 +557,17 @@ argumentsFromFormat(NSString *format, va_list args)
+                 break;
+             }
+         }
+-      else if (c == '\'')
++      else if (c == '\'' || c == '"')
+         {
+           while (*ptr != 0)
+             {
+-              if (*ptr++ == '\'')
++              char      d = *ptr++;
++
++              if (d == '\\' && *ptr != 0)
+                 {
+-                  break;
++                  ptr++;
+                 }
+-            }
+-        }
+-      else if (c == '"')
+-        {
+-          while (*ptr != 0)
+-            {
+-              if (*ptr++ == '"')
++              else if (d == c)
+                 {
+                   break;
+                 }
+@@ -4939,6 +4936,79 @@ GSKeyPathIfKeyPath(NSExpression *expression)
+   return [NSExpression expressionForKeyPath: ident];
+ }
+ 
++/* Up to n digits of the base given, as one character. */
++static unichar
++scanDigits(NSString *string, NSUInteger *location, unsigned n, unsigned base)
++{
++  NSUInteger	length = [string length];
++  unichar	value = 0;
++
++  while (n-- > 0 && *location < length)
++    {
++      unichar	c = [string characterAtIndex: *location];
++      unsigned	digit;
++
++      if (c >= '0' && c <= '9')
++	digit = c - '0';
++      else if (c >= 'a' && c <= 'f')
++	digit = c - 'a' + 10;
++      else if (c >= 'A' && c <= 'F')
++	digit = c - 'A' + 10;
++      else
++	break;
++      if (digit >= base)
++	break;
++      value = value * base + digit;
++      (*location)++;
++    }
++  return value;
++}
++
++- (NSString *) parseQuotedLiteral: (unichar)quote
++{
++  NSString		*string = [self string];
++  NSUInteger		length = [string length];
++  NSUInteger		start = [self scanLocation];
++  NSUInteger		location = start;
++  NSMutableString	*result = [NSMutableString string];
++
++  while (location < length)
++    {
++      unichar	c = [string characterAtIndex: location++];
++
++      if (c == quote)
++	{
++	  [self setScanLocation: location];
++	  return result;
++	}
++      if (c == '\\' && location < length)
++	{
++	  c = [string characterAtIndex: location++];
++	  switch (c)
++	    {
++	      case 'n': c = '\n'; break;
++	      case 't': c = '\t'; break;
++	      case 'r': c = '\r'; break;
++	      case 'u':
++	      case 'U': c = scanDigits(string, &location, 4, 16); break;
++	      case 'x': c = scanDigits(string, &location, 2, 16); break;
++	      default:
++		if (c >= '0' && c <= '7')
++		  {
++		    location--;
++		    c = scanDigits(string, &location, 3, 8);
++		  }
++		break;
++	    }
++	}
++      [result appendString: [NSString stringWithCharacters: &c length: 1]];
++    }
++  [NSException raise: NSInvalidArgumentException
++	      format: @"Unterminated %s quoted literal at %lu",
++    quote == '"' ? "double" : "single", (unsigned long)start];
++  return nil;
++}
++
+ - (NSExpression *) parseSimpleExpression
+ {
+   unsigned      location;
+@@ -5160,44 +5230,14 @@ GSKeyPathIfKeyPath(NSExpression *expression)
+ 	
+   if ([self scanString: @"\"" intoString: NULL])
+     {
+-      NSCharacterSet	*skip = [self charactersToBeSkipped];
+-      NSString *str = nil;
+-
+-      [self setCharactersToBeSkipped: nil];
+-      if ([self scanUpToString: @"\"" intoString: &str] == NO)
+-	{
+-	  [self setCharactersToBeSkipped: skip];
+-          [NSException raise: NSInvalidArgumentException 
+-                      format: @"Invalid double quoted literal at %u", location];
+-	}
+-      [self setCharactersToBeSkipped: skip];
+-      if (NO == [self scanString: @"\"" intoString: NULL])
+-        {
+-          [NSException raise: NSInvalidArgumentException 
+-            format: @"Unterminated double quoted literal at %u", location];
+-        }
+-      return [NSExpression expressionForConstantValue: str];
++      return [NSExpression expressionForConstantValue:
++	[self parseQuotedLiteral: '"']];
+     }
+ 	
+   if ([self scanString: @"'" intoString: NULL])
+     {
+-      NSCharacterSet	*skip = [self charactersToBeSkipped];
+-      NSString *str = nil;
+-
+-      [self setCharactersToBeSkipped: nil];
+-      if ([self scanUpToString: @"'" intoString: &str] == NO)
+-	{
+-	  [self setCharactersToBeSkipped: skip];
+-          [NSException raise: NSInvalidArgumentException 
+-                      format: @"Invalid single quoted literal at %u", location];
+-	}
+-      [self setCharactersToBeSkipped: skip];
+-      if (NO == [self scanString: @"'" intoString: NULL])
+-        {
+-          [NSException raise: NSInvalidArgumentException 
+-            format: @"Unterminated single quoted literal at %u", location];
+-        }
+-      return [NSExpression expressionForConstantValue: str];
++      return [NSExpression expressionForConstantValue:
++	[self parseQuotedLiteral: '\'']];
+     }
+ 
+   if ([self scanString: @"@" intoString: NULL])
+diff --git a/Tests/base/NSPredicate/stringEscapes.m b/Tests/base/NSPredicate/stringEscapes.m
+new file mode 100644
+index 0000000..37aa257
+--- /dev/null
++++ b/Tests/base/NSPredicate/stringEscapes.m
+@@ -0,0 +1,65 @@
++/* A quoted string in a format reads its backslash escapes as macOS does,
++   so that the format a predicate describes itself with, which escapes a
++   backslash and a quote, parses back to the same string.
++*/
++#import <Foundation/NSAutoreleasePool.h>
++#import <Foundation/NSComparisonPredicate.h>
++#import <Foundation/NSExpression.h>
++#import <Foundation/NSPredicate.h>
++#import <Foundation/NSString.h>
++#import "ObjectTesting.h"
++
++static NSString *
++constantOf(NSString *format)
++{
++  NSComparisonPredicate *p;
++
++  p = (NSComparisonPredicate *)[NSPredicate predicateWithFormat: format];
++  return [[p rightExpression] constantValue];
++}
++
++int
++main(int argc, char **argv)
++{
++  NSAutoreleasePool *arp = [NSAutoreleasePool new];
++  NSPredicate *p;
++
++  PASS_EQUAL(constantOf(@"SELF == \"a\\\\b\""), @"a\\b",
++             "a backslash escaped is one backslash");
++  PASS_EQUAL(constantOf(@"SELF == \"a\\\"b\""), @"a\"b",
++             "an escaped double quote does not end the string");
++  PASS_EQUAL(constantOf(@"SELF == 'a\\'b'"), @"a'b",
++             "an escaped single quote does not end the string");
++  PASS_EQUAL(constantOf(@"SELF == 'a\"b'"), @"a\"b",
++             "a double quote in single quotes is itself");
++  PASS_EQUAL(constantOf(@"SELF == \"a\\nb\\tc\\rd\""), @"a\nb\tc\rd",
++             "newline, tab and carriage return");
++  PASS_EQUAL(constantOf(@"SELF == \"a\\u0041b\""), @"aAb",
++             "a \\u escape is the character it names");
++  PASS_EQUAL(constantOf(@"SELF == \"a\\x41b\""), @"aAb",
++             "a \\x escape is the character it names");
++  PASS_EQUAL(constantOf(@"SELF == \"a\\101b\""), @"aAb",
++             "an octal escape is the character it names");
++  PASS_EQUAL(constantOf(@"SELF == \"a\\(b\""), @"a(b",
++             "any other escaped character is itself");
++
++  /* What a predicate describes itself with is read back the same. */
++  p = [NSPredicate predicateWithFormat: @"SELF MATCHES %@",
++    @"^(?:L|gal \\(US\\))$"];
++  PASS_EQUAL(constantOf([p predicateFormat]), @"^(?:L|gal \\(US\\))$",
++             "a pattern with escapes survives its description");
++  PASS([[NSPredicate predicateWithFormat: [p predicateFormat]]
++         evaluateWithObject: @"gal (US)"],
++       "and still matches what it matched");
++  p = [NSPredicate predicateWithFormat: @"SELF == %@", @"say \"hi\""];
++  PASS_EQUAL(constantOf([p predicateFormat]), @"say \"hi\"",
++             "a string with quotes survives its description");
++
++  /* A quote escaped inside a literal does not hide the arguments after it. */
++  p = [NSPredicate predicateWithFormat: @"SELF == \"a\\\"b\" OR SELF == %@",
++    @"c"];
++  PASS([p evaluateWithObject: @"c"], "an argument after an escaped quote");
++
++  [arp release];
++  return 0;
++}
+-- 
+2.43.0
+
