@@ -453,6 +453,29 @@ raises on both.  `NSPredicate/aggregateOfNil.m` fails 9 of its 11 checks
 without the fix and passes with it; the NSPredicate suite passes 362 of
 362 on libs-base 7c81d0c, and every libs-base patch here co-applies.
 
+Added on 2026-10-19 for Logbook's controllers: `controller-entity-mode`.
+NSObjectController had entity mode's accessors but not its behaviour:
+-fetchWithRequest:merge:error: was a stub, so -fetch: did nothing;
+-newObject ignored the entity; removing deleted nothing; managedObjectContext
+was not an exposed binding (a xib's binding of it was refused); a xib's
+entityName was not read; and -initWithCoder: asked
+automaticallyPreparesContent before decoding it.  It now does what macOS 15
+does: managedObjectContext and fetchPredicate are bindings, fetching uses
+-defaultFetchRequest (entity, fetch predicate, an array controller's sort
+descriptors) and fills the content (merging when asked), -fetch: and
+-setFetchPredicate: fetch on the next pass of the run loop, -newObject
+inserts into the context, what is removed is deleted unless the content is
+bound, and a decoded controller with automaticallyPreparesContent fetches
+or prepares.  Core Data is reached by class name at run time, not linked.
+`NSArrayController/entityMode.m` stands in for Core Data with classes of
+the same names; it does not build without the fix (the binding name is
+new), and with the name spelt out it fails its first four checks and then
+crashes.  It passes with the fix on libs-gui 5c43a947f, and a program
+loading the same kind of xib over FreeCoreData's in-memory store fails 8 of
+10 checks on the stack the ormkit-gnustep image has and passes all with
+every libs-gui patch here.  It applies after
+`arraycontroller-arrange-eagerly` (see its NOTES.md).
+
 Added the same day, also for FreeCoreData:
 `predicate-ordering-without-compare`.  <, <=, >, >= and BETWEEN with a
 left hand side that has no -compare: of its own (an array, a set, a
@@ -664,6 +687,7 @@ the two where a window comes in the same event fail.  On libs-gui 5c43a94.
 | `layoutmanager-sanity-checks` | libs-gui | test | not sent yet | (none: UDCodeKit uses it from here) |
 | `layoutmanager-layout-to-point` | libs-gui | test | not sent yet | (none: UDCodeKit uses it from here) |
 | `textfield-binding-placeholders` | libs-gui | test | not sent yet | (none: UDQuakeTools uses it from here) |
+| `controller-entity-mode` | libs-gui | test | not sent yet (after `arraycontroller-arrange-eagerly`) | (none: Logbook's LBEntityController will drop its entity mode) |
 | `quick-click-order` | libs-back | test | not sent yet | (none: UDCodeKit and UDQuakeTools use it from here) |
 | `binding-to-many-mutation` | libs-gui | test | not sent yet | (none: UDQuakeTools uses it from here) |
 | `controller-selection-markers` | libs-gui | test | not sent yet | (none: bound controls show AppKit's placeholders from here) |
