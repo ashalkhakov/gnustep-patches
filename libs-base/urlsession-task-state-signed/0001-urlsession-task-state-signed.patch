@@ -1,0 +1,90 @@
+From 0e95770b83bcad99c36fd36200b6b4ced5a86809 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Tue, 20 Oct 2026 02:12:29 +0500
+Subject: [PATCH] Make NSURLSessionTaskState signed, as in Foundation
+
+Foundation declares NSURLSessionTaskState with NS_ENUM(NSInteger, ...);
+here it was NSUInteger, so -[NSURLSessionTask state] returned an
+unsigned type where every other -state in the stack - NSCell's,
+NSButton's, NSMenuItem's in the gui - returns NSInteger.
+
+With the GNUstep runtime a selector carries the types the compiler chose
+for it, and for a message to an id the compiler takes them from the
+first declaration of that name it has seen. Foundation's headers come
+before AppKit's, so in the gui itself -[NSButton state] (which returns
+[_cell state]) and NSMatrix's decoding send -state with an unsigned
+return type, and every program that uses buttons or loads a gorm file
+with a form in it prints, once per cell:
+
+  Calling [NSButtonCell -state] with incorrect signature.  Method has
+  q16@0:8 (q16@0:8), selector has Q16@0:8
+  Calling [NSFormCell -state] with incorrect signature.  Method has
+  q16@0:8 (q16@0:8), selector has Q16@0:8
+
+Declaring the type as Foundation does removes the second signature.
+
+Tests/base/NSURLSession/taskState.m checks that -[NSURLSessionTask
+state] returns NSInteger and that NSURLSessionTaskState is NSInteger.
+Without the change both fail; with it they pass. With libs-gui rebuilt
+against the changed header, a program that loads a xib with radio
+buttons and asks them their state no longer prints the warnings, and no
+object in libs-gui other than NSSwitch's (whose own type is fixed in
+libs-gui) sends -state with an unsigned return type any more.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Headers/Foundation/NSURLSession.h   |  2 +-
+ Tests/base/NSURLSession/taskState.m | 28 ++++++++++++++++++++++++++++
+ 2 files changed, 29 insertions(+), 1 deletion(-)
+ create mode 100644 Tests/base/NSURLSession/taskState.m
+
+diff --git a/Headers/Foundation/NSURLSession.h b/Headers/Foundation/NSURLSession.h
+index 91c7417c9..82baf842b 100644
+--- a/Headers/Foundation/NSURLSession.h
++++ b/Headers/Foundation/NSURLSession.h
+@@ -318,7 +318,7 @@ GS_NSURLSession_IVARS;
+ 
+ @end
+ 
+-typedef NS_ENUM(NSUInteger, NSURLSessionTaskState)
++typedef NS_ENUM(NSInteger, NSURLSessionTaskState)
+ {
+   /* The task is currently being serviced by the session */
+   NSURLSessionTaskStateRunning = 0,
+diff --git a/Tests/base/NSURLSession/taskState.m b/Tests/base/NSURLSession/taskState.m
+new file mode 100644
+index 000000000..296e611ec
+--- /dev/null
++++ b/Tests/base/NSURLSession/taskState.m
+@@ -0,0 +1,28 @@
++#import <Foundation/Foundation.h>
++#import "Testing.h"
++
++/* -[NSURLSessionTask state] returns a signed NSURLSessionTaskState, as in
++ * Foundation, and so has the type of every other -state (NSCell's,
++ * NSButton's, NSMenuItem's in the gui). */
++int
++main(void)
++{
++  START_SET("NSURLSessionTask state type")
++
++#if GS_HAVE_NSURLSESSION
++  NSMethodSignature *sig;
++
++  sig = [NSURLSessionTask instanceMethodSignatureForSelector: @selector(state)];
++  PASS(sig != nil, "NSURLSessionTask responds to -state");
++  PASS(strcmp([sig methodReturnType], @encode(NSInteger)) == 0,
++    "-[NSURLSessionTask state] returns NSInteger, as in Foundation (got %s)",
++    [sig methodReturnType]);
++  PASS(strcmp(@encode(NSURLSessionTaskState), @encode(NSInteger)) == 0,
++    "NSURLSessionTaskState is NSInteger");
++#else
++  SKIP("NSURLSession not available")
++#endif
++
++  END_SET("NSURLSessionTask state type")
++  return 0;
++}
+-- 
+2.50.1 (Apple Git-155)
+

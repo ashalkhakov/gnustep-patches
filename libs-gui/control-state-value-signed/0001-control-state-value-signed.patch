@@ -1,0 +1,127 @@
+From 8b690c846a7585087a9a51261f16c83b05ccea6c Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Tue, 20 Oct 2026 02:12:11 +0500
+Subject: [PATCH] Make NSControlStateValue signed, as in AppKit
+
+NSControlStateValue and NSCellStateValue were NSUInteger here, although
+one of their values is NSControlStateValueMixed, -1; AppKit declares
+them NSInteger. NSCell, NSButton and NSMenuItem declare -state and
+-setState: with NSInteger, and NSSwitch with NSControlStateValue, so the
+switch's methods had another type from everyone else's.
+
+With the GNUstep runtime a selector carries the types the compiler chose
+for it, and for a message to an id the compiler takes them from a
+declaration of that name it has seen. So [control state] sent to an
+NSSwitch from code that saw NSCell's declaration first prints
+
+  Calling [NSSwitch -state] with incorrect signature.  Method has
+  Q16@0:8 (Q16@0:8), selector has q16@0:8
+
+and the same for -setState:, and code that saw NSSwitch's first warns
+for every other control. Declaring the types as AppKit does gives every
+-state one signature.
+
+Tests/gui/NSSwitch/stateType.m checks that both types are NSInteger and
+that -[NSSwitch state] and -setState: have the types of NSCell's,
+NSButton's and NSMenuItem's; all six checks pass on macOS 15. Without
+the change all six fail here; with it they pass, and a program sending
+-state and -setState: to an NSSwitch through an id no longer warns. The
+NSSwitch tests still pass.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Headers/AppKit/NSCell.h        |  4 +--
+ Tests/gui/NSSwitch/stateType.m | 59 ++++++++++++++++++++++++++++++++++
+ 2 files changed, 61 insertions(+), 2 deletions(-)
+ create mode 100644 Tests/gui/NSSwitch/stateType.m
+
+diff --git a/Headers/AppKit/NSCell.h b/Headers/AppKit/NSCell.h
+index 0a674ee14..e512da702 100644
+--- a/Headers/AppKit/NSCell.h
++++ b/Headers/AppKit/NSCell.h
+@@ -121,7 +121,7 @@ enum {
+   NSOffState			= 0,
+   NSOnState			= 1
+ };
+-typedef NSUInteger NSCellStateValue;
++typedef NSInteger NSCellStateValue;
+ 
+ #if OS_API_VERSION(MAC_OS_X_VERSION_10_13, GS_API_LATEST)
+ /*
+@@ -132,7 +132,7 @@ enum {
+   NSControlStateValueOff   =  0,
+   NSControlStateValueOn    =  1
+ };
+-typedef NSUInteger NSControlStateValue;
++typedef NSInteger NSControlStateValue;
+ #endif
+ 
+ /**
+diff --git a/Tests/gui/NSSwitch/stateType.m b/Tests/gui/NSSwitch/stateType.m
+new file mode 100644
+index 000000000..9124ecf35
+--- /dev/null
++++ b/Tests/gui/NSSwitch/stateType.m
+@@ -0,0 +1,59 @@
++/* -state and -setState: have one type across the controls and cells, so a
++   message sent to an id reaches any of them without a signature mismatch.
++   AppKit declares NSControlStateValue as NSInteger. */
++#include "Testing.h"
++
++#include <string.h>
++#include <Foundation/NSAutoreleasePool.h>
++#include <Foundation/NSMethodSignature.h>
++
++#include <AppKit/NSButton.h>
++#include <AppKit/NSCell.h>
++#include <AppKit/NSMenuItem.h>
++#include <AppKit/NSSwitch.h>
++
++static BOOL
++sameTypes(Class a, Class b, SEL sel)
++{
++  NSMethodSignature *sa = [a instanceMethodSignatureForSelector: sel];
++  NSMethodSignature *sb = [b instanceMethodSignatureForSelector: sel];
++  NSUInteger i;
++
++  if (sa == nil || sb == nil
++    || strcmp([sa methodReturnType], [sb methodReturnType]) != 0
++    || [sa numberOfArguments] != [sb numberOfArguments])
++    return NO;
++  for (i = 2; i < [sa numberOfArguments]; i++)
++    {
++      if (strcmp([sa getArgumentTypeAtIndex: i],
++                 [sb getArgumentTypeAtIndex: i]) != 0)
++        return NO;
++    }
++  return YES;
++}
++
++int
++main(int argc, char **argv)
++{
++  CREATE_AUTORELEASE_POOL(arp);
++
++  START_SET("NSSwitch state type")
++
++  PASS(strcmp(@encode(NSControlStateValue), @encode(NSInteger)) == 0,
++    "NSControlStateValue is NSInteger");
++  PASS(strcmp(@encode(NSCellStateValue), @encode(NSInteger)) == 0,
++    "NSCellStateValue is NSInteger");
++  PASS(sameTypes([NSSwitch class], [NSCell class], @selector(state)),
++    "-[NSSwitch state] has the type of -[NSCell state]");
++  PASS(sameTypes([NSSwitch class], [NSCell class], @selector(setState:)),
++    "-[NSSwitch setState:] has the type of -[NSCell setState:]");
++  PASS(sameTypes([NSSwitch class], [NSButton class], @selector(state)),
++    "-[NSSwitch state] has the type of -[NSButton state]");
++  PASS(sameTypes([NSSwitch class], [NSMenuItem class], @selector(state)),
++    "-[NSSwitch state] has the type of -[NSMenuItem state]");
++
++  END_SET("NSSwitch state type")
++
++  DESTROY(arp);
++  return 0;
++}
+-- 
+2.50.1 (Apple Git-155)
+
