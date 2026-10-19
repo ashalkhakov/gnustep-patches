@@ -466,15 +466,24 @@ descriptors) and fills the content (merging when asked), -fetch: and
 -setFetchPredicate: fetch on the next pass of the run loop, -newObject
 inserts into the context, what is removed is deleted unless the content is
 bound, and a decoded controller with automaticallyPreparesContent fetches
-or prepares.  Core Data is reached by class name at run time, not linked.
+or prepares.  Once it has fetched, it follows its context's
+NSObjectsChangedInManagingContextNotification as macOS 15 does: inserted
+objects of the entity that match the fetch predicate are added, deleted
+and invalidated ones dropped, updated ones added or dropped as they now
+match, refreshed ones left alone, and invalidatedAll empties the content
+(see its NOTES.md).  Core Data is reached by class name at run time, not
+linked; the notification and its keys are named by their values, which
+FreeCoreData shares with Apple's from FreeCoreData#90.
 `NSArrayController/entityMode.m` stands in for Core Data with classes of
 the same names; it does not build without the fix (the binding name is
 new), and with the name spelt out it fails its first four checks and then
-crashes.  It passes with the fix on libs-gui 5c43a947f, and a program
-loading the same kind of xib over FreeCoreData's in-memory store fails 8 of
-10 checks on the stack the ormkit-gnustep image has and passes all with
-every libs-gui patch here.  It applies after
-`arraycontroller-arrange-eagerly` (see its NOTES.md).
+crashes; without following the context, it fails 12 of its 41.  It
+passes with the fix on libs-gui 5c43a947f, and a program loading the same
+kind of xib over FreeCoreData's in-memory store fails 8 of 10 checks on
+the stack the ormkit-gnustep image has and passes all with every libs-gui
+patch here.  A program following a context of FreeCoreData's fails 4 of 7
+checks over FreeCoreData master and passes all over FreeCoreData#90.  It
+applies after `arraycontroller-arrange-eagerly` (see its NOTES.md).
 
 Added the same day, also for FreeCoreData:
 `predicate-ordering-without-compare`.  <, <=, >, >= and BETWEEN with a

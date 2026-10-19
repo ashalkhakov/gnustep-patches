@@ -1,4 +1,4 @@
-From 44b181d209979244736872e7cec927532f8adc4f Mon Sep 17 00:00:00 2001
+From 9782a1810a6f6dc5b3b2833d68e78a6b4170f0d4 Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Mon, 19 Oct 2026 16:42:34 +0000
 Subject: [PATCH] Give object and array controllers a working entity mode
@@ -36,11 +36,30 @@ They now do what macOS does, checked against AppKit on macOS 15:
   entityName as well as from a nib's _NSManagedProxy, a decoded controller
   gets NSMutableDictionary as object class unless one is given, as on
   macOS, and -entityName is added beside -entityNameKey.
+- Once it has fetched, the controller follows its context's
+  NSManagedObjectContextObjectsDidChangeNotification, as macOS does:
+  inserted objects of the entity or a subentity that match the fetch
+  predicate are added, deleted and invalidated ones are dropped, updated
+  ones are added or dropped as they now match or not, refreshed ones are
+  left alone, and invalidatedAll empties the content. An array controller
+  then rearranges its objects and keeps its selection; an object
+  controller whose content goes takes the next object that comes. A
+  controller whose content is bound follows nothing, a new context is
+  followed in place of the old one, and a controller that has not
+  fetched follows nothing yet.
 
 gnustep-gui does not link Core Data, and AppKit has no hard dependency on
 it either: NSFetchRequest and NSEntityDescription are looked up by name
 at run time, and the context, request and objects are sent only the
 messages Core Data defines for them.
+
+The notification is observed by its value,
+"NSObjectsChangedInManagingContextNotification", and its keys by theirs
+("inserted", "updated", "deleted", "refreshed", "invalidated",
+"invalidatedAll"), which Apple's Core Data and FreeCoreData (from
+ashalkhakov/FreeCoreData#90) share.
+macOS's AppKit listens to a private notification of Core Data's that is
+posted just before this one, with the same keys.
 
 Tests/gui/NSArrayController/entityMode.m stands in for Core Data with
 classes of those names that keep objects in an array, and loads
@@ -48,7 +67,9 @@ EntityMode.xib, an array controller in entity mode with its context bound
 to the file's owner and one in class mode that prepares its content. The
 test does not build without the change, since NSManagedObjectContextBinding
 is new; with the binding name spelt out it fails its first four checks and
-then crashes. The same was checked against FreeCoreData.
+then crashes. The checks of following the context, without that part
+of the change, fail 12 of their 18. The same was checked against
+FreeCoreData.
 
 This applies on top of "Arrange an array controller's objects as its
 content changes", whose -removeObject: and -removeObjects: it extends.
@@ -57,12 +78,12 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  Headers/AppKit/NSKeyValueBinding.h         |   2 +
  Headers/AppKit/NSObjectController.h        |   5 +
- Source/NSArrayController.m                 |  47 +++
- Source/NSObjectController.m                | 193 +++++++++--
+ Source/NSArrayController.m                 |  71 +++
+ Source/NSObjectController.m                | 338 +++++++++++++-
  Source/externs.m                           |   2 +
  Tests/gui/NSArrayController/EntityMode.xib |  17 +
- Tests/gui/NSArrayController/entityMode.m   | 356 +++++++++++++++++++++
- 7 files changed, 602 insertions(+), 20 deletions(-)
+ Tests/gui/NSArrayController/entityMode.m   | 512 +++++++++++++++++++++
+ 7 files changed, 927 insertions(+), 20 deletions(-)
  create mode 100644 Tests/gui/NSArrayController/EntityMode.xib
  create mode 100644 Tests/gui/NSArrayController/entityMode.m
 
@@ -110,15 +131,17 @@ index 3838dc7c7..8a4c0d13a 100644
  
  #endif // OS_API_VERSION
 diff --git a/Source/NSArrayController.m b/Source/NSArrayController.m
-index ee18d6fcf..d0a620636 100644
+index ee18d6fcf..bb1a87419 100644
 --- a/Source/NSArrayController.m
 +++ b/Source/NSArrayController.m
-@@ -140,6 +140,14 @@
+@@ -140,6 +140,16 @@
  
  @end
  
 +@interface NSObjectController (GSEntityMode)
 +- (void) _deleteObjects: (NSArray*)objects;
++- (NSArray*) _followedObjects;
++- (void) _followAdding: (NSArray*)added removing: (NSArray*)removed;
 +@end
 +
 +@protocol GSControllerFetchRequest
@@ -128,7 +151,7 @@ index ee18d6fcf..d0a620636 100644
  @interface NSArrayController (Private)
  - (NSIndexSet*) _indexSetForObjects: (NSArray*)objects;
  - (void) _setArrangedObjects: (NSArray*)arranged
-@@ -217,6 +225,7 @@
+@@ -217,6 +227,7 @@
    [_content removeObject: obj];
    [self _arrangeRemoving: [NSArray arrayWithObject: obj]];
    [self didChangeValueForKey: NSContentBinding];
@@ -136,7 +159,7 @@ index ee18d6fcf..d0a620636 100644
  }
  
  - (void) removeObjects: (NSArray*)obj
-@@ -225,6 +234,7 @@
+@@ -225,6 +236,7 @@
    [_content removeObjectsInArray: obj];
    [self _arrangeRemoving: obj];
    [self didChangeValueForKey: NSContentBinding];
@@ -144,7 +167,7 @@ index ee18d6fcf..d0a620636 100644
  }
  
  - (BOOL) canInsert
-@@ -238,6 +248,43 @@
+@@ -238,6 +250,65 @@
    [self rearrangeObjects];
  }
  
@@ -185,17 +208,40 @@ index ee18d6fcf..d0a620636 100644
 +  [self setContent: content];
 +}
 +
++- (NSArray*) _followedObjects
++{
++  return _content != nil ? (NSArray*)_content : [NSArray array];
++}
++
++- (void) _followAdding: (NSArray*)added removing: (NSArray*)removed
++{
++  NSMutableArray *content = [NSMutableArray arrayWithArray: _content];
++  NSEnumerator *e = [removed objectEnumerator];
++  id object;
++
++  while ((object = [e nextObject]) != nil)
++    {
++      [content removeObjectIdenticalTo: object];
++    }
++  [content addObjectsFromArray: added];
++  [self willChangeValueForKey: NSContentBinding];
++  ASSIGN(_content, content);
++  [self didChangeValueForKey: NSContentBinding];
++  [self rearrangeObjects];
++}
++
  - (void) insert: (id)sender
  {
    id new = [self newObject];
 diff --git a/Source/NSObjectController.m b/Source/NSObjectController.m
-index 71f00d785..ebd6181f1 100644
+index 71f00d785..4bfac5188 100644
 --- a/Source/NSObjectController.m
 +++ b/Source/NSObjectController.m
-@@ -34,10 +34,32 @@
+@@ -34,17 +34,52 @@
  #import <Foundation/NSKeyedArchiver.h>
  #import <Foundation/NSKeyValueObserving.h>
  #import <Foundation/NSKeyValueCoding.h>
++#import <Foundation/NSNotification.h>
 +#import <Foundation/NSRunLoop.h>
  #import "AppKit/NSObjectController.h"
  #import "AppKit/NSKeyValueBinding.h"
@@ -220,23 +266,55 @@ index 71f00d785..ebd6181f1 100644
 +
 +@protocol GSControllerManagedObject
 +- (id) managedObjectContext;
++- (id) entity;
 +@end
++
++@protocol GSControllerEntity
++- (BOOL) isKindOfEntity: (id)entity;
++@end
++
++/* Core Data's NSManagedObjectContextObjectsDidChangeNotification. */
++static NSString *GSObjectsChangedInManagingContextNotification
++  = @"NSObjectsChangedInManagingContextNotification";
 +
  @interface _NSManagedProxy : NSObject
  {
    NSString *_entity_name_key;
-@@ -93,6 +115,10 @@
++  BOOL _follows_context;
  }
+ 
+ - (void) setEntityName: (NSString *)name;
+ - (NSString *) entityName;
++- (BOOL) followsContext;
++- (void) setFollowsContext: (BOOL)flag;
  @end
  
-+@interface NSObjectController (GSEntityMode)
-+- (void) _deleteObjects: (NSArray*)objects;
+ @implementation _NSManagedProxy
+@@ -91,6 +126,23 @@
+ {
+   return _entity_name_key;
+ }
++
++- (BOOL) followsContext
++{
++  return _follows_context;
++}
++
++- (void) setFollowsContext: (BOOL)flag
++{
++  _follows_context = flag;
++}
 +@end
 +
- @implementation NSObjectController
++@interface NSObjectController (GSEntityMode)
++- (void) _deleteObjects: (NSArray*)objects;
++- (void) _followContext: (id)context;
++- (NSArray*) _followedObjects;
++- (void) _followAdding: (NSArray*)added removing: (NSArray*)removed;
+ @end
  
- + (void) initialize
-@@ -102,6 +128,8 @@
+ @implementation NSObjectController
+@@ -102,6 +154,8 @@
        [self setVersion: 1];
  
        [self exposeBinding: NSContentObjectBinding];
@@ -245,16 +323,18 @@ index 71f00d785..ebd6181f1 100644
        [self setKeys: [NSArray arrayWithObject: @"editable"] 
              triggerChangeNotificationsForDependentKey: @"canAdd"];
        [self setKeys: [NSArray arrayWithObject: @"editable"] 
-@@ -137,6 +165,8 @@
+@@ -137,7 +191,10 @@
    RELEASE(_content);
    RELEASE(_entity_name_key);
    RELEASE(_fetch_predicate);
 +  RELEASE(_managed_object_context);
 +  RELEASE(_managed_proxy);
    RELEASE(_selection);
++  [[NSNotificationCenter defaultCenter] removeObserver: self];
    [super dealloc];
  }
-@@ -166,23 +196,16 @@
+ 
+@@ -166,23 +223,16 @@
    int version = [coder versionForClassName: @"NSObjectController"];
    if ((self = [super initWithCoder: coder]) != nil)
      {
@@ -283,7 +363,7 @@ index 71f00d785..ebd6181f1 100644
            if ([coder containsValueForKey: @"NSObjectClassName"])
              {
                NSString *className = [coder decodeObjectForKey: @"NSObjectClassName"];
-@@ -200,6 +223,19 @@
+@@ -200,6 +250,19 @@
  	      [self setObjectClass: NSClassFromString(className)];
  	    }
  	}
@@ -303,7 +383,7 @@ index 71f00d785..ebd6181f1 100644
      }
  
    return self; 
-@@ -270,6 +306,15 @@
+@@ -270,6 +333,15 @@
  
  - (id) newObject
  {
@@ -319,7 +399,7 @@ index 71f00d785..ebd6181f1 100644
    return [[[self objectClass] alloc] init];
  }
  
-@@ -327,11 +372,14 @@
+@@ -327,11 +399,14 @@
      {
        GSKeyValueBinding *theBinding;
  
@@ -334,7 +414,7 @@ index 71f00d785..ebd6181f1 100644
      }
  }
  
-@@ -389,9 +437,26 @@
+@@ -389,9 +464,27 @@
    return _entity_name_key;
  }
  
@@ -349,6 +429,7 @@ index 71f00d785..ebd6181f1 100644
 +  ASSIGNCOPY(_entity_name_key, entityName);
 +  if (entityName == nil)
 +    {
++      [self _followContext: nil];
 +      DESTROY(_managed_proxy);
 +    }
 +  else
@@ -362,7 +443,7 @@ index 71f00d785..ebd6181f1 100644
  }
  
  - (NSPredicate*) fetchPredicate
-@@ -402,22 +467,80 @@
+@@ -402,22 +495,82 @@
  - (void) setFetchPredicate: (NSPredicate*)predicate
  {
    ASSIGN(_fetch_predicate, predicate);
@@ -445,16 +526,22 @@ index 71f00d785..ebd6181f1 100644
 +      return NO;
 +    }
 +  [self _setFetchedObjects: objects merge: merge];
++  [_managed_proxy setFollowsContext: YES];
++  [self _followContext: _managed_object_context];
 +  return YES;
  }
  
  - (NSManagedObjectContext*) managedObjectContext
-@@ -427,7 +550,37 @@
+@@ -427,7 +580,152 @@
  
  - (void) setManagedObjectContext: (NSManagedObjectContext*)managedObjectContext
  {
 -  _managed_object_context = managedObjectContext;
 +  ASSIGN(_managed_object_context, managedObjectContext);
++  if ([_managed_proxy followsContext])
++    {
++      [self _followContext: managedObjectContext];
++    }
 +}
 +
 +- (BOOL) _contentIsBound
@@ -484,6 +571,117 @@ index 71f00d785..ebd6181f1 100644
 +	{
 +	  [context deleteObject: object];
 +	}
++    }
++}
++
++- (void) _followContext: (id)context
++{
++  NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
++
++  [nc removeObserver: self
++		name: GSObjectsChangedInManagingContextNotification
++	      object: nil];
++  if (context != nil)
++    {
++      [nc addObserver: self
++	     selector: @selector(_objectsChangedInContext:)
++		 name: GSObjectsChangedInManagingContextNotification
++	       object: context];
++    }
++}
++
++- (NSArray*) _followedObjects
++{
++  return _content != nil ? [NSArray arrayWithObject: _content] : [NSArray array];
++}
++
++- (void) _followAdding: (NSArray*)added removing: (NSArray*)removed
++{
++  id content = _content;
++
++  if (content != nil && [removed indexOfObjectIdenticalTo: content] != NSNotFound)
++    {
++      content = nil;
++    }
++  if (content == nil && [added count] > 0)
++    {
++      content = [added objectAtIndex: 0];
++    }
++  if (content != _content)
++    {
++      [self setContent: content];
++    }
++}
++
++- (BOOL) _isFollowedEntity: (id)entity object: (id)object
++{
++  return [object respondsToSelector: @selector(entity)]
++    && [[(id<GSControllerManagedObject>)object entity] isKindOfEntity: entity]
++    && (_fetch_predicate == nil
++      || [_fetch_predicate evaluateWithObject: object]);
++}
++
++- (void) _objectsChangedInContext: (NSNotification*)notification
++{
++  NSDictionary *info = [notification userInfo];
++  NSArray *members = [self _followedObjects];
++  NSMutableArray *added = [NSMutableArray array];
++  NSMutableArray *removed = [NSMutableArray array];
++  Class entityClass = NSClassFromString(@"NSEntityDescription");
++  id entity;
++  NSEnumerator *e;
++  id object;
++
++  if ([self _contentIsBound] || _entity_name_key == nil)
++    {
++      return;
++    }
++  if ([info objectForKey: @"invalidatedAll"] != nil)
++    {
++      [self _followAdding: nil removing: members];
++      return;
++    }
++  entity = [(id)entityClass entityForName: _entity_name_key
++		   inManagedObjectContext: [notification object]];
++
++  e = [[info objectForKey: @"inserted"] objectEnumerator];
++  while ((object = [e nextObject]) != nil)
++    {
++      if ([members indexOfObjectIdenticalTo: object] == NSNotFound
++	&& [self _isFollowedEntity: entity object: object])
++	{
++	  [added addObject: object];
++	}
++    }
++  e = [[info objectForKey: @"updated"] objectEnumerator];
++  while ((object = [e nextObject]) != nil)
++    {
++      BOOL member = [members indexOfObjectIdenticalTo: object] != NSNotFound;
++
++      if (member != [self _isFollowedEntity: entity object: object])
++	{
++	  [(member ? removed : added) addObject: object];
++	}
++    }
++  e = [[info objectForKey: @"deleted"] objectEnumerator];
++  while ((object = [e nextObject]) != nil)
++    {
++      if ([members indexOfObjectIdenticalTo: object] != NSNotFound)
++	{
++	  [removed addObject: object];
++	}
++    }
++  e = [[info objectForKey: @"invalidated"] objectEnumerator];
++  while ((object = [e nextObject]) != nil)
++    {
++      if ([members indexOfObjectIdenticalTo: object] != NSNotFound)
++	{
++	  [removed addObject: object];
++	}
++    }
++  if ([added count] > 0 || [removed count] > 0)
++    {
++      [self _followAdding: added removing: removed];
 +    }
  }
  
@@ -533,13 +731,14 @@ index 000000000..7c1662f4b
 +</document>
 diff --git a/Tests/gui/NSArrayController/entityMode.m b/Tests/gui/NSArrayController/entityMode.m
 new file mode 100644
-index 000000000..364dd666c
+index 000000000..d51db48db
 --- /dev/null
 +++ b/Tests/gui/NSArrayController/entityMode.m
-@@ -0,0 +1,356 @@
+@@ -0,0 +1,512 @@
 +/* A controller in entity mode works on a managed object context: it
 +   fetches the entity's objects from it, makes new objects in it and
-+   deletes what it removes from it, and a xib can give it its context by
++   deletes what it removes from it, follows what the context says has
++   changed once it has fetched, and a xib can give it its context by
 +   binding.  gnustep-gui does not link Core Data and reaches it at run time
 +   by class name, so the classes it uses are stood in for here by ones of
 +   the same names that keep their objects in an array. */
@@ -551,6 +750,8 @@ index 000000000..364dd666c
 +#include <Foundation/NSDate.h>
 +#include <Foundation/NSDictionary.h>
 +#include <Foundation/NSIndexSet.h>
++#include <Foundation/NSNotification.h>
++#include <Foundation/NSSet.h>
 +#include <Foundation/NSPredicate.h>
 +#include <Foundation/NSRunLoop.h>
 +#include <Foundation/NSSortDescriptor.h>
@@ -567,9 +768,11 @@ index 000000000..364dd666c
 +@interface NSEntityDescription : NSObject
 +{
 +@public
-+  NSString	*name;
++  NSString		*name;
++  NSEntityDescription	*superentity;
 +}
 ++ (id) entityForName: (NSString *)n inManagedObjectContext: (id)context;
++- (BOOL) isKindOfEntity: (NSEntityDescription *)e;
 ++ (id) insertNewObjectForEntityForName: (NSString *)n
 +		inManagedObjectContext: (id)context;
 +- (NSString *) name;
@@ -595,6 +798,7 @@ index 000000000..364dd666c
 +  NSString		*name;
 +}
 +- (id) managedObjectContext;
++- (NSEntityDescription *) entity;
 +- (NSString *) name;
 +@end
 +
@@ -626,6 +830,14 @@ index 000000000..364dd666c
 +{
 +  return name;
 +}
++- (BOOL) isKindOfEntity: (NSEntityDescription *)e
++{
++  NSEntityDescription	*check = self;
++
++  while (check != nil && check != e)
++    check = check->superentity;
++  return check != nil;
++}
 +@end
 +
 +@implementation NSFetchRequest
@@ -647,6 +859,10 @@ index 000000000..364dd666c
 +- (id) managedObjectContext
 +{
 +  return context;
++}
++- (NSEntityDescription *) entity
++{
++  return entity;
 +}
 +- (NSString *) name
 +{
@@ -737,6 +953,19 @@ index 000000000..364dd666c
 +  return [[objects valueForKey: @"name"] componentsJoinedByString: @","];
 +}
 +
++/* What Core Data posts when a context's objects change: its
++   NSManagedObjectContextObjectsDidChangeNotification, by value. */
++static void
++changed(Context *context, NSString *key, NSArray *objects)
++{
++  [[NSNotificationCenter defaultCenter]
++    postNotificationName: @"NSObjectsChangedInManagingContextNotification"
++		  object: context
++		userInfo: [NSDictionary dictionaryWithObject:
++		  objects == nil ? (id)[NSNull null] : [NSSet setWithArray: objects]
++							forKey: key]];
++}
++
 +int
 +main(int argc, const char **argv)
 +{
@@ -754,6 +983,10 @@ index 000000000..364dd666c
 +  NSError		*error = nil;
 +  NSArrayController	*fromXib = nil;
 +  NSArrayController	*prepared = nil;
++  Context		*other;
++  NSArrayController	*follower;
++  NSArrayController	*idle;
++  id			van, bus, vw, vcar, trip;
 +
 +  START_SET("NSObjectController entity mode")
 +
@@ -888,6 +1121,127 @@ index 000000000..364dd666c
 +    "a xib's controller in entity mode fetches its content once loaded")
 +  PASS([[prepared content] count] == 1,
 +    "a xib's controller in class mode prepares content of one new object")
++
++  /* Following the context, as macOS 15's controllers do: inserted objects
++     of the entity (or a subentity) that match the fetch predicate are
++     added, deleted and invalidated ones dropped, updated ones added or
++     dropped as they now match or not, refreshed ones left alone, and
++     invalidatedAll empties the content; then the content is rearranged
++     and the selection kept. */
++  context = [[Context alloc] initWithEntities:
++    [NSArray arrayWithObjects: @"Vehicle", @"Car", @"Trip", nil]];
++  AUTORELEASE(context);
++  ((NSEntityDescription *)[context->entities objectForKey: @"Car"])->superentity
++    = [context->entities objectForKey: @"Vehicle"];
++  van = [context insert: @"Vehicle" named: @"van"];
++  bus = [context insert: @"Vehicle" named: @"bus"];
++  trip = [context insert: @"Trip" named: @"trip"];
++
++  idle = AUTORELEASE([[NSArrayController alloc] init]);
++  [idle setEntityName: @"Vehicle"];
++  [idle setManagedObjectContext: (id)context];
++  [idle setContent: [NSMutableArray array]];
++  vw = [context insert: @"Vehicle" named: @"vw"];
++  changed(context, @"inserted", [NSArray arrayWithObject: vw]);
++  PASS([[idle content] count] == 0,
++    "a controller that has not fetched does not follow its context")
++
++  follower = AUTORELEASE([[NSArrayController alloc] init]);
++  [follower setEntityName: @"Vehicle"];
++  [follower setManagedObjectContext: (id)context];
++  [follower setSortDescriptors: [NSArray arrayWithObject:
++    AUTORELEASE([[NSSortDescriptor alloc] initWithKey: @"name"
++					    ascending: YES])]];
++  [follower setFetchPredicate:
++    [NSPredicate predicateWithFormat: @"name BEGINSWITH 'v'"]];
++  spin();
++  PASS_EQUAL(names([follower arrangedObjects]), @"van,vw",
++    "the follower has fetched")
++  [follower setSelectedObjects: [NSArray arrayWithObject: vw]];
++
++  vcar = [context insert: @"Car" named: @"vcar"];
++  changed(context, @"inserted", [NSArray arrayWithObjects: vcar,
++    [context insert: @"Vehicle" named: @"bike"],
++    [context insert: @"Trip" named: @"voyage"], van, nil]);
++  PASS_EQUAL(names([follower arrangedObjects]), @"van,vcar,vw",
++    "inserted objects of the entity that match the predicate are added")
++  PASS_EQUAL([follower selectedObjects], [NSArray arrayWithObject: vw],
++    "the selection is kept when objects are added")
++
++  ((Managed *)bus)->name = @"vbus";
++  ((Managed *)vw)->name = @"xw";
++  changed(context, @"updated", [NSArray arrayWithObjects: bus, vw, nil]);
++  PASS_EQUAL(names([follower arrangedObjects]), @"van,vbus,vcar",
++    "updated objects are added or dropped as they now match")
++
++  ((Managed *)vcar)->name = @"car";
++  changed(context, @"refreshed", [NSArray arrayWithObject: vcar]);
++  PASS([[follower arrangedObjects] containsObject: vcar],
++    "refreshed objects are left alone")
++  ((Managed *)vcar)->name = @"vcar";
++
++  [follower setSelectedObjects: [NSArray arrayWithObject: van]];
++  changed(context, @"deleted", [NSArray arrayWithObject: van]);
++  PASS_EQUAL(names([follower arrangedObjects]), @"vbus,vcar",
++    "deleted objects are dropped")
++  PASS([follower selectionIndex] == 0,
++    "a deleted selected object leaves the first selected")
++  changed(context, @"invalidated", [NSArray arrayWithObject: bus]);
++  PASS_EQUAL(names([follower arrangedObjects]), @"vcar",
++    "invalidated objects are dropped")
++
++  other = AUTORELEASE([[Context alloc] initWithEntities:
++    [NSArray arrayWithObject: @"Vehicle"]]);
++  changed(other, @"inserted", [NSArray arrayWithObject:
++    [other insert: @"Vehicle" named: @"vother"]]);
++  PASS_EQUAL(names([follower arrangedObjects]), @"vcar",
++    "another context's changes are not followed")
++
++  made = AUTORELEASE([follower newObject]);
++  ((Managed *)made)->name = @"vnew";
++  [follower addObject: made];
++  changed(context, @"inserted", [NSArray arrayWithObject: made]);
++  PASS_EQUAL(names([follower arrangedObjects]), @"vcar,vnew",
++    "an object the controller added is not added again")
++
++  changed(context, @"invalidatedAll", nil);
++  PASS([[follower content] count] == 0,
++    "invalidatedAll empties the content")
++  changed(context, @"inserted", [NSArray arrayWithObject: van]);
++  PASS_EQUAL(names([follower arrangedObjects]), @"van",
++    "the context is still followed afterwards")
++
++  [follower setManagedObjectContext: (id)other];
++  changed(context, @"inserted", [NSArray arrayWithObject: vcar]);
++  changed(other, @"inserted", [NSArray arrayWithObject:
++    [other insert: @"Vehicle" named: @"vee"]]);
++  PASS_EQUAL(names([follower arrangedObjects]), @"van,vee",
++    "a new context is followed in place of the old one")
++
++  oc = AUTORELEASE([[NSObjectController alloc] init]);
++  [oc setEntityName: @"Trip"];
++  [oc setManagedObjectContext: (id)context];
++  [oc fetch: nil];
++  spin();
++  object = [context insert: @"Trip" named: @"journey"];
++  changed(context, @"inserted", [NSArray arrayWithObject: object]);
++  PASS([oc content] == trip,
++    "an object controller keeps its content when others are inserted")
++  changed(context, @"deleted", [NSArray arrayWithObject: trip]);
++  PASS([oc content] == nil,
++    "an object controller's deleted content is dropped")
++  changed(context, @"inserted", [NSArray arrayWithObject: object]);
++  PASS([oc content] == object,
++    "an object controller without content takes an inserted object")
++
++  follower = [[NSArrayController alloc] init];
++  [follower setEntityName: @"Vehicle"];
++  [follower setManagedObjectContext: (id)context];
++  [follower fetchWithRequest: nil merge: NO error: NULL];
++  RELEASE(follower);
++  changed(context, @"inserted", [NSArray arrayWithObject:
++    [context insert: @"Vehicle" named: @"vlast"]]);
++  PASS(YES, "a released controller no longer follows its context")
 +
 +  END_SET("NSObjectController entity mode")
 +
