@@ -1,4 +1,4 @@
-From 002ef4a96ce16fed2e7f73d367b6709ed45335cb Mon Sep 17 00:00:00 2001
+From e4c5f2801926ea31b9d2a00ed527194bbedf6697 Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Mon, 19 Oct 2026 16:27:19 +0000
 Subject: [PATCH] NSPopUpButton: content, contentObjects and contentValues
@@ -30,6 +30,16 @@ The pop-up now does what AppKit does (checked on macOS 15):
 - With content bound, selectedIndex is an index into the content, not
   into the items: the placeholder is not counted, and choosing it sets nil.
 
+contentValues and contentObjects are usually bound through a to-many,
+as content to drivers and contentValues to drivers.name. Key-value
+observing cannot observe through an array (on macOS too, it raises "is
+not supported"), and binding raised here; on macOS the pop-up shows each
+member's value and follows both the to-many and its members (checked on
+macOS 15). A pop-up binding whose key path passes through an array or a
+set now observes the key path up to it, and the rest on each of its
+members, moving those observations whenever the to-many changes. A
+controller's arrangedObjects, which can be observed, is observed as before.
+
 Bound values reach the pop-up as they are: nil and the markers are not
 turned into placeholder strings, which is what a selected object needs.
 A pop-up with none of the content bindings keeps its items and
@@ -39,19 +49,27 @@ represented objects.
 Tests/gui/NSPopUpButton/contentBindings.m passes 28 of 28 with this and on
 AppKit; without it (the binding names kept, so that it builds), 6 checks
 fail and the rest are not reached, the pop-up raising on -intValue.
+Tests/gui/NSPopUpButton/contentValuesKeyPath.m binds content and
+contentValues through a to-many and changes it and its members; it passes
+on AppKit and fails all 6 of its checks without
+the change.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- Headers/AppKit/NSKeyValueBinding.h        |   1 +
- Source/NSPopUpButton.m                    | 314 +++++++++++++++++++++-
- Source/NSPopUpButtonCell.m                |   9 +
- Source/externs.m                          |   1 +
- Tests/gui/NSPopUpButton/contentBindings.m | 250 +++++++++++++++++
- 5 files changed, 569 insertions(+), 6 deletions(-)
+ Headers/AppKit/NSKeyValueBinding.h            |   1 +
+ Source/GSBindingHelpers.h                     |   2 +
+ Source/NSKeyValueBinding.m                    |  27 +-
+ Source/NSPopUpButton.m                        | 435 +++++++++++++++++-
+ Source/NSPopUpButtonCell.m                    |   9 +
+ Source/externs.m                              |   1 +
+ Tests/gui/NSPopUpButton/contentBindings.m     | 250 ++++++++++
+ .../gui/NSPopUpButton/contentValuesKeyPath.m  |  95 ++++
+ 8 files changed, 805 insertions(+), 15 deletions(-)
  create mode 100644 Tests/gui/NSPopUpButton/contentBindings.m
+ create mode 100644 Tests/gui/NSPopUpButton/contentValuesKeyPath.m
 
 diff --git a/Headers/AppKit/NSKeyValueBinding.h b/Headers/AppKit/NSKeyValueBinding.h
-index 7a6ab895c..bfa387405 100644
+index fb3eb9e16..413df8ad9 100644
 --- a/Headers/AppKit/NSKeyValueBinding.h
 +++ b/Headers/AppKit/NSKeyValueBinding.h
 @@ -109,6 +109,7 @@ APPKIT_EXPORT NSString *NSContentArrayBinding;
@@ -62,8 +80,80 @@ index 7a6ab895c..bfa387405 100644
  APPKIT_EXPORT NSString *NSContentSetBinding;
  APPKIT_EXPORT NSString *NSContentValuesBinding;
  APPKIT_EXPORT NSString *NSEditableBinding;
+diff --git a/Source/GSBindingHelpers.h b/Source/GSBindingHelpers.h
+index 1731f25b2..fe7058790 100644
+--- a/Source/GSBindingHelpers.h
++++ b/Source/GSBindingHelpers.h
+@@ -60,6 +60,8 @@
+            withKeyPath: (NSString *)keyPath
+                options: (NSDictionary *)options
+             fromObject: (id)source;
++- (void) observe: (NSString *)binding;
++- (void) stopObserving;
+ - (void) setValueFor: (NSString *)binding;
+ - (void) reverseSetValue: (id)value;
+ - (void) reverseSetValueFor: (NSString *)binding;
+diff --git a/Source/NSKeyValueBinding.m b/Source/NSKeyValueBinding.m
+index 92c5c763a..073ce1291 100644
+--- a/Source/NSKeyValueBinding.m
++++ b/Source/NSKeyValueBinding.m
+@@ -291,8 +291,6 @@ void GSBindingInvokeAction(NSString *targetKey, NSString *argumentKey,
+       forObject: (id)anObject
+ {
+   NSMutableDictionary *bindings;
+-  id observedObject;
+-  NSString *keyPath;
+   GSKeyValueBinding *theBinding;
+ 
+   if (!objectTable)
+@@ -305,9 +303,7 @@ void GSBindingInvokeAction(NSString *targetKey, NSString *argumentKey,
+       theBinding = (GSKeyValueBinding*)[bindings objectForKey: binding];
+       if (theBinding != nil)
+         {
+-          observedObject = [theBinding->info objectForKey: NSObservedObjectKey];
+-          keyPath = [theBinding->info objectForKey: NSObservedKeyPathKey];
+-          [observedObject removeObserver: theBinding forKeyPath: keyPath];
++          [theBinding stopObserving];
+           [bindings setValue: nil forKey: binding];
+         }
+     }
+@@ -366,10 +362,7 @@ void GSBindingInvokeAction(NSString *targetKey, NSString *argumentKey,
+         nil];
+     }
+     
+-  [dest addObserver: self
+-        forKeyPath: keyPath
+-        options: NSKeyValueObservingOptionNew
+-        context: binding];
++  [self observe: binding];
+ 
+   [bindingLock lock];
+   bindings = (NSMutableDictionary *)NSMapGet(objectTable, (void *)source);
+@@ -387,6 +380,22 @@ void GSBindingInvokeAction(NSString *targetKey, NSString *argumentKey,
+   return self;
+ }
+ 
++- (void) observe: (NSString *)binding
++{
++  [[info objectForKey: NSObservedObjectKey]
++    addObserver: self
++     forKeyPath: [info objectForKey: NSObservedKeyPathKey]
++        options: NSKeyValueObservingOptionNew
++        context: binding];
++}
++
++- (void) stopObserving
++{
++  [[info objectForKey: NSObservedObjectKey]
++    removeObserver: self
++        forKeyPath: [info objectForKey: NSObservedKeyPathKey]];
++}
++
+ - (void)dealloc
+ {
+   DESTROY(info);
 diff --git a/Source/NSPopUpButton.m b/Source/NSPopUpButton.m
-index f364952e8..8e214321b 100644
+index f364952e8..46ff5f325 100644
 --- a/Source/NSPopUpButton.m
 +++ b/Source/NSPopUpButton.m
 @@ -30,6 +30,7 @@
@@ -74,7 +164,7 @@ index f364952e8..8e214321b 100644
  #import <Foundation/NSValue.h>
  #import "AppKit/NSApplication.h"
  #import "AppKit/NSEvent.h"
-@@ -41,12 +42,52 @@
+@@ -41,12 +42,173 @@
  #import "AppKit/NSMenuItem.h"
  #import "AppKit/NSMenuView.h"
  #import "AppKit/NSWindow.h"
@@ -91,9 +181,130 @@ index f364952e8..8e214321b 100644
 +@end
 +
 +@interface GSPopUpButtonBinding : GSKeyValueBinding
++{
++  NSString *head;
++  NSString *tail;
++  id members;
++  void *context;
++}
 +@end
 +
 +@implementation GSPopUpButtonBinding
++
++- (void) dealloc
++{
++  DESTROY(head);
++  DESTROY(tail);
++  DESTROY(members);
++  [super dealloc];
++}
++
++- (void) observeMembers
++{
++  NSEnumerator *e;
++  id member;
++  id now;
++
++  e = [members objectEnumerator];
++  while ((member = [e nextObject]) != nil)
++    {
++      [member removeObserver: self forKeyPath: tail];
++    }
++  now = [[self observedObject] valueForKeyPath: head];
++  if ([now isKindOfClass: [NSArray class]] || [now isKindOfClass: [NSSet class]])
++    {
++      ASSIGNCOPY(members, now);
++    }
++  else
++    {
++      DESTROY(members);
++    }
++  e = [members objectEnumerator];
++  while ((member = [e nextObject]) != nil)
++    {
++      [member addObserver: self
++               forKeyPath: tail
++                  options: NSKeyValueObservingOptionNew
++                  context: context];
++    }
++}
++
++/* Key-value observing cannot observe through a to-many, as in
++ * contentValues bound to drivers.name: the to-many is observed, and the
++ * rest of the key path on each of its members.
++ */
++- (void) observe: (NSString *)binding
++{
++  id dest = [self observedObject];
++  NSArray *keys = [[info objectForKey: NSObservedKeyPathKey]
++                    componentsSeparatedByString: @"."];
++  id value = dest;
++  NSUInteger i;
++
++  for (i = 0; i + 1 < [keys count]; i++)
++    {
++      value = [value valueForKey: [keys objectAtIndex: i]];
++      if (([value isKindOfClass: [NSArray class]]
++          || [value isKindOfClass: [NSSet class]])
++        && ![value isKindOfClass: [GSObservableArray class]])
++        {
++          NSRange r = NSMakeRange(0, i + 1);
++
++          ASSIGN(head, [[keys subarrayWithRange: r]
++            componentsJoinedByString: @"."]);
++          r = NSMakeRange(i + 1, [keys count] - i - 1);
++          ASSIGN(tail, [[keys subarrayWithRange: r]
++            componentsJoinedByString: @"."]);
++          context = binding;
++          [dest addObserver: self
++                 forKeyPath: head
++                    options: NSKeyValueObservingOptionNew
++                    context: binding];
++          [self observeMembers];
++          return;
++        }
++    }
++  [super observe: binding];
++}
++
++- (void) stopObserving
++{
++  NSEnumerator *e;
++  id member;
++
++  if (head == nil)
++    {
++      [super stopObserving];
++      return;
++    }
++  e = [members objectEnumerator];
++  while ((member = [e nextObject]) != nil)
++    {
++      [member removeObserver: self forKeyPath: tail];
++    }
++  DESTROY(members);
++  [[self observedObject] removeObserver: self forKeyPath: head];
++}
++
++- (void) observeValueForKeyPath: (NSString *)keyPath
++                       ofObject: (id)object
++                         change: (NSDictionary *)change
++                        context: (void *)ctxt
++{
++  if (head == nil)
++    {
++      [super observeValueForKeyPath: keyPath
++                           ofObject: object
++                             change: change
++                            context: ctxt];
++      return;
++    }
++  if (object == [self observedObject])
++    {
++      [self observeMembers];
++    }
++  [self setValueFor: (NSString *)ctxt];
++}
 +
 +- (id) transformValue: (id)value withOptions: (NSDictionary *)options
 +{
@@ -127,7 +338,7 @@ index f364952e8..8e214321b 100644
  /*
   * NSPopUpButton implementation
   */
-@@ -68,6 +109,8 @@ Class _nspopupbuttonCellClass = 0;
+@@ -68,6 +230,8 @@ Class _nspopupbuttonCellClass = 0;
        [self exposeBinding: NSSelectedObjectBinding];
        [self exposeBinding: NSSelectedTagBinding];
        [self exposeBinding: NSSelectedValueBinding];
@@ -136,7 +347,7 @@ index f364952e8..8e214321b 100644
        [self exposeBinding: NSContentValuesBinding];
     } 
  }
-@@ -560,11 +603,256 @@ this to return nil to indicate that we have no context menu.
+@@ -560,11 +724,256 @@ this to return nil to indicate that we have no context menu.
    [super keyDown: theEvent];
  }
  
@@ -394,7 +605,7 @@ index f364952e8..8e214321b 100644
      }
    else if ([aKey isEqual: NSSelectedTagBinding])
      {
-@@ -572,13 +860,18 @@ this to return nil to indicate that we have no context menu.
+@@ -572,13 +981,18 @@ this to return nil to indicate that we have no context menu.
      }
    else if ([aKey isEqual: NSSelectedObjectBinding])
      {
@@ -415,7 +626,7 @@ index f364952e8..8e214321b 100644
    else if ([aKey isEqual: NSContentValuesBinding])
      {
        [self removeAllItems];
-@@ -594,7 +887,17 @@ this to return nil to indicate that we have no context menu.
+@@ -594,7 +1008,17 @@ this to return nil to indicate that we have no context menu.
  {
    if ([aKey isEqual: NSSelectedIndexBinding])
      {
@@ -434,7 +645,7 @@ index f364952e8..8e214321b 100644
      }
    else if ([aKey isEqual: NSSelectedTagBinding])
      {
-@@ -602,8 +905,7 @@ this to return nil to indicate that we have no context menu.
+@@ -602,8 +1026,7 @@ this to return nil to indicate that we have no context menu.
      }
    else if ([aKey isEqual: NSSelectedObjectBinding])
      {
@@ -472,7 +683,7 @@ index 63d3cafb2..a8481e4b4 100644
      {
        NSString *bindings[] = {NSSelectedIndexBinding, NSSelectedTagBinding,
 diff --git a/Source/externs.m b/Source/externs.m
-index dd85debc9..115657138 100644
+index 2bea06600..eedb3e010 100644
 --- a/Source/externs.m
 +++ b/Source/externs.m
 @@ -695,6 +695,7 @@ APPKIT_DECLARE NSString *NSContentArrayBinding = @"contentArray";
@@ -737,6 +948,107 @@ index 000000000..f1b5a721e
 +
 +  END_SET("NSPopUpButton content bindings")
 +
++  return 0;
++}
+diff --git a/Tests/gui/NSPopUpButton/contentValuesKeyPath.m b/Tests/gui/NSPopUpButton/contentValuesKeyPath.m
+new file mode 100644
+index 000000000..c455c5e70
+--- /dev/null
++++ b/Tests/gui/NSPopUpButton/contentValuesKeyPath.m
+@@ -0,0 +1,95 @@
++/* contentValues bound through a to-many of the object content is bound to
++   (content to drivers, contentValues to drivers.name) titles the items by
++   each member's value, and follows the to-many and its members, as on
++   AppKit; key-value observing alone cannot observe through the array. */
++#include "Testing.h"
++
++#include <Foundation/NSArray.h>
++#include <Foundation/NSAutoreleasePool.h>
++#include <Foundation/NSDictionary.h>
++#include <Foundation/NSException.h>
++#include <Foundation/NSString.h>
++
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSKeyValueBinding.h>
++#include <AppKit/NSPopUpButton.h>
++
++@interface Vehicle : NSObject
++{
++  NSArray *drivers;
++}
++- (NSArray *) drivers;
++- (void) setDrivers: (NSArray *)a;
++@end
++
++@implementation Vehicle
++- (NSArray *) drivers
++{
++  return drivers;
++}
++- (void) setDrivers: (NSArray *)a
++{
++  ASSIGNCOPY(drivers, a);
++}
++@end
++
++static NSString *
++titles(NSPopUpButton *p)
++{
++  return [[p itemTitles] componentsJoinedByString: @","];
++}
++
++int
++main(int argc, const char **argv)
++{
++  NSMutableDictionary	*ada;
++  NSMutableDictionary	*bob;
++  NSPopUpButton		*popup;
++  Vehicle		*vehicle;
++
++  START_SET("NSPopUpButton contentValues through a to-many")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  ada = [NSMutableDictionary dictionaryWithObject: @"Ada" forKey: @"name"];
++  bob = [NSMutableDictionary dictionaryWithObject: @"Bob" forKey: @"name"];
++  vehicle = AUTORELEASE([[Vehicle alloc] init]);
++  [vehicle setDrivers: [NSArray arrayWithObjects: ada, bob, nil]];
++  popup = AUTORELEASE([[NSPopUpButton alloc]
++    initWithFrame: NSMakeRect(0, 0, 100, 20) pullsDown: NO]);
++
++  NS_DURING
++    {
++      [popup bind: NSContentBinding toObject: vehicle
++      withKeyPath: @"drivers" options: nil];
++      [popup bind: NSContentValuesBinding toObject: vehicle
++      withKeyPath: @"drivers.name" options: nil];
++      PASS(YES, "contentValues binds through a to-many")
++    }
++  NS_HANDLER
++    PASS(NO, "contentValues binds through a to-many")
++  NS_ENDHANDLER
++  PASS_EQUAL(titles(popup), @"Ada,Bob", "the items are titled by name")
++
++  [ada setObject: @"Cid" forKey: @"name"];
++  PASS_EQUAL(titles(popup), @"Cid,Bob", "a member's new name shows")
++
++  [vehicle setDrivers: [NSArray arrayWithObject: bob]];
++  PASS_EQUAL(titles(popup), @"Bob", "a new to-many shows")
++
++  [ada setObject: @"Dan" forKey: @"name"];
++  [bob setObject: @"Eve" forKey: @"name"];
++  PASS_EQUAL(titles(popup), @"Eve", "only the members now in it are followed")
++
++  [popup unbind: NSContentValuesBinding];
++  [bob setObject: @"Fay" forKey: @"name"];
++  PASS([popup numberOfItems] == 1, "unbinding stops following")
++
++  END_SET("NSPopUpButton contentValues through a to-many")
 +  return 0;
 +}
 -- 
