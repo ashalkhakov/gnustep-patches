@@ -1,4 +1,4 @@
-From 011e3f8f8678b7e8db3bc4cb9821b065266948bb Mon Sep 17 00:00:00 2001
+From 8b5c0129327dbda02c5af3d34f6694b6e786c904 Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Mon, 19 Oct 2026 16:12:48 +0000
 Subject: [PATCH] GSXib5KeyedUnarchiver: give a xib's formatters their settings
@@ -14,30 +14,32 @@ xib's attributes under that key, so every formatter in a xib came out
 with the defaults.
 
 NS.attributes is now decoded from the element: each attribute under its
-own name, but for id, key, customClass and userLabel, with Interface
-Builder's names for the behaviors, number styles, padding positions,
-rounding modes and date and time styles turned into their values, digit
-counts and widths into numbers and YES and NO into booleans; and each
-child element with a key, decoded as usual.  The names are the ones
-ibtool accepts; "10_0" is the 10.0 behavior.
+own name, but for id, key, class, customClass and userLabel, with
+Interface Builder's names for the behaviors, number styles, padding
+positions, rounding modes and date and time styles turned into their
+values, digit counts and widths into numbers and YES and NO into
+booleans; and each child element with a key, decoded as usual.  The
+names are the ones ibtool accepts; "10_0" is the 10.0 behavior.  A date
+formatter gets the 10.4 behavior whatever the xib says, as macOS gives
+it (its format is then an ICU pattern).
 
 The formatters take the settings with the libs-base change that makes
 them read NS.attributes.  Tests/gui/GSXib5KeyedUnarchiver/formatters.m
 loads Formatters.xib and checks the values macOS gives for it, compiled
-by ibtool; with that libs-base change, 18 of its 26 checks fail without
+by ibtool; with that libs-base change, 19 of its 28 checks fail without
 this one.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- Source/GSXib5KeyedUnarchiver.m                | 109 ++++++++++++++++
- .../gui/GSXib5KeyedUnarchiver/Formatters.xib  |  57 +++++++++
- Tests/gui/GSXib5KeyedUnarchiver/formatters.m  | 117 ++++++++++++++++++
- 3 files changed, 283 insertions(+)
+ Source/GSXib5KeyedUnarchiver.m                | 119 +++++++++++++++++
+ .../gui/GSXib5KeyedUnarchiver/Formatters.xib  |  64 +++++++++
+ Tests/gui/GSXib5KeyedUnarchiver/formatters.m  | 123 ++++++++++++++++++
+ 3 files changed, 306 insertions(+)
  create mode 100644 Tests/gui/GSXib5KeyedUnarchiver/Formatters.xib
  create mode 100644 Tests/gui/GSXib5KeyedUnarchiver/formatters.m
 
 diff --git a/Source/GSXib5KeyedUnarchiver.m b/Source/GSXib5KeyedUnarchiver.m
-index 58582b7..b1e0156 100644
+index 58582b7..ffa74c2 100644
 --- a/Source/GSXib5KeyedUnarchiver.m
 +++ b/Source/GSXib5KeyedUnarchiver.m
 @@ -37,6 +37,9 @@
@@ -134,7 +136,7 @@ index 58582b7..b1e0156 100644
          }
      }
  }
-@@ -2631,6 +2690,56 @@ didStartElement: (NSString*)elementName
+@@ -2631,6 +2690,66 @@ didStartElement: (NSString*)elementName
    return [self decodeObjectForKey: @"date"];
  }
  
@@ -152,6 +154,7 @@ index 58582b7..b1e0156 100644
 +      id		object = value;
 +
 +      if ([key isEqualToString: @"id"] || [key isEqualToString: @"key"]
++	|| [key isEqualToString: @"class"]
 +	|| [key isEqualToString: @"customClass"]
 +	|| [key isEqualToString: @"userLabel"])
 +	{
@@ -174,6 +177,15 @@ index 58582b7..b1e0156 100644
 +	  [attributes setObject: object forKey: key];
 +	}
 +    }
++  /* macOS gives a date formatter from a xib the 10.4 behaviour, whatever
++   * the xib says.
++   */
++  if ([NSClassFromString([element attributeForKey: @"class"])
++    isSubclassOfClass: [NSDateFormatter class]])
++    {
++      [attributes setObject: [NSNumber numberWithInt: 1040]
++		     forKey: @"formatterBehavior"];
++    }
 +
 +  keys = [[element elements] keyEnumerator];
 +  while ((key = [keys nextObject]) != nil)
@@ -193,10 +205,10 @@ index 58582b7..b1e0156 100644
    NSNumber *value = nil;
 diff --git a/Tests/gui/GSXib5KeyedUnarchiver/Formatters.xib b/Tests/gui/GSXib5KeyedUnarchiver/Formatters.xib
 new file mode 100644
-index 0000000..7dca54c
+index 0000000..579281b
 --- /dev/null
 +++ b/Tests/gui/GSXib5KeyedUnarchiver/Formatters.xib
-@@ -0,0 +1,57 @@
+@@ -0,0 +1,64 @@
 +<?xml version="1.0" encoding="UTF-8"?>
 +<document type="com.apple.InterfaceBuilder3.Cocoa.XIB" version="3.0" toolsVersion="24127" targetRuntime="MacOSX.Cocoa" propertyAccessControl="none">
 +    <dependencies>
@@ -252,14 +264,21 @@ index 0000000..7dca54c
 +                <font key="font" metaFont="system"/>
 +            </textFieldCell>
 +        </textField>
++        <textField id="old">
++            <rect key="frame" x="20" y="250" width="160" height="22"/>
++            <textFieldCell key="cell" selectable="YES" editable="YES" borderStyle="bezel" drawsBackground="YES" id="old-cell">
++                <dateFormatter key="formatter" formatterBehavior="10_0" dateFormat="%Y" allowNaturalLanguage="YES" id="old-formatter"/>
++                <font key="font" metaFont="system"/>
++            </textFieldCell>
++        </textField>
 +    </objects>
 +</document>
 diff --git a/Tests/gui/GSXib5KeyedUnarchiver/formatters.m b/Tests/gui/GSXib5KeyedUnarchiver/formatters.m
 new file mode 100644
-index 0000000..809a0cf
+index 0000000..6e0659f
 --- /dev/null
 +++ b/Tests/gui/GSXib5KeyedUnarchiver/formatters.m
-@@ -0,0 +1,117 @@
+@@ -0,0 +1,123 @@
 +#import "ObjectTesting.h"
 +
 +#import <Foundation/NSData.h>
@@ -373,6 +392,12 @@ index 0000000..809a0cf
 +  PASS([date formatterBehavior] == NSDateFormatterBehavior10_4,
 +    "a date formatter with a format has the 10.4 behavior")
 +  PASS_EQUAL([date dateFormat], @"yyyy-MM-dd", "dateFormat is read")
++
++  date = formatterAt(rootObjects, 250);
++  PASS([date formatterBehavior] == NSDateFormatterBehavior10_4,
++    "a date formatter has the 10.4 behavior whatever the xib says")
++  PASS_EQUAL([date dateFormat], @"%Y",
++    "the format of a 10.0 date formatter is taken as a 10.4 pattern")
 +
 +  END_SET("GSXib5KeyedUnarchiver formatter tests")
 +  return 0;

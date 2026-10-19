@@ -1,0 +1,915 @@
+From 065d06d397dd12b560838e35ec2f75742b064d02 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Mon, 19 Oct 2026 17:14:08 +0000
+Subject: [PATCH] NSDateFormatter: implement the settings macOS keeps
+
+The settings a date formatter's keyed archive holds, compared with what
+macOS 15 does with each:
+
+- AMSymbol and PMSymbol could not be set.
+- Symbols, leniency and the start of two digit years were lost whenever
+  the ICU formatter was made again, on any change of locale, time zone,
+  style or format; they are kept and set again.  Setting weekday symbols
+  raised (ICU numbers weekdays from 1), and veryShortWeekdaySymbols
+  were the short ones.
+- A formatter is not lenient and two digit years start in 1950, as on
+  macOS; ICU's defaults are lenient and 80 years before now.
+  NSHTTPCookie read an Expires date such as "Wed, 09 Jun 2100" with the
+  pattern "EEE, dd-MMM-yyyy" only because of that leniency, so it now
+  asks for it.
+- defaultDate, gregorianStartDate and generatesCalendarDates did
+  nothing.  What a string does not give now comes from the default date,
+  or as on macOS from the start of 2000 in the formatter's time zone; the
+  gregorian change is set on the calendar; parsing gives calendar dates
+  when asked to.
+- formattingContext is new, as ICU's capitalization context, and a keyed
+  archive holds it as ICU's display context value, as macOS's does.
+  Relative formatting uses the list item context, as on macOS ("Today").
+- doesRelativeDateFormatting took effect only at the next change.
+- -getObjectValue:forString:range:error: always failed.
+- The default behaviour (0) parsed with the 10.0 calendar format.
+  allowsNaturalLanguage is leniency with the 10.4 behaviour, and a 10.0
+  formatter that allows natural language is lenient, as on macOS.
+- GNUstep keeps a calendar in the locale; a keyed archive keeps them
+  apart, as macOS's does.
+
+Tests/base/NSDateFormatter/settings.m checks each against the values
+macOS 15 gives, and that they survive a keyed archive; 35 of its 42
+checks fail without the change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Headers/Foundation/NSDateFormatter.h  |   5 +
+ Source/NSDateFormatter.m              | 363 +++++++++++++++++++++++---
+ Source/NSHTTPCookie.m                 |   1 +
+ Tests/base/NSDateFormatter/settings.m | 227 ++++++++++++++++
+ 4 files changed, 554 insertions(+), 42 deletions(-)
+ create mode 100644 Tests/base/NSDateFormatter/settings.m
+
+diff --git a/Headers/Foundation/NSDateFormatter.h b/Headers/Foundation/NSDateFormatter.h
+index d2187ab..1402782 100644
+--- a/Headers/Foundation/NSDateFormatter.h
++++ b/Headers/Foundation/NSDateFormatter.h
+@@ -223,6 +223,11 @@ GS_NSDateFormatter_IVARS;
+ - (BOOL) doesRelativeDateFormatting;
+ - (void) setDoesRelativeDateFormatting: (BOOL) flag;
+ #endif
++
++#if OS_API_VERSION(MAC_OS_X_VERSION_10_10, GS_API_LATEST)
++- (NSFormattingContext) formattingContext;
++- (void) setFormattingContext: (NSFormattingContext) context;
++#endif
+ @end
+ 
+ #endif
+diff --git a/Source/NSDateFormatter.m b/Source/NSDateFormatter.m
+index c3b8924..e5cbd16 100644
+--- a/Source/NSDateFormatter.m
++++ b/Source/NSDateFormatter.m
+@@ -31,7 +31,14 @@
+   NSDateFormatterStyle	_timeStyle; \
+   NSDateFormatterStyle	_dateStyle; \
+   void      		*_formatter; \
+-  BOOL			_relative
++  BOOL			_relative; \
++  BOOL			_lenient; \
++  BOOL			_calendarDates; \
++  NSInteger		_context; \
++  NSDate		*_twoDigitStart; \
++  NSDate		*_gregorianStart; \
++  NSDate		*_defaultDate; \
++  NSMutableDictionary	*_symbols
+ 
+ #define	EXPOSE_NSDateFormatter_IVARS	1
+ #import "common.h"
+@@ -46,6 +53,7 @@
+ #import "Foundation/NSFormatter.h"
+ #import "Foundation/NSDateFormatter.h"
+ #import "Foundation/NSCoder.h"
++#import "Foundation/NSError.h"
+ #import "GSPrivate.h"
+ 
+ #if defined(HAVE_UNICODE_UDAT_H) && defined(HAVE_UNICODE_UDATPG_H)
+@@ -64,6 +72,7 @@
+ @interface NSDateFormatter (PrivateMethods)
+ - (void) _resetUDateFormat;
+ - (void) _setSymbols: (NSArray*)array : (NSInteger)symbol;
++- (void) _applySymbols: (NSArray*)array : (NSInteger)symbol;
+ - (NSArray*) _getSymbols: (NSInteger)symbol;
+ @end
+ 
+@@ -104,6 +113,9 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+   internal->_behavior = _defaultBehavior;
+   internal->_locale = RETAIN([NSLocale currentLocale]);
+   internal->_tz = RETAIN([NSTimeZone defaultTimeZone]);
++  internal->_twoDigitStart = RETAIN([NSDate
++    dateWithTimeIntervalSinceReferenceDate: -1609459200.0]);
++  internal->_symbols = [NSMutableDictionary new];
+   
+   [self _resetUDateFormat];
+   
+@@ -112,6 +124,10 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+ 
+ - (BOOL) allowsNaturalLanguage
+ {
++  if (internal->_behavior != NSDateFormatterBehavior10_0)
++    {
++      return internal->_lenient;
++    }
+   return _allowsNaturalLanguage;
+ }
+ 
+@@ -130,6 +146,11 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+     {
+       GS_COPY_INTERNAL(o, zone)
+       IF_NO_ARC(RETAIN(GSIVar(o,_locale));)
++      IF_NO_ARC(RETAIN(GSIVar(o,_tz));)
++      IF_NO_ARC(RETAIN(GSIVar(o,_twoDigitStart));)
++      IF_NO_ARC(RETAIN(GSIVar(o,_gregorianStart));)
++      IF_NO_ARC(RETAIN(GSIVar(o,_defaultDate));)
++      GSIVar(o,_symbols) = [internal->_symbols mutableCopy];
+ #if GS_USE_ICU == 1
+       {
+         UErrorCode err = U_ZERO_ERROR;
+@@ -200,6 +221,10 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+     {
+       RELEASE(internal->_locale);
+       RELEASE(internal->_tz);
++      RELEASE(internal->_twoDigitStart);
++      RELEASE(internal->_gregorianStart);
++      RELEASE(internal->_defaultDate);
++      RELEASE(internal->_symbols);
+ #if GS_USE_ICU == 1
+       udat_close(internal->_formatter);
+ #endif
+@@ -233,6 +258,8 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+       else
+         {
+           NSDateFormatter	*reference;
++          NSLocale		*locale;
++          NSDictionary		*components;
+ 
+           behavior = NSDateFormatterBehavior10_4;
+           reference = AUTORELEASE([NSDateFormatter new]);
+@@ -252,6 +279,26 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+               @"veryShortStandaloneWeekdaySymbols", @"quarterSymbols",
+               @"shortQuarterSymbols", @"standaloneQuarterSymbols",
+               @"shortStandaloneQuarterSymbols", nil]);
++          locale = [attributes objectForKey: @"locale"];
++          components = [NSLocale componentsFromLocaleIdentifier:
++            [locale localeIdentifier]];
++          if ([components objectForKey: @"calendar"] != nil)
++            {
++              NSMutableDictionary	*m = AUTORELEASE([components mutableCopy]);
++
++              /* macOS keeps the calendar apart from the locale. */
++              [m removeObjectForKey: @"calendar"];
++              locale = [NSLocale localeWithLocaleIdentifier:
++                [NSLocale localeIdentifierFromComponents: m]];
++              [attributes setObject: locale forKey: @"locale"];
++              [attributes setObject: [self calendar] forKey: @"calendar"];
++            }
++          if (internal->_context != NSFormattingContextUnknown)
++            {
++              [attributes setObject: [NSNumber numberWithInteger:
++                ICUContextFromFormattingContext(internal->_context)]
++                forKey: @"formattingContext"];
++            }
+         }
+       [attributes setObject: [NSNumber numberWithUnsignedInteger: behavior]
+                      forKey: @"formatterBehavior"];
+@@ -269,7 +316,7 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+ {
+   NSCalendarDate	*d;
+ 
+-  if (internal->_behavior == NSDateFormatterBehavior10_4)
++  if (internal->_behavior != NSDateFormatterBehavior10_0)
+     {
+       NSDate	*parsed = [self dateFromString: string];
+ 
+@@ -349,6 +396,16 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+         }
+       if (self != nil && nil != attributes)
+         {
++          id	context = [attributes objectForKey: @"formattingContext"];
++
++          if (context != nil)
++            {
++              attributes = AUTORELEASE([attributes mutableCopy]);
++              [(NSMutableDictionary*)attributes setObject:
++                [NSNumber numberWithInteger:
++                formattingContextFromICUContext([context integerValue])]
++                forKey: @"formattingContext"];
++            }
+           GSPrivateSetFormatterAttributes(self, attributes,
+             [NSArray arrayWithObjects: @"formatterBehavior", @"locale",
+               @"calendar", @"timeZone", @"dateStyle", @"timeStyle", nil]);
+@@ -366,6 +423,7 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+   if (self == nil)
+     return nil;
+ 
++  internal->_lenient = (flag ? YES : NO);
+   [self setDateFormat: format];
+   _allowsNaturalLanguage = flag;
+   internal->_behavior = NSDateFormatterBehavior10_0;
+@@ -420,34 +478,89 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+ 
+ - (BOOL) generatesCalendarDates
+ {
+-  return NO; // FIXME
++  return internal->_calendarDates;
+ }
+ 
+ - (void) setGeneratesCalendarDates: (BOOL)flag
+ {
+-  return; // FIXME
++  internal->_calendarDates = (flag ? YES : NO);
+ }
+ 
+ - (BOOL) isLenient
+ {
+-#if GS_USE_ICU == 1
+-  return (BOOL)udat_isLenient (internal->_formatter);
+-#else
+-  return NO;
+-#endif
++  return internal->_lenient;
+ }
+ 
+ - (void) setLenient: (BOOL)flag
+ {
++  internal->_lenient = (flag ? YES : NO);
+ #if GS_USE_ICU == 1
+-  udat_setLenient (internal->_formatter, flag);
+-#else
+-  return;
++  udat_setLenient (internal->_formatter, internal->_lenient);
+ #endif
+ }
+ 
++#if GS_USE_ICU == 1 && U_ICU_VERSION_MAJOR_NUM >= 51
++static UDisplayContext
++NSToUDisplayContext(NSFormattingContext context)
++{
++  switch (context)
++    {
++      case NSFormattingContextStandalone:
++	return UDISPCTX_CAPITALIZATION_FOR_STANDALONE;
++      case NSFormattingContextListItem:
++	return UDISPCTX_CAPITALIZATION_FOR_UI_LIST_OR_MENU;
++      case NSFormattingContextBeginningOfSentence:
++	return UDISPCTX_CAPITALIZATION_FOR_BEGINNING_OF_SENTENCE;
++      case NSFormattingContextMiddleOfSentence:
++	return UDISPCTX_CAPITALIZATION_FOR_MIDDLE_OF_SENTENCE;
++      default:
++	return UDISPCTX_CAPITALIZATION_NONE;
++    }
++}
++#endif
+ 
+-- (NSDate*) dateFromString: (NSString*) string
++/* A keyed archive keeps the context as ICU's display context. */
++static NSInteger
++ICUContextFromFormattingContext(NSFormattingContext context)
++{
++  switch (context)
++    {
++      case NSFormattingContextDynamic:			return -1;
++      case NSFormattingContextStandalone:		return 260;
++      case NSFormattingContextListItem:			return 259;
++      case NSFormattingContextBeginningOfSentence:	return 258;
++      case NSFormattingContextMiddleOfSentence:		return 257;
++      default:						return 256;
++    }
++}
++
++static NSFormattingContext
++formattingContextFromICUContext(NSInteger context)
++{
++  switch (context)
++    {
++      case -1:	return NSFormattingContextDynamic;
++      case 260:	return NSFormattingContextStandalone;
++      case 259:	return NSFormattingContextListItem;
++      case 258:	return NSFormattingContextBeginningOfSentence;
++      case 257:	return NSFormattingContextMiddleOfSentence;
++      default:	return NSFormattingContextUnknown;
++    }
++}
++
++- (NSFormattingContext) formattingContext
++{
++  return internal->_context;
++}
++
++- (void) setFormattingContext: (NSFormattingContext)context
++{
++  internal->_context = context;
++  [self _resetUDateFormat];
++}
++
++
++- (NSDate*) _dateFromString: (NSString*)string parsed: (NSUInteger*)parsed
+ {
+ #if GS_USE_ICU == 1
+   NSDate *result = nil;
+@@ -458,16 +571,57 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+   int32_t pPos = 0;
+   
+   textLength = [string length];
+-  text = malloc(sizeof(UChar) * textLength);
++  text = malloc(sizeof(UChar) * (textLength + 1));
+   if (text == NULL)
+     return nil;
+   
+   [string getCharacters: text range: NSMakeRange (0, textLength)];
+   
+-  date = udat_parse (internal->_formatter, text, textLength, &pPos, &err);
++  {
++    UCalendar		*cal;
++    NSTimeInterval	base;
++
++    /* What the string does not give comes from the default date, or as
++     * on macOS from the start of 2000 in the formatter's time zone.
++     */
++    if (internal->_defaultDate != nil)
++      {
++	base = [internal->_defaultDate timeIntervalSince1970];
++      }
++    else
++      {
++	NSDate	*y2k = [NSDate dateWithTimeIntervalSince1970: 946684800.0];
++
++	base = 946684800.0 - [internal->_tz secondsFromGMTForDate: y2k];
++      }
++    cal = ucal_clone (udat_getCalendar (internal->_formatter), &err);
++    ucal_setMillis (cal, base * 1000.0, &err);
++    udat_parseCalendar (internal->_formatter, cal, text, textLength,
++      &pPos, &err);
++    date = ucal_getMillis (cal, &err);
++    ucal_close (cal);
++  }
+   if (U_SUCCESS(err))
+-    result =
+-      [NSDate dateWithTimeIntervalSince1970: (NSTimeInterval)(date / 1000.0)];
++    {
++      if (internal->_calendarDates)
++	{
++	  NSCalendarDate	*d;
++
++	  d = [NSCalendarDate dateWithTimeIntervalSince1970:
++	    (NSTimeInterval)(date / 1000.0)];
++	  [d setTimeZone: internal->_tz];
++	  result = d;
++	}
++      else
++	{
++	  result = [NSDate dateWithTimeIntervalSince1970:
++	    (NSTimeInterval)(date / 1000.0)];
++	}
++      if (parsed != NULL)
++	{
++	  *parsed = pPos;
++	}
++    }
+   
+   free(text);
+   return result;
+@@ -476,6 +630,11 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+ #endif
+ }
+ 
++- (NSDate*) dateFromString: (NSString*) string
++{
++  return [self _dateFromString: string parsed: NULL];
++}
++
+ - (NSString*) stringFromDate: (NSDate*)date
+ {
+   NSString	*result = nil;
+@@ -521,7 +680,38 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+                   range: (inout NSRange*) range
+                   error: (out NSError **) error
+ {
+-  return NO; // FIXME
++  NSRange	r = NSMakeRange(0, [string length]);
++  NSUInteger	parsed = 0;
++  NSDate	*date;
++
++  if (range != NULL)
++    {
++      r = *range;
++    }
++  date = [self _dateFromString: [string substringWithRange: r]
++			parsed: &parsed];
++  if (nil == date)
++    {
++      if (error != NULL)
++	{
++	  *error = [NSError errorWithDomain: NSCocoaErrorDomain
++	    code: 2048 // NSFormattingError
++	    userInfo: [NSDictionary dictionaryWithObject:
++	      [NSString stringWithFormat: @"The value \u201C%@\u201D is invalid.",
++		[string substringWithRange: r]]
++	      forKey: NSLocalizedDescriptionKey]];
++	}
++      return NO;
++    }
++  if (range != NULL)
++    {
++      range->length = parsed;
++    }
++  if (obj != NULL)
++    {
++      *obj = date;
++    }
++  return YES;
+ }
+ 
+ - (void) setDateFormat: (NSString*)string
+@@ -576,12 +766,12 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+ 
+ - (NSDate*) defaultDate
+ {
+-  return nil;  // FIXME
++  return internal->_defaultDate;
+ }
+ 
+ - (void) setDefaultDate: (NSDate*)date
+ {
+-  return; // FIXME
++  ASSIGNCOPY(internal->_defaultDate, date);
+ }
+ 
+ - (NSLocale*) locale
+@@ -615,25 +805,13 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+ 
+ - (NSDate*) twoDigitStartDate
+ {
+-#if GS_USE_ICU == 1
+-  UErrorCode err = U_ZERO_ERROR;
+-  return [NSDate dateWithTimeIntervalSince1970:
+-    (udat_get2DigitYearStart (internal->_formatter, &err) / 1000.0)];
+-#else
+-  return nil;
+-#endif
++  return internal->_twoDigitStart;
+ }
+ 
+ - (void) setTwoDigitStartDate: (NSDate*)date
+ {
+-#if GS_USE_ICU == 1
+-  UErrorCode err = U_ZERO_ERROR;
+-  udat_set2DigitYearStart (internal->_formatter,
+-                           ([date timeIntervalSince1970] * 1000.0),
+-                           &err);
+-#else
+-  return;
+-#endif
++  ASSIGNCOPY(internal->_twoDigitStart, date);
++  [self _resetUDateFormat];
+ }
+ 
+ 
+@@ -650,7 +828,16 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+ 
+ - (void) setAMSymbol: (NSString*) string
+ {
+-  return;
++#if GS_USE_ICU == 1
++  NSMutableArray	*array;
++
++  array = [[[self _getSymbols: UDAT_AM_PMS] mutableCopy] autorelease];
++  if ([array count] == 2 && string != nil)
++    {
++      [array replaceObjectAtIndex: 0 withObject: string];
++      [self _setSymbols: array : UDAT_AM_PMS];
++    }
++#endif
+ }
+ 
+ - (NSString*) PMSymbol
+@@ -666,7 +853,16 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+ 
+ - (void) setPMSymbol: (NSString*)string
+ {
+-  return;
++#if GS_USE_ICU == 1
++  NSMutableArray	*array;
++
++  array = [[[self _getSymbols: UDAT_AM_PMS] mutableCopy] autorelease];
++  if ([array count] == 2 && string != nil)
++    {
++      [array replaceObjectAtIndex: 1 withObject: string];
++      [self _setSymbols: array : UDAT_AM_PMS];
++    }
++#endif
+ }
+ 
+ - (NSArray*) weekdaySymbols
+@@ -761,12 +957,28 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+ 
+ - (NSDate*) gregorianStartDate
+ {
+-  return nil;
++#if GS_USE_ICU == 1
++  UErrorCode	err = U_ZERO_ERROR;
++  UDate		change;
++
++  if (internal->_formatter == NULL)
++    {
++      return internal->_gregorianStart;
++    }
++  change = ucal_getGregorianChange (udat_getCalendar (internal->_formatter),
++    &err);
++  if (U_SUCCESS(err))
++    {
++      return [NSDate dateWithTimeIntervalSince1970: change / 1000.0];
++    }
++#endif
++  return internal->_gregorianStart;
+ }
+ 
+ - (void) setGregorianStartDate: (NSDate*)date
+ {
+-  return;
++  ASSIGNCOPY(internal->_gregorianStart, date);
++  [self _resetUDateFormat];
+ }
+ 
+ - (NSArray*) longEraSymbols
+@@ -971,7 +1183,7 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+ - (NSArray*) veryShortWeekdaySymbols
+ {
+ #if GS_USE_ICU == 1
+-  return [self _getSymbols: UDAT_SHORT_WEEKDAYS];
++  return [self _getSymbols: UDAT_NARROW_WEEKDAYS];
+ #else
+   return nil;
+ #endif
+@@ -980,7 +1192,7 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+ - (void) setVeryShortWeekdaySymbols: (NSArray*)array
+ {
+ #if GS_USE_ICU == 1
+-  [self _setSymbols: array : UDAT_SHORT_WEEKDAYS];
++  [self _setSymbols: array : UDAT_NARROW_WEEKDAYS];
+ #else
+   return;
+ #endif
+@@ -1062,6 +1274,18 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+ - (void) setDoesRelativeDateFormatting: (BOOL)flag
+ {
+   internal->_relative = (flag ? YES : NO);
++  /* As on macOS, a relative date reads as a list item ("Today"). */
++  if (internal->_relative
++    && NSFormattingContextUnknown == internal->_context)
++    {
++      internal->_context = NSFormattingContextListItem;
++    }
++  else if (NO == internal->_relative
++    && NSFormattingContextListItem == internal->_context)
++    {
++      internal->_context = NSFormattingContextUnknown;
++    }
++  [self _resetUDateFormat];
+ }
+ @end
+ 
+@@ -1121,6 +1345,40 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+   if (pat)
+     free(pat);
+   free(tzID);
++  if (internal->_formatter != NULL)
++    {
++      NSEnumerator	*e;
++      NSNumber		*symbol;
++
++      /* What was set on the formatter outlives a new ICU formatter. */
++      udat_setLenient (internal->_formatter, internal->_lenient);
++      if (internal->_gregorianStart != nil)
++	{
++	  UCalendar	*cal;
++
++	  err = U_ZERO_ERROR;
++	  cal = ucal_clone (udat_getCalendar (internal->_formatter), &err);
++	  ucal_setGregorianChange (cal,
++	    [internal->_gregorianStart timeIntervalSince1970] * 1000.0, &err);
++	  udat_setCalendar (internal->_formatter, cal);
++	  ucal_close (cal);
++	}
++      /* After the calendar, which takes the default century with it. */
++      err = U_ZERO_ERROR;
++      udat_set2DigitYearStart (internal->_formatter,
++	[internal->_twoDigitStart timeIntervalSince1970] * 1000.0, &err);
++#if U_ICU_VERSION_MAJOR_NUM >= 51
++      err = U_ZERO_ERROR;
++      udat_setContext (internal->_formatter,
++	NSToUDisplayContext(internal->_context), &err);
++#endif
++      e = [internal->_symbols keyEnumerator];
++      while ((symbol = [e nextObject]) != nil)
++	{
++	  [self _applySymbols: [internal->_symbols objectForKey: symbol]
++			     : [symbol integerValue]];
++	}
++    }
+ #else
+   return;
+ #endif
+@@ -1133,6 +1391,7 @@ symbolRange(NSInteger symbol, int *from)
+   switch (symbol)
+     {
+       case UDAT_SHORT_WEEKDAYS:
++      case UDAT_NARROW_WEEKDAYS:
+       case UDAT_STANDALONE_NARROW_WEEKDAYS:
+       case UDAT_STANDALONE_SHORT_WEEKDAYS:
+       case UDAT_STANDALONE_WEEKDAYS:
+@@ -1151,11 +1410,31 @@ symbolRange(NSInteger symbol, int *from)
+ 
+ - (void) _setSymbols: (NSArray*)array : (NSInteger)symbol
+ {
++#if GS_USE_ICU == 1
++  if (array != nil)
++    {
++      [internal->_symbols setObject: array
++			     forKey: [NSNumber numberWithInteger: symbol]];
++    }
++  else
++    {
++      [internal->_symbols removeObjectForKey:
++	[NSNumber numberWithInteger: symbol]];
++      [self _resetUDateFormat];
++    }
++  [self _applySymbols: array : symbol];
++#endif
++}
++
++- (void) _applySymbols: (NSArray*)array : (NSInteger)symbol
++{
+ #if GS_USE_ICU == 1
+   int idx;
++  int from;
+   int count = udat_countSymbols (internal->_formatter, symbol);
+   
+   symbolRange(symbol, &idx);
++  from = idx;
+   if ([array count] == count - idx)
+     {
+       while (idx < count)
+@@ -1163,7 +1442,7 @@ symbolRange(NSInteger symbol, int *from)
+           int           length;
+           UChar         *value;
+           UErrorCode    err = U_ZERO_ERROR;
+-          NSString      *string = [array objectAtIndex: idx];
++          NSString      *string = [array objectAtIndex: idx - from];
+           
+           length = [string length];
+           value = malloc(sizeof(unichar) * length);
+diff --git a/Source/NSHTTPCookie.m b/Source/NSHTTPCookie.m
+index a0b2223..5efb6ce 100644
+--- a/Source/NSHTTPCookie.m
++++ b/Source/NSHTTPCookie.m
+@@ -715,6 +715,7 @@ _setCookieKey(NSMutableDictionary *dict, NSString *key, NSString *value)
+       [formatter setDateFormat: @"EEE, dd-MMM-yyyy HH:mm:ss zzz"];
+       [formatter setLocale: locale];
+       [formatter setTimeZone: gmtTimeZone];
++      [formatter setLenient: YES];
+ 
+       expireDate = [formatter dateFromString: value];
+       if (expireDate)
+diff --git a/Tests/base/NSDateFormatter/settings.m b/Tests/base/NSDateFormatter/settings.m
+new file mode 100644
+index 0000000..e0ca01e
+--- /dev/null
++++ b/Tests/base/NSDateFormatter/settings.m
+@@ -0,0 +1,227 @@
++#import <Foundation/Foundation.h>
++#import "Testing.h"
++
++/* Each expected value is what macOS 15 gives for the same calls. */
++
++static NSDateFormatter *
++formatter(NSString *locale, NSString *format)
++{
++  NSDateFormatter	*f = [[NSDateFormatter new] autorelease];
++
++  [f setLocale: [[[NSLocale alloc] initWithLocaleIdentifier: locale]
++    autorelease]];
++  [f setTimeZone: [NSTimeZone timeZoneWithName: @"UTC"]];
++  [f setDateFormat: format];
++  return f;
++}
++
++static NSDate *
++date(NSTimeInterval t)
++{
++  return [NSDate dateWithTimeIntervalSinceReferenceDate: t];
++}
++
++static NSTimeInterval
++when(NSDate *d)
++{
++  return [d timeIntervalSinceReferenceDate];
++}
++
++/* Reads back the settings a date formatter wrote. */
++@interface	WrittenDateFormatter : NSObject
++{
++@public
++  NSDictionary	*attributes;
++}
++@end
++
++@implementation	WrittenDateFormatter
++- (void) dealloc
++{
++  [attributes release];
++  [super dealloc];
++}
++- (id) initWithCoder: (NSCoder*)coder
++{
++  attributes = [[coder decodeObjectForKey: @"NS.attributes"] retain];
++  return self;
++}
++@end
++
++static NSDictionary *
++written(NSDateFormatter *f)
++{
++  NSKeyedUnarchiver	*unarchiver;
++  WrittenDateFormatter	*w;
++
++  unarchiver = [[NSKeyedUnarchiver alloc] initForReadingWithData:
++    [NSKeyedArchiver archivedDataWithRootObject: f]];
++  [unarchiver setClass: [WrittenDateFormatter class]
++	  forClassName: @"NSDateFormatter"];
++  w = [[[unarchiver decodeObjectForKey: @"root"] retain] autorelease];
++  [unarchiver release];
++  return w->attributes;
++}
++
++static id
++roundTrip(id o)
++{
++  return [NSKeyedUnarchiver unarchiveObjectWithData:
++    [NSKeyedArchiver archivedDataWithRootObject: o]];
++}
++
++int main()
++{
++  NSAutoreleasePool	*arp = [NSAutoreleasePool new];
++  NSDateFormatter	*f;
++  NSDateFormatter	*back;
++  NSArray		*symbols;
++  NSDictionary		*attributes;
++
++  START_SET("NSDateFormatter settings")
++
++    f = [[NSDateFormatter new] autorelease];
++    PASS([f isLenient] == NO, "a formatter is not lenient")
++    PASS(when([f twoDigitStartDate]) == -1609459200.0,
++      "two digit years start in 1950")
++    PASS(when([f gregorianStartDate]) == -13197600000.0,
++      "the gregorian calendar starts in October 1582")
++    PASS([f defaultDate] == nil, "there is no default date")
++    PASS([f generatesCalendarDates] == NO, "dates are not calendar dates")
++    PASS([f formattingContext] == NSFormattingContextUnknown,
++      "the formatting context is unknown")
++
++    f = formatter(@"en_US", @"HH:mm");
++    PASS(when([f dateFromString: @"10:30"]) == -31584600.0,
++      "what the string does not give comes from the start of 2000")
++    [f setDefaultDate: date(86400 * 400)];
++    PASS(when([f dateFromString: @"10:30"]) == 34597800.0,
++      "or from the default date")
++    [f setGeneratesCalendarDates: YES];
++    PASS([[f dateFromString: @"10:30"] isKindOfClass: [NSCalendarDate class]],
++      "a calendar date is made when asked for")
++    {
++      NSRange	r = NSMakeRange(0, 10);
++      id	v = nil;
++      BOOL	ok;
++
++      ok = [f getObjectValue: &v forString: @"10:30 junk" range: &r error: NULL];
++      PASS(ok && when(v) == 34597800.0 && r.length == 5,
++	"a range is read as far as it is a date")
++    }
++    [f setLenient: YES];
++    [f setDateFormat: @"yyyy"];
++    PASS([f isLenient], "leniency survives a change of format")
++    f = [[[NSDateFormatter alloc] initWithDateFormat: @"%Y"
++				allowNaturalLanguage: YES] autorelease];
++    PASS([f isLenient], "a 10.0 formatter allowing natural language is lenient")
++
++    f = formatter(@"en_US", @"yy");
++    PASS(when([f dateFromString: @"49"]) == 1514764800.0, "49 is 2049")
++    PASS(when([f dateFromString: @"51"]) == -1577923200.0, "51 is 1951")
++    [f setTwoDigitStartDate: date(86400 * 365)];
++    PASS(when([f dateFromString: @"01"]) == 3155673600.0,
++      "01 is 2101 when two digit years start in 2002")
++    [f setTimeZone: [NSTimeZone timeZoneForSecondsFromGMT: 3600]];
++    PASS(when([f twoDigitStartDate]) == 86400 * 365,
++      "the start survives a change of time zone")
++
++    f = formatter(@"en_US", @"yyyy-MM-dd");
++    PASS_EQUAL([f stringFromDate: date(-1.4e10)], @"1557-05-01",
++      "a date before 1582 is julian")
++    [f setGregorianStartDate: date(-1.5e10)];
++    PASS_EQUAL([f stringFromDate: date(-1.4e10)], @"1557-05-11",
++      "or gregorian when the gregorian calendar starts earlier")
++    PASS(when([f gregorianStartDate]) == -1.5e10,
++      "the gregorian start date is kept")
++
++    f = formatter(@"en_US", @"h a EEE EEEEE");
++    [f setAMSymbol: @"morning"];
++    [f setPMSymbol: @"evening"];
++    symbols = [NSArray arrayWithObjects:
++      @"s0", @"s1", @"s2", @"s3", @"s4", @"s5", @"s6", nil];
++    [f setShortWeekdaySymbols: symbols];
++    symbols = [NSArray arrayWithObjects:
++      @"v0", @"v1", @"v2", @"v3", @"v4", @"v5", @"v6", nil];
++    [f setVeryShortWeekdaySymbols: symbols];
++    PASS_EQUAL([f stringFromDate: date(15 * 3600)], @"3 evening s1 v1",
++      "AM, PM and weekday symbols are used, Sunday first")
++    [f setTimeZone: [NSTimeZone timeZoneForSecondsFromGMT: 3600]];
++    PASS_EQUAL([f stringFromDate: date(15 * 3600)], @"4 evening s1 v1",
++      "the symbols survive a change of time zone")
++    PASS_EQUAL([f AMSymbol], @"morning", "the AM symbol is kept")
++    PASS_EQUAL([f veryShortWeekdaySymbols], symbols,
++      "the very short weekday symbols are their own")
++
++    f = formatter(@"fr_FR", @"MMMM");
++    PASS_EQUAL([f stringFromDate: date(0)], @"janvier",
++      "a month is in lower case in French")
++    [f setFormattingContext: NSFormattingContextBeginningOfSentence];
++    PASS_EQUAL([f stringFromDate: date(0)], @"Janvier",
++      "and capitalized at the beginning of a sentence")
++    [f setFormattingContext: NSFormattingContextStandalone];
++    PASS_EQUAL([f stringFromDate: date(0)], @"Janvier",
++      "and standing alone")
++    [f setFormattingContext: NSFormattingContextMiddleOfSentence];
++    PASS_EQUAL([f stringFromDate: date(0)], @"janvier",
++      "but not in the middle of a sentence")
++
++    f = [[NSDateFormatter new] autorelease];
++    [f setLocale: [[[NSLocale alloc] initWithLocaleIdentifier: @"en_US"]
++      autorelease]];
++    [f setDateStyle: NSDateFormatterMediumStyle];
++    [f setDoesRelativeDateFormatting: YES];
++    PASS_EQUAL([f stringFromDate: [NSDate date]], @"Today",
++      "relative formatting says Today")
++    PASS([f formattingContext] == NSFormattingContextListItem,
++      "relative formatting is for a list item")
++
++    /* All of them survive a keyed archive, as macOS writes them. */
++    f = formatter(@"en_US", @"h a EEE yy");
++    [f setAMSymbol: @"morning"];
++    [f setShortWeekdaySymbols: [NSArray arrayWithObjects:
++      @"s0", @"s1", @"s2", @"s3", @"s4", @"s5", @"s6", nil]];
++    [f setTwoDigitStartDate: date(86400 * 365)];
++    [f setGregorianStartDate: date(-1.5e10)];
++    [f setDefaultDate: date(86400 * 400)];
++    [f setGeneratesCalendarDates: YES];
++    [f setLenient: YES];
++    [f setFormattingContext: NSFormattingContextBeginningOfSentence];
++    [f setCalendar: [[[NSCalendar alloc]
++      initWithCalendarIdentifier: NSCalendarIdentifierBuddhist] autorelease]];
++    attributes = written(f);
++    PASS_EQUAL([attributes objectForKey: @"formattingContext"],
++      [NSNumber numberWithInt: 258],
++      "the formatting context is written as ICU's display context")
++    PASS_EQUAL([[attributes objectForKey: @"locale"] localeIdentifier], @"en_US",
++      "the locale is written without the calendar")
++    PASS_EQUAL([[attributes objectForKey: @"calendar"] calendarIdentifier],
++      NSCalendarIdentifierBuddhist, "the calendar is written on its own")
++    PASS([attributes objectForKey: @"timeStyle"] == nil
++      && [attributes objectForKey: @"PMSymbol"] == nil,
++      "what was not set is not written")
++    back = roundTrip(f);
++    PASS_EQUAL([back AMSymbol], @"morning", "the AM symbol survives")
++    PASS_EQUAL([[back shortWeekdaySymbols] objectAtIndex: 1], @"s1",
++      "the weekday symbols survive")
++    PASS(when([back twoDigitStartDate]) == 86400 * 365,
++      "the two digit start date survives")
++    PASS(when([back gregorianStartDate]) == -1.5e10,
++      "the gregorian start date survives")
++    PASS(when([back defaultDate]) == 86400 * 400,
++      "the default date survives")
++    PASS([back generatesCalendarDates] && [back isLenient],
++      "calendar dates and leniency survive")
++    PASS([back formattingContext] == NSFormattingContextBeginningOfSentence,
++      "the formatting context survives")
++    PASS_EQUAL([[back calendar] calendarIdentifier],
++      NSCalendarIdentifierBuddhist, "the calendar survives")
++    PASS_EQUAL([back stringFromDate: date(15 * 3600)],
++      [f stringFromDate: date(15 * 3600)],
++      "the formatter read back formats as the one written")
++
++  END_SET("NSDateFormatter settings")
++
++  [arp release];
++  return 0;
++}
+-- 
+2.43.0
+
