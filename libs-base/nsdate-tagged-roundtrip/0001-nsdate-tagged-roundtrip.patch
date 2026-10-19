@@ -1,0 +1,352 @@
+From 24ffc99d5e80791d31f33c62b3e026618fd3732e Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Mon, 19 Oct 2026 17:47:26 +0000
+Subject: [PATCH] NSDate: keep intervals a small date cannot hold in a heap
+ object
+
+A small (tagged) date keeps the sign and fraction of its interval and
+an 8-bit signed exponent, rebased by 0x3EF, so it can hold exactly the
+magnitudes in [2^-144, 2^112).  The interval was packed with no check
+that it fits: an exponent outside that range was truncated to 8 bits
+and came back as a different number.  Zero has a biased exponent of 0,
+which truncates to that of 2.0, so
+
+    [NSDate dateWithTimeIntervalSinceReferenceDate: 0]
+
+was two seconds after the reference date, -0.0 two seconds before it,
+and the two compared equal to dateWithTimeIntervalSinceReferenceDate: 2
+and -2.  The same happened to subnormals (5e-324 came back as
+2.0000000000000004, DBL_MIN as 4), to very small and very large
+magnitudes (1e-300 came back as 179769313.49, 1e300 as 5.6e-09,
+DBL_MAX as 0.99999999999999989) and to the infinities (+-inf came back
+as +-1), so a date after distantFuture could compare before it.
+-timeIntervalSinceReferenceDate, -isEqual:, -compare:, -description
+and archiving all saw the wrong value; only an NSDate subclass of the
+caller's own kept the right one, and compared unequal to the date made
+from the same interval.
+
+Now an interval whose exponent does not fit is kept in a GSHeapDate, a
+plain NSDate subclass holding the double, as macOS falls back from
+__NSTaggedDate to __NSDate.  Everything else is unchanged and stays a
+small date, distantPast and distantFuture among them.  Every
+NSTimeInterval now comes back with the same bits, -0.0 included.
+NaN is still refused by -initWithTimeIntervalSinceReferenceDate:.
+
+The comment describing the encoding said the exponent had 7 bits and
+gave the range for those; it now gives the 8 bits the code uses.
+
+Tests/base/NSDate/roundtrip.m checks a table of intervals around the
+edges of the encoding, 100000 random bit patterns and 100000 random
+dates (fixed seed) for an exact round trip through the accessors,
+keyed and unkeyed archiving, -isEqual:, -compare: and -hash against a
+date that is not a small one; 8 of its tests failed before this change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/NSDate.m               |  64 ++++++++++---
+ Tests/base/NSDate/roundtrip.m | 176 ++++++++++++++++++++++++++++++++++
+ 2 files changed, 226 insertions(+), 14 deletions(-)
+ create mode 100644 Tests/base/NSDate/roundtrip.m
+
+diff --git a/Source/NSDate.m b/Source/NSDate.m
+index a30e5a0..ef820b4 100644
+--- a/Source/NSDate.m
++++ b/Source/NSDate.m
+@@ -96,25 +96,23 @@ static id _distantFuture = nil;
+  * Compression:
+  * 1. Take the 11-bit unsigned exponent and sign-extend it to a 64-bit signed integer.
+  * 2. Subtract a new secondary bias of 0x3EF from the exponent.
+- * 3. Truncate the result to a 7-bit signed integer.
++ * 3. Truncate the result to an 8-bit signed integer.
+  *
+  * The order of operations is important. The biased exponent of a
+  * double-precision floating-point number is in range [0, 2047] (including
+  * special values).  Sign-extending and subtracting the secondary bias results
+- * in a value in range [-1007, 1040]. Truncating this to a 7-bit signed integer
+- * further reduces the range to [-64, 63].
++ * in a value in range [-1007, 1040]. Only values in [-128, 127] survive
++ * truncation to an 8-bit signed integer.
+  *
+- * When unbiasing the compressed 7-bit signed exponent with 0x3EF, we
+- * get a biased exponent in range [943, 1070]. We have effectively shifted
+- * the value range in order to represent values from
+- * (-1)^0 * 2^(943 - 1023) * 1.048576 = 8.673617379884035e-25
+- * to (-1)^0 * 2^(1070 - 1023) * 1.048576 = 147573952589676.4
+- *
+- * This encodes all dates for a few million years beyond distantPast and
+- * distantFuture, except within about 1e-25 second of the reference date.
++ * When unbiasing the compressed 8-bit signed exponent with 0x3EF, we
++ * get a biased exponent in range [879, 1134], so a small date holds
++ * exactly the magnitudes in [2^-144, 2^112): every date from about
++ * 4e-44 second away from the reference date to about 5e33 seconds away.
++ * Any other interval (zero, subnormals, huge values, infinities) is kept
++ * in a GSHeapDate instead.
+  *
+  * So how does decompression work?
+- * 1. Sign extend the 7-bit signed exponent to a 64-bit signed integer.
++ * 1. Sign extend the 8-bit signed exponent to a 64-bit signed integer.
+  * 2. Add the secondary bias of 0x3EF to the exponent.
+  * 3. Cast the result to an unsigned 11-bit integer.
+  *
+@@ -138,6 +136,12 @@ static id _distantFuture = nil;
+ 
+ #define CREATE_SMALL_DATE(interval) (id)(compressTimeInterval(interval) | SMALL_DATE_MASK)
+ 
++@interface GSHeapDate : NSDate
++{
++  NSTimeInterval _seconds_since_ref;
++}
++@end
++
+ union CompressedDouble {
+   uintptr_t data;
+   struct {
+@@ -200,6 +204,21 @@ static __attribute__((always_inline)) NSTimeInterval
+   return d.val;
+ }
+ 
++static inline id
++createDate(NSTimeInterval interval)
++{
++  union DoubleBits db;
++  intptr_t exponent;
++
++  db.val = interval;
++  exponent = (intptr_t)db.exponent - EXPONENT_BIAS;
++  if (likely(exponent >= -128 && exponent <= 127))
++    {
++      return CREATE_SMALL_DATE(interval);
++    }
++  return [[GSHeapDate alloc] initWithTimeIntervalSinceReferenceDate: interval];
++}
++
+ static __attribute__((always_inline)) BOOL isSmallDate(id obj) {
+   // Do a fast check if the object is also a small date.
+   // libobjc2 guarantees that the classes are 16-byte (word) aligned.
+@@ -356,7 +375,7 @@ static BOOL useSmallDate;
+     }
+   return self;
+ #else
+-  return CREATE_SMALL_DATE(secs);
++  return createDate(secs);
+ #endif
+ }
+ 
+@@ -382,7 +401,7 @@ static BOOL useSmallDate;
+     }
+   return self;
+ #else
+-  return CREATE_SMALL_DATE(secondsSinceRef);
++  return createDate(secondsSinceRef);
+ #endif
+ }
+ 
+@@ -685,6 +704,23 @@ static BOOL useSmallDate;
+ 
+ @end
+ 
++#else
++
++@implementation GSHeapDate
++
++- (id) initWithTimeIntervalSinceReferenceDate: (NSTimeInterval)secs
++{
++  _seconds_since_ref = secs;
++  return self;
++}
++
++- (NSTimeInterval) timeIntervalSinceReferenceDate
++{
++  return _seconds_since_ref;
++}
++
++@end
++
+ #endif // USE_SMALL_DATE == 0
+ 
+ static NSString*
+diff --git a/Tests/base/NSDate/roundtrip.m b/Tests/base/NSDate/roundtrip.m
+new file mode 100644
+index 0000000..1563eec
+--- /dev/null
++++ b/Tests/base/NSDate/roundtrip.m
+@@ -0,0 +1,176 @@
++#import "ObjectTesting.h"
++#import <Foundation/NSArchiver.h>
++#import <Foundation/NSAutoreleasePool.h>
++#import <Foundation/NSDate.h>
++#import <Foundation/NSKeyedArchiver.h>
++#include <float.h>
++#include <math.h>
++#include <string.h>
++
++/* A date that is not one of NSDate's own, to compare against. */
++@interface RefDate : NSDate
++{
++  NSTimeInterval	t;
++}
++@end
++
++@implementation RefDate
++- (id) initWithTimeIntervalSinceReferenceDate: (NSTimeInterval)secs
++{
++  t = secs;
++  return self;
++}
++- (NSTimeInterval) timeIntervalSinceReferenceDate
++{
++  return t;
++}
++@end
++
++static BOOL
++sameBits(double a, double b)
++{
++  return memcmp(&a, &b, sizeof(double)) == 0;
++}
++
++/* Returns the number of ways in which a date made from ti fails to
++ * carry it, reporting the first.
++ */
++static unsigned
++check(NSTimeInterval ti, BOOL verbose)
++{
++  NSAutoreleasePool	*arp = [NSAutoreleasePool new];
++  NSDate		*d = [NSDate dateWithTimeIntervalSinceReferenceDate: ti];
++  NSDate		*a = [[[NSDate alloc]
++    initWithTimeIntervalSinceReferenceDate: ti] autorelease];
++  RefDate		*r = [[[RefDate alloc]
++    initWithTimeIntervalSinceReferenceDate: ti] autorelease];
++  NSDate		*k;
++  NSDate		*u;
++  const char		*why = 0;
++  unsigned		bad = 0;
++
++  k = [NSKeyedUnarchiver unarchiveObjectWithData:
++    [NSKeyedArchiver archivedDataWithRootObject: d]];
++  u = [NSUnarchiver unarchiveObjectWithData:
++    [NSArchiver archivedDataWithRootObject: d]];
++
++  if (!sameBits([d timeIntervalSinceReferenceDate], ti))
++    bad++, why = why ? why : "timeIntervalSinceReferenceDate";
++  if (!sameBits([a timeIntervalSinceReferenceDate], ti))
++    bad++, why = why ? why : "alloc/init";
++  if (!sameBits([d timeIntervalSince1970], ti + NSTimeIntervalSince1970))
++    bad++, why = why ? why : "timeIntervalSince1970";
++  if (!sameBits([k timeIntervalSinceReferenceDate], ti))
++    bad++, why = why ? why : "keyed archiving";
++  if (!sameBits([u timeIntervalSinceReferenceDate], ti))
++    bad++, why = why ? why : "archiving";
++  if (![d isEqual: r] || ![r isEqual: d] || ![d isEqualToDate: r])
++    bad++, why = why ? why : "isEqual:";
++  if ([d compare: r] != NSOrderedSame || [r compare: d] != NSOrderedSame)
++    bad++, why = why ? why : "compare:";
++  if ([d timeIntervalSinceDate: r] != 0.0 && !isinf(ti))
++    bad++, why = why ? why : "timeIntervalSinceDate:";
++  if ([d hash] != [a hash] || [d hash] != [k hash])
++    bad++, why = why ? why : "hash";
++  if (bad > 0 && verbose)
++    {
++      fprintf(stderr, "%.17g (%a) comes back as %.17g: %s\n",
++	ti, ti, [d timeIntervalSinceReferenceDate], why);
++    }
++  [arp release];
++  return bad;
++}
++
++/* xorshift64*, so that the sweep is the same on every run. */
++static uint64_t	state = 0x9E3779B97F4A7C15ULL;
++
++static uint64_t
++next(void)
++{
++  state ^= state >> 12;
++  state ^= state << 25;
++  state ^= state >> 27;
++  return state * 0x2545F4914F6CDD1DULL;
++}
++
++int main()
++{
++  NSAutoreleasePool	*arp = [NSAutoreleasePool new];
++  NSTimeInterval	table[] = {
++    0.0, -0.0, 1.0, -1.0, 2.0, -2.0, 0.5, 0.1, -0.1, 1.5,
++    1e-300, -1e-300, 5e-324, -5e-324, DBL_MIN, -DBL_MIN,
++    1e-30, 1e-20, 1e-10, 1e-6,
++    0x1p-144, 0x1.fffffffffffffp-145, 0x1p-145, -0x1p-145,
++    0x1.fffffffffffffp+111, 0x1p+112, -0x1p+112, 0x1p+113,
++    978307200.0, 1e9, 1760000000.123456,
++    63113990400.0, -63113817600.0,
++    1e15, 1e20, 1e34, 1e35, 1e300, -1e300, DBL_MAX, -DBL_MAX,
++    INFINITY, -INFINITY
++  };
++  unsigned		n = sizeof(table) / sizeof(*table);
++  unsigned		failed = 0;
++  unsigned		i;
++  NSDate		*z;
++  NSDate		*nz;
++
++  START_SET("intervals round-trip through NSDate")
++    for (i = 0; i < n; i++)
++      {
++	if (check(table[i], YES) > 0)
++	  failed++;
++      }
++    PASS(failed == 0, "every interval in the table round-trips exactly")
++
++    failed = 0;
++    for (i = 0; i < 100000; i++)
++      {
++	uint64_t	bits = next();
++	double		ti;
++
++	memcpy(&ti, &bits, sizeof(ti));
++	if (isnan(ti))
++	  continue;
++	if (check(ti, failed < 10) > 0)
++	  failed++;
++      }
++    PASS(failed == 0, "random bit patterns round-trip exactly")
++
++    failed = 0;
++    for (i = 0; i < 100000; i++)
++      {
++	double	ti = ((double)(next() >> 11) / 0x1p53 - 0.5) * 2e11;
++
++	if (i % 2)
++	  ti = round(ti);
++	if (check(ti, failed < 10) > 0)
++	  failed++;
++      }
++    PASS(failed == 0, "random dates within distant past and future round-trip")
++  END_SET("intervals round-trip through NSDate")
++
++  START_SET("dates near the reference date")
++    z = [NSDate dateWithTimeIntervalSinceReferenceDate: 0.0];
++    nz = [NSDate dateWithTimeIntervalSinceReferenceDate: -0.0];
++    PASS([z timeIntervalSinceReferenceDate] == 0.0,
++      "the reference date is 0 seconds from itself")
++    PASS_EQUAL([z description], @"2001-01-01 00:00:00 +0000",
++      "the reference date describes itself")
++    PASS(![z isEqual: [NSDate dateWithTimeIntervalSinceReferenceDate: 2.0]],
++      "the reference date is not two seconds later")
++    PASS([z isEqual: nz] && [z hash] == [nz hash],
++      "0 and -0 are the same date, with the same hash")
++    PASS(signbit([nz timeIntervalSinceReferenceDate]),
++      "-0 keeps its sign")
++    PASS([z compare: [NSDate dateWithTimeIntervalSinceReferenceDate: 5e-324]]
++      == NSOrderedAscending, "the smallest positive interval is later")
++    PASS([[NSDate dateWithTimeIntervalSinceReferenceDate: 1e300]
++      compare: [NSDate distantFuture]] == NSOrderedDescending,
++      "1e300 is after the distant future")
++    PASS([[NSDate dateWithTimeIntervalSinceReferenceDate: -INFINITY]
++      compare: [NSDate distantPast]] == NSOrderedAscending,
++      "-infinity is before the distant past")
++  END_SET("dates near the reference date")
++
++  [arp release]; arp = nil;
++  return 0;
++}
+-- 
+2.43.0
+
