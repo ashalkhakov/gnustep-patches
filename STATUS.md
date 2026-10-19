@@ -297,6 +297,23 @@ macOS.  `NSWindow/toolTipMouseMoved.m` fails its 3 checks without the fix
 and passes with it; NSWindow (37), NSView and the NSMatrix and NSTabView
 tooltip tests pass, on libs-gui fdc5cfe.
 
+Added on 2026-10-19: `nsdate-tagged-roundtrip`, found by ORMKit, whose
+`[NSDate dateWithTimeIntervalSinceReferenceDate: 0]` came out two seconds
+late.  A small (tagged) date keeps an 8-bit exponent and was made from any
+interval without checking that it fits, so every magnitude outside
+[2^-144, 2^112) came back as another number: 0 as 2, -0.0 as -2, 5e-324 as
+2.0000000000000004, DBL_MIN as 4, 1e-300 as 179769313.49, 1e300 as
+5.6e-09, DBL_MAX as 0.99999999999999989, +-inf as +-1; isEqual:, compare:,
+description and archiving all saw the wrong value.  Such intervals now go
+into a heap date, as macOS falls back from __NSTaggedDate to __NSDate.
+`NSDate/roundtrip.m` (a table at the encoding's edges and 200000 random
+intervals, fixed seed) fails 8 of its 11 checks without the fix and passes
+with it on libs-base 7b3a12c.  Not fixed here and seen on the way:
+NSCalendarDate's -description never returns for |interval| >= about 1e25
+(also for small dates, so on master too), and a small date's -hash is its
+pointer, not the (NSUInteger)interval of NSDate's, so it differs from that
+of an equal date of another class.
+
 Added on 2026-10-19: `controller-selection-markers`.  A controller's
 -selection was its content (NSObjectController) or the one selected object
 or nil (NSArrayController), so selection.<key> was nil with nothing or
@@ -619,6 +636,7 @@ the two where a window comes in the same event fail.  On libs-gui 5c43a94.
 | `keyed-archive-value-classes` | libs-base | test | not sent yet | (none: ORMKit's apps use it from here) |
 | `nsdateformatter-settings` | libs-base | test | not sent yet (needs `formatter-keyed-attributes`) | (none: ORMKit's apps use it from here) |
 | `nsnumberformatter-settings` | libs-base | test | not sent yet (needs `formatter-keyed-attributes`) | (none: ORMKit's apps use it from here) |
+| `nsdate-tagged-roundtrip` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
 | `popover-placement` | libs-gui | test | not sent yet | (none: UDCodeKit places its own child windows meanwhile) |
 | `arraycontroller-arrange-eagerly` | libs-gui | test | not sent yet | (none: Logbook's LBEntityController will drop its workaround) |
 | `tableview-prototype-copy` | libs-gui | test | not sent yet | (none: UDCodeKit's issues navigator is cell-based meanwhile) |
