@@ -712,6 +712,68 @@ event.  macOS also asks when the last window is only ordered out; that is
 left alone.  `NSApplication/lastWindowClosed.m` runs the application
 through six cases and passes 6 of 6 with the fix and on AppKit; without it
 the two where a window comes in the same event fail.  On libs-gui 5c43a94.
+Added on 2026-10-20 for RDLKit's cross-platform report check, which
+renders its corpus of 97 reports to PDF on macOS 15 and on the stack and
+compares them, and drives RDLDesigner on both; every fix was checked
+against macOS 15 first.  On libs-base d537eac97, libs-gui cacd5cb08 and
+libs-back d378734; each test fails without its fix and passes with it.
+`font-family-names` (libs-gui): +fontWithName:size: took only PostScript
+names, so "Arial" or "Times New Roman" was nil and every report fell back
+to the system font; macOS also takes a family name (its regular face) and
+a full name, in any case, and names the font by its PostScript name.
+`NSFont/familyname.m`, 8 checks.  `cairo-unhinted-metrics` (libs-back):
+GSFontHinting defaulted to 33, hinted metrics, so every advance was
+rounded ("line wraps here" in Arial 10 measured 70.0, 67.8 on macOS); the
+default is now 17, unhinted, as the backend already used with a scale
+factor.  `Tests/cairo/unhintedmetrics.m`, 3 checks.
+`cairo-screen-font-size` (libs-back): a screen font's size was rounded up
+to a whole point, so string drawing measured 14.5-point text at 15;
+macOS's -screenFont keeps the size.  `Tests/cairo/screenfontsize.m`, 3.
+`landscape-pdf-pages` (libs-gui and libs-back, a pair that goes
+together): landscape was turned a quarter round onto a portrait sheet in
+PDF too; macOS makes a landscape page ([0 0 842 595]).  gui now draws
+landscape upright into a PDF (one page per sheet) and says so with
+GSPrintLandscapeSheets, which the cairo context reads to keep the page
+landscape; PostScript is unchanged.  `NSPrintOperation/landscapePDF.m`, 2,
+and `Tests/cairo/pdflandscape.m`, 3 (it links zlib to read cairo's object
+streams).  `layoutmanager-font-leading` (libs-gui): lines were the
+backend's unrounded line height (Arial 10: 11.499, macOS 11.327 or 11.0);
+NSFont's -leading was 0, -usesFontLeading was missing and
+lineHeightMultiple was ignored.  The typesetter now rounds the ascender
+and descender, adds the leading when the layout manager uses it, scales
+by the multiple with the extra above the baseline, lets line spacing
+replace the leading except under the last line, and string drawing adds
+the leading only with NSStringDrawingUsesFontLeading; the layout of every
+case probed matches macOS to the thousandth of a point, paragraph spacing
+apart (left as it was: paragraphSpacingBefore is still ignored).
+`NSLayoutManager/fontLeading.m`, 66 checks over the fonts installed.
+`cairo-dash-lengths` (libs-back): every dash length was multiplied by 1.4;
+macOS writes "[ 6 3 ] 1 d".  `Tests/cairo/dashpattern.m`, 6.
+`modal-stop-from-timer` (libs-gui): -stopModal, -stopModalWithCode: and
+-abortModal from a timer left the loop waiting for an event; it now ends
+at once, as on macOS (0.5 s).  `NSApplication/stopModalFromTimer.m`, 6.
+`pdf-ligature-text` (libs-back): ligature glyphs reached the PDF as
+U+FB01..., so text copied or searched read "ﬁnish"; they now carry the
+letters as ActualText, as macOS's do.  `Tests/cairo/pdfligatures.m`, 4.
+`scrollview-nib-document-origin` (libs-gui): a scroll view from a nib
+opened scrolled away from its document's origin when the clip view was
+resized after decoding (RDLDesigner's canvas, 98 points down); macOS
+scrolls to the origin when the nib sets the document view.
+`NSScrollView/nibDocumentOrigin.m` with `DocumentOrigin.xib`, 7.
+`splitview-set-position-bounds` (libs-gui): -setPosition:ofDividerAtIndex:
+did not stop at the ends and gave a subview a negative height; it now
+stops as macOS does.  `NSSplitView/setPositionBounds.m`, 6.
+`control-state-value-signed` (libs-gui) and `urlsession-task-state-signed`
+(libs-base): NSControlStateValue and NSURLSessionTaskState were unsigned,
+so -state sent to an id warned "Calling [NSFormCell -state] with incorrect
+signature"; both are NSInteger in Apple's headers.
+`NSSwitch/stateType.m`, 6, and `NSURLSession/taskState.m`, 3.
+`cairo-window-surface-termination` (libs-back): the window's Render
+picture was freed by the X server with the window and again by cairo, one
+RenderBadPicture per closed window; the surface now lets go first.
+`Tests/x11/windowclose.m`.  Not GNUstep's: the New Report panel's radio
+buttons (their states are right; the default theme draws them that way),
+and the scroller on the left, which is GNUstep's interface style default.
 
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
@@ -765,6 +827,19 @@ the two where a window comes in the same event fail.  On libs-gui 5c43a94.
 | `controller-selection-markers` | libs-gui | test | not sent yet | (none: bound controls show AppKit's placeholders from here) |
 | `controller-to-many-content` | libs-gui | test | not sent yet (after `controller-entity-mode`) | (none: Logbook adds records through it) |
 | `popup-selected-object` | libs-gui | test | not sent yet (after `popup-content-bindings`) | (none: Logbook's pop-ups set their objects through it) |
+| `font-family-names` | libs-gui | test | not sent yet | (none: RDLKit will use it from here) |
+| `cairo-unhinted-metrics` | libs-back | test | not sent yet | (none: RDLKit will use it from here) |
+| `cairo-screen-font-size` | libs-back | test | not sent yet | (none: RDLKit will use it from here) |
+| `landscape-pdf-pages` | libs-gui and libs-back | test | not sent yet | (none: RDLKit will use it from here) |
+| `layoutmanager-font-leading` | libs-gui | test | not sent yet | (none: RDLKit will use it from here) |
+| `cairo-dash-lengths` | libs-back | test | not sent yet | (none: RDLKit will use it from here) |
+| `modal-stop-from-timer` | libs-gui | test | not sent yet | (none: RDLKit will use it from here) |
+| `pdf-ligature-text` | libs-back | test | not sent yet | (none: RDLKit will use it from here) |
+| `scrollview-nib-document-origin` | libs-gui | test | not sent yet | (none: RDLKit will use it from here) |
+| `splitview-set-position-bounds` | libs-gui | test | not sent yet | (none: RDLKit will use it from here) |
+| `control-state-value-signed` | libs-gui | test | not sent yet | (none: RDLKit will use it from here) |
+| `urlsession-task-state-signed` | libs-base | test | not sent yet | (none: RDLKit will use it from here) |
+| `cairo-window-surface-termination` | libs-back | test | not sent yet | (none: RDLKit will use it from here) |
 | `cgrectunion-size` | libs-opal | none | [#71](https://github.com/gnustep/libs-opal/pull/71) | GSXFormsKit |
 | `freetype-advance-without-size` | libs-opal | test | [#72](https://github.com/gnustep/libs-opal/pull/72) | (none: XFormsKit uses it from here) |
 | `cfstring-overrelease` | libs-corebase | none | [#166](https://github.com/gnustep/libs-corebase/pull/166) | gnustep-build |
