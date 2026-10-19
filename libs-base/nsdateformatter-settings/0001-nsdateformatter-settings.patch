@@ -1,4 +1,4 @@
-From 065d06d397dd12b560838e35ec2f75742b064d02 Mon Sep 17 00:00:00 2001
+From 0e5514a047fe18006c6072b73de92629f0a1ae0d Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Mon, 19 Oct 2026 17:14:08 +0000
 Subject: [PATCH] NSDateFormatter: implement the settings macOS keeps
@@ -17,6 +17,29 @@ macOS 15 does with each:
   NSHTTPCookie read an Expires date such as "Wed, 09 Jun 2100" with the
   pattern "EEE, dd-MMM-yyyy" only because of that leniency, so it now
   asks for it.
+- Not lenient on macOS is not ICU's strict parsing.  macOS calls
+  udat_setLenient(false), which makes the calendar strict and turns off
+  UDAT_PARSE_ALLOW_WHITESPACE and UDAT_PARSE_ALLOW_NUMERIC, and leaves
+  UDAT_PARSE_PARTIAL_LITERAL_MATCH and
+  UDAT_PARSE_MULTIPLE_PATTERNS_FOR_MATCH on; lenient turns all of them
+  on.  That much GNUstep does too.  But Apple's ICU matches a literal
+  differently when not lenient (APPLE_ICU_CHANGES, rdar://20692829, in
+  SimpleDateFormat::matchLiterals): a character of the pattern that ICU
+  would ignore before the next field ("-,./" or white space before a
+  date field, "-.:" or white space before a time field, white space
+  before another) matches any run of such characters in the text, or
+  none before a letter.  So on macOS "yyyy-MM-dd" parses "1900/01/01",
+  "1900.01.01" and "1900 01 01", "HH:mm" parses "10.30" and
+  "dd.MM.yyyy" parses "01/01/1900", while "1900:01:01", "1900-13-01",
+  "1900-02-30" and, with "yyyy-MM-dd'T'HH:mm", "1900-01-01 10:30" are
+  refused.  ICU's own refuses the separators.  A strict parse that fails
+  at a literal is now given the literal as Apple's ICU matches it there,
+  and tried again.
+- -dateFromString: took a date from any string that began with one
+  ("1900-01-01x", "10:30 junk"); on macOS the string must be parsed to its
+  end, or be followed only by white space other than line ends.
+  -getObjectValue:forString:range:error: still takes what parses, and
+  gives its length.
 - defaultDate, gregorianStartDate and generatesCalendarDates did
   nothing.  What a string does not give now comes from the default date,
   or as on macOS from the start of 2000 in the formatter's time zone; the
@@ -35,16 +58,27 @@ macOS 15 does with each:
 
 Tests/base/NSDateFormatter/settings.m checks each against the values
 macOS 15 gives, and that they survive a keyed archive; 35 of its 42
-checks fail without the change.
+checks fail without the change.  Tests/base/NSDateFormatter/strictParsing.m
+holds what macOS 15 gives for 159 formats and strings, with -dateFromString:
+and -getObjectValue:forString:range:error:, lenient and not: separators,
+white space, unpadded and out of range fields, two digit years, month names
+for numbers and numbers for names, text before and after, partial strings
+and time zones; 247 of its 318 checks fail without the change.
+Six that differ for reasons other than these settings are left out: a
+weekday alone (two), which macOS takes from the following week; two zone
+names ICU here does not know; and two that only a lenient parse reads,
+differently in each ICU ("0" as "dd", "1900-01-01" as "yyyyMMdd").
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- Headers/Foundation/NSDateFormatter.h  |   5 +
- Source/NSDateFormatter.m              | 363 +++++++++++++++++++++++---
- Source/NSHTTPCookie.m                 |   1 +
- Tests/base/NSDateFormatter/settings.m | 227 ++++++++++++++++
- 4 files changed, 554 insertions(+), 42 deletions(-)
+ Headers/Foundation/NSDateFormatter.h       |   5 +
+ Source/NSDateFormatter.m                   | 597 +++++++++++++++++++--
+ Source/NSHTTPCookie.m                      |   1 +
+ Tests/base/NSDateFormatter/settings.m      | 227 ++++++++
+ Tests/base/NSDateFormatter/strictParsing.m | 393 ++++++++++++++
+ 5 files changed, 1170 insertions(+), 53 deletions(-)
  create mode 100644 Tests/base/NSDateFormatter/settings.m
+ create mode 100644 Tests/base/NSDateFormatter/strictParsing.m
 
 diff --git a/Headers/Foundation/NSDateFormatter.h b/Headers/Foundation/NSDateFormatter.h
 index d2187ab..1402782 100644
@@ -63,7 +97,7 @@ index d2187ab..1402782 100644
  
  #endif
 diff --git a/Source/NSDateFormatter.m b/Source/NSDateFormatter.m
-index c3b8924..e5cbd16 100644
+index c3b8924..a3aab0d 100644
 --- a/Source/NSDateFormatter.m
 +++ b/Source/NSDateFormatter.m
 @@ -31,7 +31,14 @@
@@ -82,7 +116,14 @@ index c3b8924..e5cbd16 100644
  
  #define	EXPOSE_NSDateFormatter_IVARS	1
  #import "common.h"
-@@ -46,6 +53,7 @@
+@@ -40,12 +47,14 @@
+ #import "Foundation/NSDictionary.h"
+ #import "Foundation/NSCalendar.h"
+ #import "Foundation/NSCalendarDate.h"
++#import "Foundation/NSCharacterSet.h"
+ #import "Foundation/NSLocale.h"
+ #import "Foundation/NSTimeZone.h"
+ #import "Foundation/NSValue.h"
  #import "Foundation/NSFormatter.h"
  #import "Foundation/NSDateFormatter.h"
  #import "Foundation/NSCoder.h"
@@ -90,7 +131,15 @@ index c3b8924..e5cbd16 100644
  #import "GSPrivate.h"
  
  #if defined(HAVE_UNICODE_UDAT_H) && defined(HAVE_UNICODE_UDATPG_H)
-@@ -64,6 +72,7 @@
+@@ -53,6 +62,7 @@
+ #include <unicode/udat.h>
+ #undef id
+ #include <unicode/udatpg.h>
++#include <unicode/uchar.h>
+ #elif defined(HAVE_ICU_H)
+ #include <icu.h>
+ #endif
+@@ -64,6 +74,7 @@
  @interface NSDateFormatter (PrivateMethods)
  - (void) _resetUDateFormat;
  - (void) _setSymbols: (NSArray*)array : (NSInteger)symbol;
@@ -98,7 +147,7 @@ index c3b8924..e5cbd16 100644
  - (NSArray*) _getSymbols: (NSInteger)symbol;
  @end
  
-@@ -104,6 +113,9 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+@@ -104,6 +115,9 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
    internal->_behavior = _defaultBehavior;
    internal->_locale = RETAIN([NSLocale currentLocale]);
    internal->_tz = RETAIN([NSTimeZone defaultTimeZone]);
@@ -108,7 +157,7 @@ index c3b8924..e5cbd16 100644
    
    [self _resetUDateFormat];
    
-@@ -112,6 +124,10 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+@@ -112,6 +126,10 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
  
  - (BOOL) allowsNaturalLanguage
  {
@@ -119,7 +168,7 @@ index c3b8924..e5cbd16 100644
    return _allowsNaturalLanguage;
  }
  
-@@ -130,6 +146,11 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+@@ -130,6 +148,11 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
      {
        GS_COPY_INTERNAL(o, zone)
        IF_NO_ARC(RETAIN(GSIVar(o,_locale));)
@@ -131,7 +180,7 @@ index c3b8924..e5cbd16 100644
  #if GS_USE_ICU == 1
        {
          UErrorCode err = U_ZERO_ERROR;
-@@ -200,6 +221,10 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+@@ -200,6 +223,10 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
      {
        RELEASE(internal->_locale);
        RELEASE(internal->_tz);
@@ -142,7 +191,7 @@ index c3b8924..e5cbd16 100644
  #if GS_USE_ICU == 1
        udat_close(internal->_formatter);
  #endif
-@@ -233,6 +258,8 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+@@ -233,6 +260,8 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
        else
          {
            NSDateFormatter	*reference;
@@ -151,7 +200,7 @@ index c3b8924..e5cbd16 100644
  
            behavior = NSDateFormatterBehavior10_4;
            reference = AUTORELEASE([NSDateFormatter new]);
-@@ -252,6 +279,26 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+@@ -252,6 +281,26 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
                @"veryShortStandaloneWeekdaySymbols", @"quarterSymbols",
                @"shortQuarterSymbols", @"standaloneQuarterSymbols",
                @"shortStandaloneQuarterSymbols", nil]);
@@ -178,7 +227,7 @@ index c3b8924..e5cbd16 100644
          }
        [attributes setObject: [NSNumber numberWithUnsignedInteger: behavior]
                       forKey: @"formatterBehavior"];
-@@ -269,7 +316,7 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+@@ -269,7 +318,7 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
  {
    NSCalendarDate	*d;
  
@@ -187,7 +236,7 @@ index c3b8924..e5cbd16 100644
      {
        NSDate	*parsed = [self dateFromString: string];
  
-@@ -349,6 +396,16 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+@@ -349,6 +398,16 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
          }
        if (self != nil && nil != attributes)
          {
@@ -204,7 +253,7 @@ index c3b8924..e5cbd16 100644
            GSPrivateSetFormatterAttributes(self, attributes,
              [NSArray arrayWithObjects: @"formatterBehavior", @"locale",
                @"calendar", @"timeZone", @"dateStyle", @"timeStyle", nil]);
-@@ -366,6 +423,7 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+@@ -366,6 +425,7 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
    if (self == nil)
      return nil;
  
@@ -212,7 +261,7 @@ index c3b8924..e5cbd16 100644
    [self setDateFormat: format];
    _allowsNaturalLanguage = flag;
    internal->_behavior = NSDateFormatterBehavior10_0;
-@@ -420,34 +478,89 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+@@ -420,54 +480,348 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
  
  - (BOOL) generatesCalendarDates
  {
@@ -271,7 +320,7 @@ index c3b8924..e5cbd16 100644
 +/* A keyed archive keeps the context as ICU's display context. */
 +static NSInteger
 +ICUContextFromFormattingContext(NSFormattingContext context)
-+{
+ {
 +  switch (context)
 +    {
 +      case NSFormattingContextDynamic:			return -1;
@@ -309,49 +358,261 @@ index c3b8924..e5cbd16 100644
 +}
 +
 +
-+- (NSDate*) _dateFromString: (NSString*)string parsed: (NSUInteger*)parsed
- {
  #if GS_USE_ICU == 1
-   NSDate *result = nil;
-@@ -458,16 +571,57 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
-   int32_t pPos = 0;
-   
-   textLength = [string length];
+-  NSDate *result = nil;
+-  UDate date;
+-  UChar *text;
+-  int32_t textLength;
+-  UErrorCode err = U_ZERO_ERROR;
+-  int32_t pPos = 0;
+-  
+-  textLength = [string length];
 -  text = malloc(sizeof(UChar) * textLength);
++/* The separators a field takes in place of another, as ICU's
++ * SimpleDateFormatStaticSets: 1 for a date field, 2 for a time field, 3 for
++ * any other field and 0 for the end of the pattern.
++ */
++static int
++separatorKind(UChar field)
++{
++  if (field == 0 || field >= 128
++    || strchr("GyMdkHmsSEDFwWahKzYeugAZvcLQqVUOXxrbB", field) == NULL)
++    return 0;
++  if (strchr("yMdcL", field) != NULL)
++    return 1;
++  if (strchr("kHmshK", field) != NULL)
++    return 2;
++  return 3;
++}
++
++static BOOL
++isSeparator(int kind, UChar c)
++{
++  if (kind == 0)
++    return NO;
++  if (u_isUWhiteSpace(c))
++    return YES;
++  if (kind == 1)
++    return c == '-' || c == ',' || c == '.' || c == '/';
++  if (kind == 2)
++    return c == '-' || c == '.' || c == ':';
++  return NO;
++}
++
++static BOOL
++isPatternWhiteSpace(UChar c)
++{
++  return (c >= 0x09 && c <= 0x0d) || c == 0x20 || c == 0x85
++    || c == 0x200e || c == 0x200f || c == 0x2028 || c == 0x2029;
++}
++
++/* Where in text a literal of the pattern that starts at t ends, matched as
++ * a strict parse on macOS matches it, or -1 when it does not match.
++ */
++static int32_t
++matchLiteral(const UChar *lit, int32_t litLength, int kind,
++  const UChar *text, int32_t length, int32_t t)
++{
++  int32_t	start = t;
++  int32_t	p = 0;
++
++  while (p < litLength && t < length)
++    {
++      if (isPatternWhiteSpace(lit[p]))
++	{
++	  BOOL	found = NO;
++
++	  while (p < litLength && isPatternWhiteSpace(lit[p]))
++	    p++;
++	  while (t < length
++	    && (u_isUWhiteSpace(text[t]) || isPatternWhiteSpace(text[t])))
++	    {
++	      found = YES;
++	      t++;
++	    }
++	  if (!found)
++	    return -1;
++	  if (p >= litLength)
++	    break;
++	}
++      if (t >= length || lit[p] != text[t])
++	{
++	  if (t < length && isSeparator(kind, lit[p])
++	    && (isSeparator(kind, text[t]) || u_isalpha(text[t])))
++	    break;
++	  return -1;
++	}
++      p++;
++      t++;
++    }
++  if (p == 0)
++    {
++      for (t = start; t < length && isSeparator(kind, text[t]); t++)
++	;
++    }
++  return t;
++}
++
++/* Parses text from base, strictly or not as the formatter is set.  Answers
++ * the milliseconds and sets *pos to where the parse ended, or answers NO
++ * and sets *pos to where it failed.
++ */
++static BOOL
++parseText(UDateFormat *df, UDate base, const UChar *text, int32_t length,
++  int32_t *pos, UDate *date)
++{
++  UErrorCode	err = U_ZERO_ERROR;
++  UCalendar	*cal;
++
++  *pos = 0;
++  cal = ucal_clone (udat_getCalendar (df), &err);
++  ucal_setMillis (cal, base, &err);
++  udat_parseCalendar (df, cal, text, length, pos, &err);
++  *date = ucal_getMillis (cal, &err);
++  ucal_close (cal);
++  return U_SUCCESS(err) ? YES : NO;
++}
++
++/* A strict parse that failed at a literal of the pattern is given that
++ * literal as macOS would match it there, and tried again.  Answers NO when
++ * there is no literal to give.
++ */
++static BOOL
++replaceLiteral(UDateFormat *df, UDate base, UChar **text, int32_t *length,
++  int32_t failed)
++{
++  UErrorCode	err = U_ZERO_ERROR;
++  UChar		pattern[BUFFER_SIZE];
++  int32_t	patternLength;
++  int32_t	i = 0;
++
++  patternLength = udat_toPattern (df, 0, pattern, BUFFER_SIZE, &err);
++  if (U_FAILURE(err))
++    return NO;
++  while (i < patternLength)
++    {
++      UChar	lit[BUFFER_SIZE];
++      int32_t	litLength = 0;
++      int32_t	start = i;
++      BOOL	quoted = NO;
++      int32_t	end;
++      int32_t	pos;
++      UDate	date;
++      UChar	*replaced;
++      int32_t	newLength;
++
++      while (i < patternLength && pattern[i] < 128
++	&& isalpha(pattern[i]) && pattern[i] == pattern[start])
++	i++;
++      if (i > start)
++	continue;
++      while (i < patternLength
++	&& (quoted || !(pattern[i] < 128 && isalpha(pattern[i]))))
++	{
++	  if (pattern[i] == '\'')
++	    {
++	      if (i + 1 < patternLength && pattern[i + 1] == '\'')
++		{
++		  lit[litLength++] = pattern[i];
++		  i += 2;
++		}
++	      else
++		{
++		  quoted = !quoted;
++		  i++;
++		}
++	      continue;
++	    }
++	  lit[litLength++] = pattern[i++];
++	}
++      if (litLength == 0)
++	continue;
++      if (start > 0)
++	{
++	  UDateFormat	*prefix = udat_clone (df, &err);
++	  BOOL		ok;
++
++	  if (U_FAILURE(err))
++	    return NO;
++	  udat_applyPattern (prefix, false, pattern, start);
++	  ok = parseText(prefix, base, *text, failed, &pos, &date);
++	  udat_close (prefix);
++	  if (!ok || pos != failed)
++	    continue;
++	}
++      else if (failed != 0)
++	{
++	  continue;
++	}
++
++      end = matchLiteral(lit, litLength,
++	separatorKind(i < patternLength ? pattern[i] : 0),
++	*text, *length, failed);
++      if (end < 0)
++	return NO;
++      if (end - failed == litLength
++	&& memcmp(*text + failed, lit, litLength * sizeof(UChar)) == 0)
++	return NO;
++      newLength = *length - (end - failed) + litLength;
++      replaced = malloc(sizeof(UChar) * (newLength + 1));
++      if (replaced == NULL)
++	return NO;
++      memcpy(replaced, *text, failed * sizeof(UChar));
++      memcpy(replaced + failed, lit, litLength * sizeof(UChar));
++      memcpy(replaced + failed + litLength, *text + end,
++	(*length - end) * sizeof(UChar));
++      free(*text);
++      *text = replaced;
++      *length = newLength;
++      return YES;
++    }
++  return NO;
++}
++#endif
++
++- (NSDate*) _dateFromString: (NSString*)string parsed: (NSUInteger*)parsed
++{
++#if GS_USE_ICU == 1
++  NSDate	*result = nil;
++  NSTimeInterval base;
++  UDate		date;
++  UChar		*text;
++  int32_t	textLength;
++  int32_t	length;
++  int32_t	pPos = 0;
++  BOOL		ok;
++
++  textLength = length = [string length];
 +  text = malloc(sizeof(UChar) * (textLength + 1));
    if (text == NULL)
      return nil;
-   
+-  
    [string getCharacters: text range: NSMakeRange (0, textLength)];
-   
+-  
 -  date = udat_parse (internal->_formatter, text, textLength, &pPos, &err);
-+  {
-+    UCalendar		*cal;
-+    NSTimeInterval	base;
-+
-+    /* What the string does not give comes from the default date, or as
-+     * on macOS from the start of 2000 in the formatter's time zone.
-+     */
-+    if (internal->_defaultDate != nil)
-+      {
-+	base = [internal->_defaultDate timeIntervalSince1970];
-+      }
-+    else
-+      {
-+	NSDate	*y2k = [NSDate dateWithTimeIntervalSince1970: 946684800.0];
-+
-+	base = 946684800.0 - [internal->_tz secondsFromGMTForDate: y2k];
-+      }
-+    cal = ucal_clone (udat_getCalendar (internal->_formatter), &err);
-+    ucal_setMillis (cal, base * 1000.0, &err);
-+    udat_parseCalendar (internal->_formatter, cal, text, textLength,
-+      &pPos, &err);
-+    date = ucal_getMillis (cal, &err);
-+    ucal_close (cal);
-+  }
-   if (U_SUCCESS(err))
+-  if (U_SUCCESS(err))
 -    result =
 -      [NSDate dateWithTimeIntervalSince1970: (NSTimeInterval)(date / 1000.0)];
++
++  /* What the string does not give comes from the default date, or as
++   * on macOS from the start of 2000 in the formatter's time zone.
++   */
++  if (internal->_defaultDate != nil)
++    {
++      base = [internal->_defaultDate timeIntervalSince1970];
++    }
++  else
++    {
++      NSDate	*y2k = [NSDate dateWithTimeIntervalSince1970: 946684800.0];
++
++      base = 946684800.0 - [internal->_tz secondsFromGMTForDate: y2k];
++    }
++  while ((ok = parseText(internal->_formatter, base * 1000.0, text, length,
++    &pPos, &date)) == NO && internal->_lenient == NO
++    && replaceLiteral(internal->_formatter, base * 1000.0, &text, &length,
++      pPos))
++    ;
++  if (ok)
 +    {
 +      if (internal->_calendarDates)
 +	{
@@ -369,25 +630,37 @@ index c3b8924..e5cbd16 100644
 +	}
 +      if (parsed != NULL)
 +	{
-+	  *parsed = pPos;
++	  *parsed = pPos - (length - textLength);
 +	}
 +    }
    
    free(text);
    return result;
-@@ -476,6 +630,11 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+@@ -476,6 +830,23 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
  #endif
  }
  
 +- (NSDate*) dateFromString: (NSString*) string
 +{
-+  return [self _dateFromString: string parsed: NULL];
++  NSUInteger	parsed = 0;
++  NSDate	*date = [self _dateFromString: string parsed: &parsed];
++  NSUInteger	length = [string length];
++  NSCharacterSet *spaces = [NSCharacterSet whitespaceCharacterSet];
++
++  while (date != nil && parsed < length)
++    {
++      if (![spaces characterIsMember: [string characterAtIndex: parsed++]])
++	{
++	  date = nil;
++	}
++    }
++  return date;
 +}
 +
  - (NSString*) stringFromDate: (NSDate*)date
  {
    NSString	*result = nil;
-@@ -521,7 +680,38 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+@@ -521,7 +892,38 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
                    range: (inout NSRange*) range
                    error: (out NSError **) error
  {
@@ -427,7 +700,7 @@ index c3b8924..e5cbd16 100644
  }
  
  - (void) setDateFormat: (NSString*)string
-@@ -576,12 +766,12 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+@@ -576,12 +978,12 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
  
  - (NSDate*) defaultDate
  {
@@ -442,7 +715,7 @@ index c3b8924..e5cbd16 100644
  }
  
  - (NSLocale*) locale
-@@ -615,25 +805,13 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+@@ -615,25 +1017,13 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
  
  - (NSDate*) twoDigitStartDate
  {
@@ -471,7 +744,7 @@ index c3b8924..e5cbd16 100644
  }
  
  
-@@ -650,7 +828,16 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+@@ -650,7 +1040,16 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
  
  - (void) setAMSymbol: (NSString*) string
  {
@@ -489,7 +762,7 @@ index c3b8924..e5cbd16 100644
  }
  
  - (NSString*) PMSymbol
-@@ -666,7 +853,16 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+@@ -666,7 +1065,16 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
  
  - (void) setPMSymbol: (NSString*)string
  {
@@ -507,7 +780,7 @@ index c3b8924..e5cbd16 100644
  }
  
  - (NSArray*) weekdaySymbols
-@@ -761,12 +957,28 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+@@ -761,12 +1169,28 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
  
  - (NSDate*) gregorianStartDate
  {
@@ -538,7 +811,7 @@ index c3b8924..e5cbd16 100644
  }
  
  - (NSArray*) longEraSymbols
-@@ -971,7 +1183,7 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+@@ -971,7 +1395,7 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
  - (NSArray*) veryShortWeekdaySymbols
  {
  #if GS_USE_ICU == 1
@@ -547,7 +820,7 @@ index c3b8924..e5cbd16 100644
  #else
    return nil;
  #endif
-@@ -980,7 +1192,7 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+@@ -980,7 +1404,7 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
  - (void) setVeryShortWeekdaySymbols: (NSArray*)array
  {
  #if GS_USE_ICU == 1
@@ -556,7 +829,7 @@ index c3b8924..e5cbd16 100644
  #else
    return;
  #endif
-@@ -1062,6 +1274,18 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+@@ -1062,6 +1486,18 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
  - (void) setDoesRelativeDateFormatting: (BOOL)flag
  {
    internal->_relative = (flag ? YES : NO);
@@ -575,7 +848,7 @@ index c3b8924..e5cbd16 100644
  }
  @end
  
-@@ -1121,6 +1345,40 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
+@@ -1121,6 +1557,40 @@ static NSDateFormatterBehavior _defaultBehavior = 0;
    if (pat)
      free(pat);
    free(tzID);
@@ -616,7 +889,7 @@ index c3b8924..e5cbd16 100644
  #else
    return;
  #endif
-@@ -1133,6 +1391,7 @@ symbolRange(NSInteger symbol, int *from)
+@@ -1133,6 +1603,7 @@ symbolRange(NSInteger symbol, int *from)
    switch (symbol)
      {
        case UDAT_SHORT_WEEKDAYS:
@@ -624,7 +897,7 @@ index c3b8924..e5cbd16 100644
        case UDAT_STANDALONE_NARROW_WEEKDAYS:
        case UDAT_STANDALONE_SHORT_WEEKDAYS:
        case UDAT_STANDALONE_WEEKDAYS:
-@@ -1151,11 +1410,31 @@ symbolRange(NSInteger symbol, int *from)
+@@ -1151,11 +1622,31 @@ symbolRange(NSInteger symbol, int *from)
  
  - (void) _setSymbols: (NSArray*)array : (NSInteger)symbol
  {
@@ -656,7 +929,7 @@ index c3b8924..e5cbd16 100644
    if ([array count] == count - idx)
      {
        while (idx < count)
-@@ -1163,7 +1442,7 @@ symbolRange(NSInteger symbol, int *from)
+@@ -1163,7 +1654,7 @@ symbolRange(NSInteger symbol, int *from)
            int           length;
            UChar         *value;
            UErrorCode    err = U_ZERO_ERROR;
@@ -907,6 +1180,405 @@ index 0000000..e0ca01e
 +
 +  END_SET("NSDateFormatter settings")
 +
++  [arp release];
++  return 0;
++}
+diff --git a/Tests/base/NSDateFormatter/strictParsing.m b/Tests/base/NSDateFormatter/strictParsing.m
+new file mode 100644
+index 0000000..a7977dd
+--- /dev/null
++++ b/Tests/base/NSDateFormatter/strictParsing.m
+@@ -0,0 +1,393 @@
++#import <Foundation/Foundation.h>
++#import "Testing.h"
++#include <math.h>
++
++/* What macOS 15 gives for each format and string, en_US_POSIX in UTC:
++ * -dateFromString: and -getObjectValue:forString:range:error: (with the
++ * length of the range it leaves) with isLenient NO, then YES.  Dates are
++ * seconds since 1970; N where the string is refused.
++ */
++#define N NAN
++
++static struct {
++  NSString	*format;
++  NSString	*string;
++  double	strict;
++  double	strictPartial;
++  NSUInteger	strictLength;
++  double	lenient;
++  double	lenientPartial;
++  NSUInteger	lenientLength;
++} cases[] = {
++  {@"yyyy-MM-dd", @"1900-01-01",
++    -2208988800, -2208988800, 10, -2208988800, -2208988800, 10},
++  {@"yyyy-MM-dd", @"1900/01/01",
++    -2208988800, -2208988800, 10, -2208988800, -2208988800, 10},
++  {@"yyyy-MM-dd", @"1900.01.01",
++    -2208988800, -2208988800, 10, -2208988800, -2208988800, 10},
++  {@"yyyy-MM-dd", @"1900 01 01",
++    -2208988800, -2208988800, 10, -2208988800, -2208988800, 10},
++  {@"yyyy-MM-dd", @"1900-1-1",
++    -2208988800, -2208988800, 8, -2208988800, -2208988800, 8},
++  {@"yyyy-MM-dd", @"1900--01-01",
++    N, N, 0, -2214259200, -2214259200, 11},
++  {@"yyyy-MM-dd", @"1900-01-01x",
++    N, -2208988800, 10, N, -2208988800, 10},
++  {@"yyyy-MM-dd", @"1900-01-01 ",
++    -2208988800, -2208988800, 10, -2208988800, -2208988800, 10},
++  {@"yyyy-MM-dd", @" 1900-01-01",
++    -2208988800, -2208988800, 11, -2208988800, -2208988800, 11},
++  {@"yyyy-MM-dd", @"x1900-01-01",
++    N, N, 0, N, N, 0},
++  {@"yyyy-MM-dd", @"1900-01-01 10:30",
++    N, -2208988800, 10, N, -2208988800, 10},
++  {@"yyyy-MM-dd", @"1900-01",
++    N, N, 0, N, N, 0},
++  {@"yyyy-MM-dd", @"1900",
++    N, N, 0, N, N, 0},
++  {@"yyyy-MM-dd", @"19000101",
++    N, N, 0, N, N, 0},
++  {@"yyyy-MM-dd", @"1900-13-01",
++    N, N, 0, -2177452800, -2177452800, 10},
++  {@"yyyy-MM-dd", @"1900-02-30",
++    N, N, 0, -2203804800, -2203804800, 10},
++  {@"yyyy-MM-dd", @"1900-00-10",
++    N, N, 0, -2210889600, -2210889600, 10},
++  {@"yyyy-MM-dd", @"1900-01-32",
++    N, N, 0, -2206310400, -2206310400, 10},
++  {@"yyyy-MM-dd", @"00-01-01",
++    N, N, 0, -62167392000, -62167392000, 8},
++  {@"yyyy-MM-dd", @"49-01-01",
++    -60621004800, -60621004800, 8, -60621004800, -60621004800, 8},
++  {@"yyyy-MM-dd", @"51-01-01",
++    -60557932800, -60557932800, 8, -60557932800, -60557932800, 8},
++  {@"yyyy-MM-dd", @"1900-Jan-01",
++    -2208988800, -2208988800, 11, -2208988800, -2208988800, 11},
++  {@"yyyy-MM-dd", @"-1900-01-01",
++    N, N, 0, -122126832000, -122126832000, 11},
++  {@"yy-MM-dd", @"49-01-01",
++    2493072000, 2493072000, 8, 2493072000, 2493072000, 8},
++  {@"yy-MM-dd", @"51-01-01",
++    -599616000, -599616000, 8, -599616000, -599616000, 8},
++  {@"yy-MM-dd", @"1900-01-01",
++    -2208988800, -2208988800, 10, -2208988800, -2208988800, 10},
++  {@"yyyy/MM/dd", @"1900-01-01",
++    -2208988800, -2208988800, 10, -2208988800, -2208988800, 10},
++  {@"yyyy/MM/dd", @"1900/01/01",
++    -2208988800, -2208988800, 10, -2208988800, -2208988800, 10},
++  {@"yyyyMMdd", @"19000101",
++    -2208988800, -2208988800, 8, -2208988800, -2208988800, 8},
++  {@"yyyy-MMM-dd", @"1900-Jan-01",
++    -2208988800, -2208988800, 11, -2208988800, -2208988800, 11},
++  {@"yyyy-MMM-dd", @"1900-jan-01",
++    -2208988800, -2208988800, 11, -2208988800, -2208988800, 11},
++  {@"yyyy-MMM-dd", @"1900-January-01",
++    -2208988800, -2208988800, 15, -2208988800, -2208988800, 15},
++  {@"yyyy-MMM-dd", @"1900-01-01",
++    N, N, 0, -2208988800, -2208988800, 10},
++  {@"yyyy-MMMM-dd", @"1900-Jan-01",
++    -2208988800, -2208988800, 11, -2208988800, -2208988800, 11},
++  {@"yyyy-MMMM-dd", @"1900-January-01",
++    -2208988800, -2208988800, 15, -2208988800, -2208988800, 15},
++  {@"dd MMM yyyy", @"01 Jan 1900",
++    -2208988800, -2208988800, 11, -2208988800, -2208988800, 11},
++  {@"dd MMM yyyy", @"01  Jan  1900",
++    -2208988800, -2208988800, 13, -2208988800, -2208988800, 13},
++  {@"dd MMM yyyy", @"01-Jan-1900",
++    N, N, 0, -2208988800, -2208988800, 11},
++  {@"dd MMM yyyy", @"01Jan1900",
++    N, N, 0, -2208988800, -2208988800, 9},
++  {@"EEE, dd MMM yyyy", @"Mon, 01 Jan 1900",
++    -2208988800, -2208988800, 16, -2208988800, -2208988800, 16},
++  {@"EEE, dd MMM yyyy", @"Tue, 01 Jan 1900",
++    -2208988800, -2208988800, 16, -2208988800, -2208988800, 16},
++  {@"EEE, dd MMM yyyy", @"Mon 01 Jan 1900",
++    -2208988800, -2208988800, 15, -2208988800, -2208988800, 15},
++  {@"EEE, dd-MMM-yyyy HH:mm:ss zzz", @"Wed, 09 Jun 2100 10:18:14 GMT",
++    4116219494, 4116219494, 29, 4116219494, 4116219494, 29},
++  {@"EEE, dd-MMM-yyyy HH:mm:ss zzz", @"Wed, 09-Jun-2100 10:18:14 GMT",
++    4116219494, 4116219494, 29, 4116219494, 4116219494, 29},
++  {@"yyyy-MM-dd HH:mm", @"1900-01-01",
++    N, N, 0, N, N, 0},
++  {@"yyyy-MM-dd HH:mm", @"1900-01-01 10:30",
++    -2208951000, -2208951000, 16, -2208951000, -2208951000, 16},
++  {@"yyyy-MM-dd HH:mm", @"1900-01-01T10:30",
++    N, N, 0, N, N, 0},
++  {@"yyyy-MM-dd HH:mm", @"1900-01-0110:30",
++    N, N, 0, N, N, 0},
++  {@"yyyy-MM-dd HH:mm", @"1900-01-01  10:30",
++    -2208951000, -2208951000, 17, -2208951000, -2208951000, 17},
++  {@"yyyy-MM-dd HH:mm", @"1900-01-01 10.30",
++    -2208951000, -2208951000, 16, -2208951000, -2208951000, 16},
++  {@"yyyy-MM-dd HH:mm", @"1900-01-01 25:30",
++    N, N, 0, N, N, 0},
++  {@"yyyy-MM-dd HH:mm", @"1900-01-01 10:61",
++    N, N, 0, -2208949140, -2208949140, 16},
++  {@"yyyy-MM-dd HH:mm", @"1900-01-01 1:5",
++    -2208984900, -2208984900, 14, -2208984900, -2208984900, 14},
++  {@"yyyy-MM-dd'T'HH:mm", @"1900-01-01T10:30",
++    -2208951000, -2208951000, 16, -2208951000, -2208951000, 16},
++  {@"yyyy-MM-dd'T'HH:mm", @"1900-01-01 10:30",
++    N, N, 0, -2208951000, -2208951000, 16},
++  {@"yyyy-MM-dd'T'HH:mm", @"1900-01-01t10:30",
++    N, N, 0, N, N, 0},
++  {@"yyyy-MM-dd'T'HH:mm", @"1900-01-01X10:30",
++    N, N, 0, N, N, 0},
++  {@"yyyy-MM-dd'at'HH:mm", @"1900-01-01at10:30",
++    -2208951000, -2208951000, 17, -2208951000, -2208951000, 17},
++  {@"yyyy-MM-dd'at'HH:mm", @"1900-01-01a10:30",
++    N, N, 0, -2208951000, -2208951000, 16},
++  {@"yyyy-MM-dd'at'HH:mm", @"1900-01-01 10:30",
++    N, N, 0, -2208951000, -2208951000, 16},
++  {@"yyyy-MM-dd HH:mm:ss", @"1900-01-01 10:30",
++    N, N, 0, N, N, 0},
++  {@"yyyy-MM-dd HH:mm:ss Z", @"1900-01-01 10:30:00 +0300",
++    -2208961800, -2208961800, 25, -2208961800, -2208961800, 25},
++  {@"yyyy-MM-dd HH:mm:ss Z", @"1900-01-01 10:30:00 +03:00",
++    -2208961800, -2208961800, 26, -2208961800, -2208961800, 26},
++  {@"yyyy-MM-dd HH:mm:ss Z", @"1900-01-01 10:30:00 GMT+3",
++    -2208961800, -2208961800, 25, -2208961800, -2208961800, 25},
++  {@"yyyy-MM-dd HH:mm:ss Z", @"1900-01-01 10:30:00 Z",
++    -2208951000, -2208951000, 21, -2208951000, -2208951000, 21},
++  {@"yyyy-MM-dd HH:mm:ss Z", @"1900-01-01 10:30:00",
++    N, N, 0, N, N, 0},
++  {@"yyyy-MM-dd HH:mm:ss zzz", @"2000-01-01 10:30:00 PST",
++    946751400, 946751400, 23, 946751400, 946751400, 23},
++  {@"yyyy-MM-dd HH:mm:ss zzz", @"2000-01-01 10:30:00 GMT+03:00",
++    946711800, 946711800, 29, 946711800, 946711800, 29},
++  {@"yyyy-MM-dd HH:mm:ss xxx", @"2000-01-01 10:30:00 +03:00",
++    946711800, 946711800, 26, 946711800, 946711800, 26},
++  {@"yyyy-MM-dd HH:mm:ss xxx", @"2000-01-01 10:30:00 +0300",
++    946711800, 946711800, 25, 946711800, 946711800, 25},
++  {@"yyyy-MM-dd HH:mm:ss xxx", @"2000-01-01 10:30:00 Z",
++    946722600, 946722600, 21, 946722600, 946722600, 21},
++  {@"yyyy-MM-dd HH:mm:ss XXX", @"2000-01-01 10:30:00 Z",
++    946722600, 946722600, 21, 946722600, 946722600, 21},
++  {@"hh:mm a", @"10:30 PM",
++    946765800, 946765800, 8, 946765800, 946765800, 8},
++  {@"hh:mm a", @"10:30 pm",
++    946765800, 946765800, 8, 946765800, 946765800, 8},
++  {@"hh:mm a", @"10:30PM",
++    N, N, 0, 946765800, 946765800, 7},
++  {@"hh:mm a", @"13:30 PM",
++    N, N, 0, 946776600, 946776600, 8},
++  {@"hh:mm a", @"10:30",
++    N, N, 0, N, N, 0},
++  {@"HH:mm", @"10:30",
++    946722600, 946722600, 5, 946722600, 946722600, 5},
++  {@"HH:mm", @"10:30 junk",
++    N, 946722600, 5, N, 946722600, 5},
++  {@"HH:mm", @"24:00",
++    N, N, 0, 946771200, 946771200, 5},
++  {@"d/M/y", @"1/1/1900",
++    -2208988800, -2208988800, 8, -2208988800, -2208988800, 8},
++  {@"d/M/y", @"01/01/1900",
++    -2208988800, -2208988800, 10, -2208988800, -2208988800, 10},
++  {@"d/M/y", @"1-1-1900",
++    -2208988800, -2208988800, 8, -2208988800, -2208988800, 8},
++  {@"d/M/y", @"1/1/00",
++    946684800, 946684800, 6, 946684800, 946684800, 6},
++  {@"MM/dd/yyyy", @"1/1/1900",
++    -2208988800, -2208988800, 8, -2208988800, -2208988800, 8},
++  {@"MM/dd/yyyy", @"01/01/1900",
++    -2208988800, -2208988800, 10, -2208988800, -2208988800, 10},
++  {@"MM/dd/yyyy", @"001/01/1900",
++    -2208988800, -2208988800, 11, -2208988800, -2208988800, 11},
++  {@"yyyy-MM-dd", @"\u0661\u0669\u0660\u0660-01-01",
++    -2208988800, -2208988800, 10, -2208988800, -2208988800, 10},
++  {@"yyyy-MM-dd", @"\uFF11\uFF19\uFF10\uFF10-01-01",
++    -2208988800, -2208988800, 10, -2208988800, -2208988800, 10},
++  {@"yyyy-MM-dd", @"1900\u201301\u201301",
++    N, N, 0, -2214432000, -2214432000, 10},
++  {@"yyyy-MM-dd", @"1900\u00A001\u00A001",
++    -2208988800, -2208988800, 10, -2208988800, -2208988800, 10},
++  {@"yyyy-MM-dd", @"1900:01:01",
++    N, N, 0, N, N, 0},
++  {@"yyyy-MM-dd", @"1900a01a01",
++    N, N, 0, N, N, 0},
++  {@"yyyy-MM-dd", @"1900,01,01",
++    -2208988800, -2208988800, 10, -2208988800, -2208988800, 10},
++  {@"yyyy, MM, dd", @"1900,01,01",
++    N, N, 0, -2208988800, -2208988800, 10},
++  {@"yyyy, MM, dd", @"1900 01 01",
++    -2208988800, -2208988800, 10, -2208988800, -2208988800, 10},
++  {@"yyyy MM dd", @"1900-01-01",
++    N, N, 0, -2208988800, -2208988800, 10},
++  {@"yyyy MM dd", @"19000101",
++    N, N, 0, N, N, 0},
++  {@"yyyy MM dd", @"1900  01  01",
++    -2208988800, -2208988800, 12, -2208988800, -2208988800, 12},
++  {@"yyyy-MM-dd", @"1900-01-01\n",
++    N, -2208988800, 10, N, -2208988800, 10},
++  {@"yyyy-MM-dd", @"",
++    N, N, 0, N, N, 0},
++  {@"yyyy-MM-dd", @"1900-01-01\t",
++    -2208988800, -2208988800, 10, -2208988800, -2208988800, 10},
++  {@"yyyy-MM-dd", @"1900-01-01  ",
++    -2208988800, -2208988800, 10, -2208988800, -2208988800, 10},
++  {@"yyyy-MM-dd", @"1900-01-01\u00A0",
++    -2208988800, -2208988800, 10, -2208988800, -2208988800, 10},
++  {@"yyyy-MM-dd", @"\n1900-01-01",
++    -2208988800, -2208988800, 11, -2208988800, -2208988800, 11},
++  {@"yyyy-MM-dd", @"\t1900-01-01",
++    -2208988800, -2208988800, 11, -2208988800, -2208988800, 11},
++  {@"yyyy-MM-dd", @"1900-01-01.",
++    N, -2208988800, 10, N, -2208988800, 10},
++  {@"yyyy-MM-dd", @"1900-01-01-",
++    N, -2208988800, 10, N, -2208988800, 10},
++  {@"yyyy-MM-dd", @"1900 -01-01",
++    -2208988800, -2208988800, 11, -2208988800, -2208988800, 11},
++  {@"yyyy-MM-dd", @"1900- 01 -01",
++    -2208988800, -2208988800, 12, -2208988800, -2208988800, 12},
++  {@"yyyy-MM-dd", @"1900-01- 1",
++    -2208988800, -2208988800, 10, -2208988800, -2208988800, 10},
++  {@"yyyy-MM-dd", @"1900-001-01",
++    -2208988800, -2208988800, 11, -2208988800, -2208988800, 11},
++  {@"yyyy-MM-dd", @"01900-01-01",
++    -2208988800, -2208988800, 11, -2208988800, -2208988800, 11},
++  {@"yyyy-MM-dd", @"1900-01-1x",
++    N, -2208988800, 9, N, -2208988800, 9},
++  {@"yyyy-MM-dd", @"1900/1/1",
++    -2208988800, -2208988800, 8, -2208988800, -2208988800, 8},
++  {@"yyyy-MM-dd", @"1900.1.1",
++    -2208988800, -2208988800, 8, -2208988800, -2208988800, 8},
++  {@"yyyy-MM-dd", @"1900-01/01",
++    -2208988800, -2208988800, 10, -2208988800, -2208988800, 10},
++  {@"yyyy-MM-dd", @"1900-01-01T00:00",
++    N, -2208988800, 10, N, -2208988800, 10},
++  {@"yyyy-MM-dd", @"1900-02-29",
++    N, N, 0, -2203891200, -2203891200, 10},
++  {@"yyyy-MM-dd", @"2000-02-29",
++    951782400, 951782400, 10, 951782400, 951782400, 10},
++  {@"yyyy-MM-dd", @"1900-12-31",
++    -2177539200, -2177539200, 10, -2177539200, -2177539200, 10},
++  {@"dd.MM.yyyy", @"01.01.1900",
++    -2208988800, -2208988800, 10, -2208988800, -2208988800, 10},
++  {@"dd.MM.yyyy", @"01/01/1900",
++    -2208988800, -2208988800, 10, -2208988800, -2208988800, 10},
++  {@"dd.MM.yyyy", @"01-01-1900",
++    -2208988800, -2208988800, 10, -2208988800, -2208988800, 10},
++  {@"dd.MM.yyyy", @"01 01 1900",
++    -2208988800, -2208988800, 10, -2208988800, -2208988800, 10},
++  {@"dd.MM.yyyy", @"01:01:1900",
++    N, N, 0, N, N, 0},
++  {@"HH:mm:ss", @"10:30:00",
++    946722600, 946722600, 8, 946722600, 946722600, 8},
++  {@"HH:mm:ss", @"10.30.00",
++    946722600, 946722600, 8, 946722600, 946722600, 8},
++  {@"HH:mm:ss", @"10-30-00",
++    946722600, 946722600, 8, 946722600, 946722600, 8},
++  {@"HH:mm:ss", @"10 30 00",
++    946722600, 946722600, 8, 946722600, 946722600, 8},
++  {@"HH:mm:ss", @"10/30/00",
++    N, N, 0, N, N, 0},
++  {@"HH:mm:ss", @"10:30",
++    N, N, 0, N, N, 0},
++  {@"HH:mm", @"10",
++    N, N, 0, N, N, 0},
++  {@"MMMM d, yyyy", @"January 1, 1900",
++    -2208988800, -2208988800, 15, -2208988800, -2208988800, 15},
++  {@"MMMM d, yyyy", @"January 1 1900",
++    -2208988800, -2208988800, 14, -2208988800, -2208988800, 14},
++  {@"MMMM d, yyyy", @"Jan 1, 1900",
++    -2208988800, -2208988800, 11, -2208988800, -2208988800, 11},
++  {@"MMMM d, yyyy", @"1 1, 1900",
++    N, N, 0, -2208988800, -2208988800, 9},
++  {@"MMMM d, yyyy", @"January 1,1900",
++    N, N, 0, -2208988800, -2208988800, 14},
++  {@"MMMM d, yyyy", @"January  1, 1900",
++    -2208988800, -2208988800, 16, -2208988800, -2208988800, 16},
++  {@"yyyy-MM-dd", @"+1900-01-01",
++    N, N, 0, N, N, 0},
++  {@"yyyy-MM-dd", @"1900-+01-01",
++    N, N, 0, N, N, 0},
++  {@"yyyy-MM-dd", @"1900-01-01Z",
++    N, -2208988800, 10, N, -2208988800, 10},
++  {@"yyyy-MM-dd HH:mm:ss Z", @"1900-01-01 10:30:00+0300",
++    N, N, 0, -2208961800, -2208961800, 24},
++  {@"yyyy-MM-dd HH:mm:ss Z", @"1900-01-01 10:30:00 UTC",
++    -2208951000, -2208951000, 23, -2208951000, -2208951000, 23},
++  {@"yyyy-MM-dd HH:mm:ss Z", @"1900-01-01 10:30:00 +3",
++    -2208961800, -2208961800, 22, -2208961800, -2208961800, 22},
++  {@"yyyy-MM-dd HH:mm:ss VV", @"2000-01-01 10:30:00 Europe/Moscow",
++    946711800, 946711800, 33, 946711800, 946711800, 33},
++  {@"yyyy-MM-dd HH:mm:ss zzzz", @"2000-01-01 10:30:00 Pacific Standard Time",
++    946751400, 946751400, 41, 946751400, 946751400, 41},
++  {@"yyyy", @"1900",
++    -2208988800, -2208988800, 4, -2208988800, -2208988800, 4},
++  {@"yyyy", @"19000",
++    537414912000, 537414912000, 5, 537414912000, 537414912000, 5},
++  {@"yyyy", @"190",
++    -56171404800, -56171404800, 3, -56171404800, -56171404800, 3},
++  {@"y", @"1900",
++    -2208988800, -2208988800, 4, -2208988800, -2208988800, 4},
++  {@"y", @"00",
++    946684800, 946684800, 2, 946684800, 946684800, 2},
++  {@"y", @"49",
++    2493072000, 2493072000, 2, 2493072000, 2493072000, 2},
++  {@"yy", @"1900",
++    -2208988800, -2208988800, 4, -2208988800, -2208988800, 4},
++  {@"yy", @"5",
++    -62009539200, -62009539200, 1, -62009539200, -62009539200, 1},
++  {@"yy", @"100",
++    -59011632000, -59011632000, 3, -59011632000, -59011632000, 3},
++  {@"MM", @"13",
++    N, N, 0, 978307200, 978307200, 2},
++  {@"MM", @"1",
++    946684800, 946684800, 1, 946684800, 946684800, 1},
++  {@"dd", @"31",
++    949276800, 949276800, 2, 949276800, 949276800, 2},
++};
++
++static BOOL
++same(NSDate *d, double expected)
++{
++  if (isnan(expected))
++    {
++      return d == nil;
++    }
++  return d != nil && [d timeIntervalSince1970] == expected;
++}
++
++int main()
++{
++  NSAutoreleasePool	*arp = [NSAutoreleasePool new];
++  NSLocale		*posix;
++  NSUInteger		i;
++
++  posix = [[[NSLocale alloc] initWithLocaleIdentifier: @"en_US_POSIX"]
++    autorelease];
++  for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
++    {
++      int	lenient;
++
++      for (lenient = 0; lenient < 2; lenient++)
++	{
++	  NSDateFormatter	*f = [[NSDateFormatter new] autorelease];
++	  NSString		*s = cases[i].string;
++	  double		whole;
++	  double		partial;
++	  NSUInteger		length;
++	  NSRange		r = NSMakeRange(0, [s length]);
++	  id			v = nil;
++	  BOOL			ok;
++
++	  [f setLocale: posix];
++	  [f setTimeZone: [NSTimeZone timeZoneForSecondsFromGMT: 0]];
++	  [f setDateFormat: cases[i].format];
++	  [f setLenient: lenient ? YES : NO];
++	  whole = lenient ? cases[i].lenient : cases[i].strict;
++	  partial = lenient ? cases[i].lenientPartial : cases[i].strictPartial;
++	  length = lenient ? cases[i].lenientLength : cases[i].strictLength;
++	  ok = [f getObjectValue: &v forString: s range: &r error: NULL];
++	  PASS(same([f dateFromString: s], whole)
++	    && ok == !isnan(partial) && same(v, partial)
++	    && (!ok || r.length == length),
++	    "%s \"%s\" with \"%s\" is as on macOS",
++	    lenient ? "lenient" : "strict", [s UTF8String],
++	    [cases[i].format UTF8String])
++	}
++    }
 +  [arp release];
 +  return 0;
 +}
