@@ -1,0 +1,608 @@
+From a1bea336f7d8f5ca82276533913496bac4d33e7c Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Mon, 19 Oct 2026 16:49:44 +0000
+Subject: [PATCH] Answer selection markers from a controller's selection
+
+NSObjectController's -selection answered its content, and
+NSArrayController's the selected object when exactly one was selected and
+nil otherwise. So selection.<key> was nil with nothing selected and with
+several objects selected, and a control bound through it showed an empty
+value, enabled, where AppKit shows its "No Selection" or "Multiple Values"
+placeholder; the binding code here already handles the markers, but never
+received one.
+
+On macOS -selection answers a proxy whose -valueForKey: is the selected
+objects' value when they agree on it, NSMultipleValuesMarker when they do
+not (or always for several, with alwaysUsesMultipleValuesMarker), and
+NSNoSelectionMarker when nothing is selected; setting a value through it
+sets it on every selected object; and observers of selection.<key> are
+told when that value changes, whether the selection changes or a selected
+object's value does (checked on macOS 15). -selection now answers such a
+proxy, one per controller, for both classes. It registers observations
+made through it on the objects selected at the time; the key-value
+observing in gnustep-base hands an object that implements
+-addObserver:forKeyPath:options:context: the rest of a key path, and moves
+the observation to the new selection whenever selection changes.
+
+A key the selected objects do not have answers NSNotApplicableMarker,
+which the binding code turns into its placeholder, or an exception when
+the binding asks for NSRaisesForNotApplicableKeys. On macOS the proxy
+itself raises and the binding substitutes the marker; here the binding
+reads its new value from the change dictionary, which key-value observing
+fills by asking the proxy, so the proxy answers the marker.
+
+Tests/gui/NSObjectController/selectionMarkers.m covers each marker, values
+set through the selection, and the notifications; eleven of its seventeen
+checks fail without the change. Tests/gui/NSArrayController/selectionKVO.m
+checked that -selection was the selected object itself and nil for no
+selection; it now checks what AppKit gives instead.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/GNUmakefile                            |   1 +
+ Source/GSControllerSelectionProxy.h           |  42 +++
+ Source/GSControllerSelectionProxy.m           | 246 ++++++++++++++++++
+ Source/NSArrayController.m                    |  11 -
+ Source/NSObjectController.m                   |   5 +-
+ Tests/gui/NSArrayController/selectionKVO.m    |  19 +-
+ .../gui/NSObjectController/selectionMarkers.m | 134 ++++++++++
+ 7 files changed, 437 insertions(+), 21 deletions(-)
+ create mode 100644 Source/GSControllerSelectionProxy.h
+ create mode 100644 Source/GSControllerSelectionProxy.m
+ create mode 100644 Tests/gui/NSObjectController/selectionMarkers.m
+
+diff --git a/Source/GNUmakefile b/Source/GNUmakefile
+index c7f67a752..da8f7a669 100644
+--- a/Source/GNUmakefile
++++ b/Source/GNUmakefile
+@@ -309,6 +309,7 @@ NSWindowController.m \
+ NSWorkspace.m \
+ GSAnimator.m \
+ GSAutocompleteWindow.m \
++GSControllerSelectionProxy.m \
+ GSControllerTreeProxy.m \
+ GSDisplayServer.m \
+ GSHelpManagerPanel.m \
+diff --git a/Source/GSControllerSelectionProxy.h b/Source/GSControllerSelectionProxy.h
+new file mode 100644
+index 000000000..a0fb1e949
+--- /dev/null
++++ b/Source/GSControllerSelectionProxy.h
+@@ -0,0 +1,42 @@
++/* Definition of class GSControllerSelectionProxy
++   Copyright (C) 2026 Free Software Foundation, Inc.
++
++   This file is part of the GNUstep GUI Library.
++
++   This library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   This library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with this library; if not, write to the Free
++   Software Foundation, Inc., 51 Franklin Street, Fifth Floor,
++   Boston, MA 02110 USA.
++*/
++
++#ifndef _GSControllerSelectionProxy_h_GNUSTEP_GUI_INCLUDE
++#define _GSControllerSelectionProxy_h_GNUSTEP_GUI_INCLUDE
++
++#import <Foundation/NSObject.h>
++
++@class NSMutableArray;
++@class NSObjectController;
++
++/* What a controller's -selection answers: the selected objects' common
++   value for a key, or a marker when there is none. */
++@interface GSControllerSelectionProxy : NSObject
++{
++  NSObjectController *_controller;
++  NSMutableArray *_observations;
++}
+++ (id) proxyForController: (NSObjectController *)controller;
+++ (void) forgetController: (NSObjectController *)controller;
++- (id) initWithController: (NSObjectController *)controller;
++@end
++
++#endif /* _GSControllerSelectionProxy_h_GNUSTEP_GUI_INCLUDE */
+diff --git a/Source/GSControllerSelectionProxy.m b/Source/GSControllerSelectionProxy.m
+new file mode 100644
+index 000000000..7c3f96caa
+--- /dev/null
++++ b/Source/GSControllerSelectionProxy.m
+@@ -0,0 +1,246 @@
++/* Implementation of class GSControllerSelectionProxy
++   Copyright (C) 2026 Free Software Foundation, Inc.
++
++   This file is part of the GNUstep GUI Library.
++
++   This library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   This library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with this library; if not, write to the Free
++   Software Foundation, Inc., 51 Franklin Street, Fifth Floor,
++   Boston, MA 02110 USA.
++*/
++
++#import <Foundation/NSArray.h>
++#import <Foundation/NSDictionary.h>
++#import <Foundation/NSEnumerator.h>
++#import <Foundation/NSException.h>
++#import <Foundation/NSKeyValueCoding.h>
++#import <Foundation/NSKeyValueObserving.h>
++#import <Foundation/NSMapTable.h>
++#import <Foundation/NSString.h>
++#import <Foundation/NSValue.h>
++#import "AppKit/NSArrayController.h"
++#import "AppKit/NSKeyValueBinding.h"
++#import "AppKit/NSObjectController.h"
++#import "GSControllerSelectionProxy.h"
++
++/* An observation of the selection through -selection, for the objects
++   that were selected when it was made. */
++@interface GSSelectionObservation : NSObject
++{
++@public
++  NSObject *observer;
++  NSString *keyPath;
++  void *context;
++  NSArray *objects;
++}
++@end
++
++@implementation GSSelectionObservation
++- (void) dealloc
++{
++  RELEASE(keyPath);
++  RELEASE(objects);
++  [super dealloc];
++}
++@end
++
++static NSMapTable *proxies = NULL;
++
++@implementation GSControllerSelectionProxy
++
+++ (id) proxyForController: (NSObjectController *)controller
++{
++  GSControllerSelectionProxy *proxy;
++
++  if (proxies == NULL)
++    {
++      proxies = NSCreateMapTable(NSNonOwnedPointerMapKeyCallBacks,
++	NSObjectMapValueCallBacks, 0);
++    }
++  proxy = NSMapGet(proxies, controller);
++  if (proxy == nil)
++    {
++      proxy = [[self alloc] initWithController: controller];
++      NSMapInsert(proxies, controller, proxy);
++      RELEASE(proxy);
++    }
++  return proxy;
++}
++
+++ (void) forgetController: (NSObjectController *)controller
++{
++  if (proxies != NULL)
++    {
++      NSMapRemove(proxies, controller);
++    }
++}
++
++- (id) initWithController: (NSObjectController *)controller
++{
++  if ((self = [super init]) != nil)
++    {
++      _controller = controller;
++      _observations = [[NSMutableArray alloc] init];
++    }
++  return self;
++}
++
++- (void) dealloc
++{
++  RELEASE(_observations);
++  [super dealloc];
++}
++
++- (id) _valueForKeyPath: (NSString *)keyPath
++{
++  NSArray *objects = [_controller selectedObjects];
++  NSUInteger count = [objects count];
++  NSUInteger i;
++  id value = nil;
++
++  if (count == 0)
++    {
++      return NSNoSelectionMarker;
++    }
++  if (count > 1 && [_controller isKindOfClass: [NSArrayController class]]
++    && [(NSArrayController *)_controller alwaysUsesMultipleValuesMarker])
++    {
++      return NSMultipleValuesMarker;
++    }
++  NS_DURING
++    {
++      value = [[objects objectAtIndex: 0] valueForKeyPath: keyPath];
++      for (i = 1; i < count && value != NSMultipleValuesMarker; i++)
++	{
++	  id other = [[objects objectAtIndex: i] valueForKeyPath: keyPath];
++
++	  if (other != value && [other isEqual: value] == NO)
++	    {
++	      value = NSMultipleValuesMarker;
++	    }
++	}
++    }
++  NS_HANDLER
++    {
++      if ([[localException name] isEqualToString: NSUndefinedKeyException])
++	{
++	  value = NSNotApplicableMarker;
++	}
++      else
++	{
++	  [localException raise];
++	}
++    }
++  NS_ENDHANDLER
++  return value;
++}
++
++- (id) valueForKey: (NSString *)key
++{
++  return [self _valueForKeyPath: key];
++}
++
++- (id) valueForKeyPath: (NSString *)keyPath
++{
++  return [self _valueForKeyPath: keyPath];
++}
++
++- (void) setValue: (id)value forKey: (NSString *)key
++{
++  [self setValue: value forKeyPath: key];
++}
++
++- (void) setValue: (id)value forKeyPath: (NSString *)keyPath
++{
++  NSEnumerator *e = [[_controller selectedObjects] objectEnumerator];
++  id object;
++
++  while ((object = [e nextObject]) != nil)
++    {
++      [object setValue: value forKeyPath: keyPath];
++    }
++}
++
++- (void) addObserver: (NSObject *)observer
++	  forKeyPath: (NSString *)keyPath
++	     options: (NSKeyValueObservingOptions)options
++	     context: (void *)context
++{
++  GSSelectionObservation *observation = [GSSelectionObservation new];
++  NSEnumerator *e;
++  id object;
++
++  observation->observer = observer;
++  observation->keyPath = [keyPath copy];
++  observation->context = context;
++  observation->objects = RETAIN([_controller selectedObjects]);
++  [_observations addObject: observation];
++  RELEASE(observation);
++  e = [observation->objects objectEnumerator];
++  while ((object = [e nextObject]) != nil)
++    {
++      [object addObserver: self
++	       forKeyPath: keyPath
++		  options: 0
++		  context: observation];
++    }
++}
++
++- (void) removeObserver: (NSObject *)observer
++	     forKeyPath: (NSString *)keyPath
++{
++  NSUInteger i = [_observations count];
++
++  while (i-- > 0)
++    {
++      GSSelectionObservation *observation = [_observations objectAtIndex: i];
++
++      if (observation->observer == observer
++	&& [observation->keyPath isEqualToString: keyPath])
++	{
++	  NSEnumerator *e = [observation->objects objectEnumerator];
++	  id object;
++
++	  while ((object = [e nextObject]) != nil)
++	    {
++	      [object removeObserver: self forKeyPath: keyPath];
++	    }
++	  [_observations removeObjectAtIndex: i];
++	  return;
++	}
++    }
++}
++
++- (void) observeValueForKeyPath: (NSString *)keyPath
++		       ofObject: (id)object
++			 change: (NSDictionary *)change
++			context: (void *)context
++{
++  GSSelectionObservation *observation = context;
++  NSDictionary *setting;
++
++  if ([_observations indexOfObjectIdenticalTo: observation] == NSNotFound)
++    {
++      return;
++    }
++  setting = [NSDictionary dictionaryWithObject:
++    [NSNumber numberWithInt: NSKeyValueChangeSetting]
++					forKey: NSKeyValueChangeKindKey];
++  [observation->observer observeValueForKeyPath: observation->keyPath
++				       ofObject: self
++					 change: setting
++					context: observation->context];
++}
++
++@end
++
+diff --git a/Source/NSArrayController.m b/Source/NSArrayController.m
+index 682b4a387..7876ed91e 100644
+--- a/Source/NSArrayController.m
++++ b/Source/NSArrayController.m
+@@ -431,17 +431,6 @@
+     NSContentBinding, nil];
+ }
+ 
+-- (id) selection
+-{
+-  NSArray *selected = [self selectedObjects];
+-
+-  if ([selected count] == 1)
+-    {
+-      return [selected objectAtIndex: 0];
+-    }
+-  return nil;
+-}
+-
+ - (NSUInteger) selectionIndex
+ {
+   return [_selection_indexes firstIndex];
+diff --git a/Source/NSObjectController.m b/Source/NSObjectController.m
+index 71f00d785..77145b47a 100644
+--- a/Source/NSObjectController.m
++++ b/Source/NSObjectController.m
+@@ -31,6 +31,7 @@
+ #import <Foundation/NSPredicate.h>
+ #import <Foundation/NSString.h>
+ #import <Foundation/NSArchiver.h>
++#import "GSControllerSelectionProxy.h"
+ #import <Foundation/NSKeyedArchiver.h>
+ #import <Foundation/NSKeyValueObserving.h>
+ #import <Foundation/NSKeyValueCoding.h>
+@@ -134,6 +135,7 @@
+ - (void) dealloc
+ {
+   [GSKeyValueBinding unbindAllForObject: self];
++  [GSControllerSelectionProxy forgetController: self];
+   RELEASE(_content);
+   RELEASE(_entity_name_key);
+   RELEASE(_fetch_predicate);
+@@ -363,8 +365,7 @@
+ 
+ - (id) selection
+ {
+-  // TODO
+-  return _content;
++  return [GSControllerSelectionProxy proxyForController: self];
+ }
+ 
+ 
+diff --git a/Tests/gui/NSArrayController/selectionKVO.m b/Tests/gui/NSArrayController/selectionKVO.m
+index 74952f703..3fd8223ab 100644
+--- a/Tests/gui/NSArrayController/selectionKVO.m
++++ b/Tests/gui/NSArrayController/selectionKVO.m
+@@ -4,9 +4,9 @@
+    canRemove, canSelectNext and canSelectPrevious - are all derived from it, so
+    observers of those keys have to hear about the change or a Remove button
+    bound to canRemove stays grey and a field bound through selection.<key>
+-   keeps showing the old row.  -selection itself answers the selected object
+-   when exactly one row is selected, rather than the whole content array, which
+-   is what makes selection.<key> read that row's value.  NSArrayController
++   keeps showing the old row.  -selection answers for the selected object
++   when exactly one row is selected, rather than for the whole content array,
++   which is what makes selection.<key> read that row's value.  NSArrayController
+    needs no display, but the set keeps the usual backend skip guard. */
+ #include "Testing.h"
+ 
+@@ -20,6 +20,7 @@
+ 
+ #include <AppKit/NSApplication.h>
+ #include <AppKit/NSArrayController.h>
++#include <AppKit/NSKeyValueBinding.h>
+ 
+ static NSMutableSet *fired;
+ 
+@@ -105,15 +106,17 @@ main(int argc, const char **argv)
+           [ac removeObserver: observer forKeyPath: key];
+         }
+ 
+-      /* One row selected: selection is that row, not the content array. */
+-      PASS([ac selection] == grace,
+-        "selection answers the single selected object");
++      /* One row selected: selection answers for that row, not the content
++         array. */
++      PASS([[[ac selection] valueForKey: @"name"] isEqual: @"Grace"],
++        "selection answers for the single selected object");
+       PASS([[ac valueForKeyPath: @"selection.name"] isEqual: @"Grace"],
+         "selection.<key> reads the selected object's value");
+ 
+-      /* Nothing selected: nothing to answer with. */
++      /* Nothing selected: the marker for it. */
+       [ac setSelectionIndexes: [NSIndexSet indexSet]];
+-      PASS([ac selection] == nil, "an empty selection answers nil");
++      PASS([ac valueForKeyPath: @"selection.name"] == NSNoSelectionMarker,
++        "an empty selection answers the no-selection marker");
+     }
+   NS_HANDLER
+     if ([[localException name] isEqualToString: NSInternalInconsistencyException]
+diff --git a/Tests/gui/NSObjectController/selectionMarkers.m b/Tests/gui/NSObjectController/selectionMarkers.m
+new file mode 100644
+index 000000000..bb2c47ff7
+--- /dev/null
++++ b/Tests/gui/NSObjectController/selectionMarkers.m
+@@ -0,0 +1,134 @@
++/* A controller's selection answers for the selected objects as AppKit's
++   does: the marker for no selection when nothing is selected, the
++   selected objects' value when they agree on it, the marker for multiple
++   values when they do not (or always, with alwaysUsesMultipleValuesMarker),
++   and the marker for not applicable when the key is not theirs.  Observers
++   of selection.<key> hear when that value changes, whether the selection
++   changes or a selected object does. */
++#include "Testing.h"
++
++#include <Foundation/NSArray.h>
++#include <Foundation/NSAutoreleasePool.h>
++#include <Foundation/NSDictionary.h>
++#include <Foundation/NSIndexSet.h>
++#include <Foundation/NSKeyValueObserving.h>
++#include <Foundation/NSString.h>
++
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSArrayController.h>
++#include <AppKit/NSKeyValueBinding.h>
++#include <AppKit/NSObjectController.h>
++
++@interface SelectionReader : NSObject
++{
++@public
++  int	count;
++  id	last;
++}
++@end
++
++@implementation SelectionReader
++- (void) observeValueForKeyPath: (NSString *)keyPath
++                       ofObject: (id)object
++                         change: (NSDictionary *)change
++                        context: (void *)context
++{
++  count++;
++  last = [object valueForKeyPath: keyPath];
++}
++@end
++
++static NSMutableDictionary *
++person(NSString *name, NSString *city)
++{
++  return [NSMutableDictionary dictionaryWithObjectsAndKeys:
++    name, @"name", city, @"city", nil];
++}
++
++int
++main(int argc, const char **argv)
++{
++  SelectionReader	*reader;
++  NSArrayController	*ac;
++  NSObjectController	*oc;
++  NSMutableDictionary	*ada;
++  NSMutableDictionary	*bob;
++  NSIndexSet		*both;
++  int			before;
++
++  START_SET("NSObjectController selection markers")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  ada = person(@"Ada", @"London");
++  bob = person(@"Bob", @"London");
++  both = [NSIndexSet indexSetWithIndexesInRange: NSMakeRange(0, 2)];
++  ac = AUTORELEASE([[NSArrayController alloc] init]);
++  [ac setContent: [NSMutableArray arrayWithObjects: ada, bob, nil]];
++  reader = AUTORELEASE([[SelectionReader alloc] init]);
++  [ac addObserver: reader forKeyPath: @"selection.name"
++	  options: NSKeyValueObservingOptionNew context: NULL];
++
++  [ac setSelectionIndexes: [NSIndexSet indexSet]];
++  PASS([ac selection] != nil, "-selection answers something with no selection")
++  PASS([ac valueForKeyPath: @"selection.name"] == NSNoSelectionMarker,
++    "nothing selected answers the no-selection marker")
++  PASS(reader->last == NSNoSelectionMarker,
++    "observers hear that nothing is selected")
++
++  [ac setSelectionIndexes: [NSIndexSet indexSetWithIndex: 0]];
++  PASS_EQUAL([ac valueForKeyPath: @"selection.name"], @"Ada",
++    "one object selected answers its value")
++  PASS_EQUAL(reader->last, @"Ada", "observers hear the selected value")
++  before = reader->count;
++  [ada setObject: @"Ada L" forKey: @"name"];
++  PASS(reader->count == before + 1,
++    "observers hear when the selected object's value changes")
++  PASS_EQUAL(reader->last, @"Ada L", "and read its new value")
++  [bob setObject: @"Bobby" forKey: @"name"];
++  PASS(reader->count == before + 1,
++    "observers do not hear of objects that are not selected")
++
++  [ac setSelectionIndexes: both];
++  PASS([ac valueForKeyPath: @"selection.name"] == NSMultipleValuesMarker,
++    "objects with different values answer the multiple-values marker")
++  PASS(reader->last == NSMultipleValuesMarker,
++    "observers hear of multiple values")
++  PASS_EQUAL([ac valueForKeyPath: @"selection.city"], @"London",
++    "objects agreeing on a value answer it")
++  [ac setAlwaysUsesMultipleValuesMarker: YES];
++  PASS([ac valueForKeyPath: @"selection.city"] == NSMultipleValuesMarker,
++    "alwaysUsesMultipleValuesMarker answers the marker for any selection of several")
++  [ac setAlwaysUsesMultipleValuesMarker: NO];
++  [[ac selection] setValue: @"Paris" forKey: @"city"];
++  PASS([[ada objectForKey: @"city"] isEqual: @"Paris"]
++    && [[bob objectForKey: @"city"] isEqual: @"Paris"],
++    "a value set through the selection is set on every selected object")
++  before = reader->count;
++  [bob setObject: @"Ada L" forKey: @"name"];
++  PASS(reader->count == before + 1 && [reader->last isEqual: @"Ada L"],
++    "observers hear when the selected objects come to agree")
++  [ac removeObserver: reader forKeyPath: @"selection.name"];
++
++  ac = AUTORELEASE([[NSArrayController alloc] init]);
++  [ac setContent: [NSMutableArray arrayWithObjects: @"one", @"two", nil]];
++  [ac setSelectionIndexes: [NSIndexSet indexSetWithIndex: 0]];
++  PASS([ac valueForKeyPath: @"selection.city"] == NSNotApplicableMarker,
++    "a key the selected objects do not have answers the not-applicable marker")
++
++  oc = AUTORELEASE([[NSObjectController alloc] initWithContent: ada]);
++  PASS_EQUAL([oc valueForKeyPath: @"selection.name"], @"Ada L",
++    "an object controller's selection answers for its content")
++  [oc setContent: nil];
++  PASS([oc valueForKeyPath: @"selection.name"] == NSNoSelectionMarker,
++    "an object controller without content answers the no-selection marker")
++
++  END_SET("NSObjectController selection markers")
++
++  return 0;
++}
+-- 
+2.43.0
+
