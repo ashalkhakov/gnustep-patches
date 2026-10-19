@@ -368,6 +368,30 @@ NSArrayController and NSPopUpButton tests pass, the whole base suite passes
 5199 with none failing, on libs-base d537eac and libs-gui 5c43a947f with every patch
 here.
 
+Added on 2026-10-20 for Logbook's main window, so that its self-test
+passes with every check: `controller-to-many-content` and
+`popup-selected-object`.  An array controller with content bound changed
+only its own content array, so a record added to a vehicle's records
+(bound through the vehicles' selection) got no vehicle and the binding
+arranged it twice.  On macOS 15 adding, inserting and removing set a
+changed copy of the bound to-many on the bound object (Core Data keeps
+the inverse), arrange as for unbound content (an object already in the
+to-many twice), insert into the content before the arranged object it goes
+before unless sorted or filtered, and clear the filter on insertion
+(`clearsFilterPredicateOnInsertion`, kept but unused here); all of that
+now holds.  `NSArrayController/boundContentMutation.m` passes on macOS 15
+and fails 16 of 23 checks without the patch.  A pop-up's selectedObject
+(and selectedIndex, Tag, Value) took the chosen item only from the cell's
+item action, and only once drawn; macOS takes it in -sendAction:to: and
+from the menu, not from -selectItemAtIndex: alone, and
+NSInsertsNullPlaceholderBindingOption on selectedObject adds the "No
+Value" item (ignoring that binding's null title).
+`NSPopUpButton/selectedObjectAction.m` passes on macOS 15 and fails 6 of
+13 checks without the patch.  With both, Logbook's `make -k check` ends
+"self-test done: 0 failed" on the 2026.10.20 image with every patch here;
+the gui suite then passes 5235 checks with none failing and the base suite
+14665 (encoded-word-stack.m aborts, as on master).
+
 Added on 2026-10-17 for [#26](https://github.com/ashalkhakov/gnustep-patches/issues/26):
 `tableview-prototype-copy`.  -makeViewWithIdentifier:owner: (and the
 view a column falls back on) made each view from its prototype with
@@ -739,6 +763,8 @@ the two where a window comes in the same event fail.  On libs-gui 5c43a94.
 | `quick-click-order` | libs-back | test | not sent yet | (none: UDCodeKit and UDQuakeTools use it from here) |
 | `binding-to-many-mutation` | libs-gui | test | not sent yet | (none: UDQuakeTools uses it from here) |
 | `controller-selection-markers` | libs-gui | test | not sent yet | (none: bound controls show AppKit's placeholders from here) |
+| `controller-to-many-content` | libs-gui | test | not sent yet (after `controller-entity-mode`) | (none: Logbook adds records through it) |
+| `popup-selected-object` | libs-gui | test | not sent yet (after `popup-content-bindings`) | (none: Logbook's pop-ups set their objects through it) |
 | `cgrectunion-size` | libs-opal | none | [#71](https://github.com/gnustep/libs-opal/pull/71) | GSXFormsKit |
 | `freetype-advance-without-size` | libs-opal | test | [#72](https://github.com/gnustep/libs-opal/pull/72) | (none: XFormsKit uses it from here) |
 | `cfstring-overrelease` | libs-corebase | none | [#166](https://github.com/gnustep/libs-corebase/pull/166) | gnustep-build |
