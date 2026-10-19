@@ -359,12 +359,31 @@ raises on both.  `NSPredicate/aggregateOfNil.m` fails 9 of its 11 checks
 without the fix and passes with it; the NSPredicate suite passes 362 of
 362 on libs-base 7c81d0c, and every libs-base patch here co-applies.
 
+Added the same day, also for FreeCoreData:
+`predicate-ordering-without-compare`.  <, <=, >, >= and BETWEEN with a
+left hand side that has no -compare: of its own (an array, a set, a
+dictionary, an NSValue, a plain object) fell back on NSObject's deprecated
+-compare:, which orders by address, so `owner.vehicles.odometer > 5`
+answered by chance; macOS raises NSInvalidArgumentException for all of
+them, and so does this now.  A 715-case probe (left: array, set,
+dictionary, object, NSValue, NSNull, date, number, string, nil and a class
+with its own -compare:; right: number, string, nil, array; seventeen
+operators with their [c] forms) agrees with macOS apart from six cases
+left alone: a date ordered against a tagged string or double (NSDate's
+isSmallDate takes any tagged pointer for a date, a bug of NSDate's own)
+and BETWEEN with numeric bounds on a date or on a class with its own
+-compare: (macOS sends the bound -compare: there).
+`NSPredicate/orderingWithoutCompare.m` fails 30 of its 36 checks without
+the fix and passes with it on libs-base 7c81d0c; with every libs-base
+patch here applied, the NSPredicate suite passes 433 of 433.
+
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
 | `autoreleased-return-value` | libobjc2 | test | [#426](https://github.com/gnustep/libobjc2/pull/426) closed unmerged | (none: ODataStore works around it) |
 | `urlsession-lowercase-location` | libs-base | test | not sent yet | (none: UDCodeKit follows 3xx itself) |
 | `predicate-secure-coding` | libs-base | test | not sent yet ([#766](https://github.com/gnustep/libs-base/issues/766)) | (none: FreeCoreData will use it from here) |
 | `predicate-aggregate-of-nil` | libs-base | test | not sent yet | (none: FreeCoreData will use it from here) |
+| `predicate-ordering-without-compare` | libs-base | test | not sent yet | (none: FreeCoreData will use it from here) |
 | `arc4random-glibc` | libs-base | test | not sent yet | (none: every app built on the stack uses it from here; HomeRow's and UDCalc's shims are gone) |
 | `collection-copy-is-shallow` | libs-base | test | not sent yet | (none: FreeCoreData uses it from here) |
 | `nonretained-value-identity` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
