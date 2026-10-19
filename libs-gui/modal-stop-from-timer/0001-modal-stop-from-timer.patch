@@ -1,0 +1,217 @@
+From 417e8ddd62c157443498965ee29a49e1895ee176 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Tue, 20 Oct 2026 01:56:05 +0500
+Subject: [PATCH] NSApplication: a modal loop stopped from a timer ends at once
+
+-stopModal, -stopModalWithCode: and -abortModal only set the session's
+run state.  -runModalForWindow: looks at that state after each event,
+and between events it waits in DPSPeekEvent with no limit, which runs the
+run loop in NSModalPanelRunLoopMode until an event is queued.  When the
+session is stopped by anything but an event of its own - a timer, a
+performer, a notification, another thread - nothing is queued, the loop
+goes on waiting, and the panel stays up until the user happens to move
+the mouse over it or press a key.  On macOS 15 a panel run with
+-runModalForWindow: and stopped by a timer half a second later returns
+after 0.50 s, with NSModalResponseStop, the code given, or
+NSModalResponseAbort.
+
+Posting an event from the stopping method is not enough, because the
+timer fires inside the run loop's wait, which then goes on waiting for
+input: an event added to the queue meanwhile is not input.  Hand the
+posting of the (never delivered) null event, which -stop: already uses
+to wake the main loop, to the main thread's run loop as a performer:
+adding it signals the run loop, so the wait returns, the event is queued
+and the modal loop finds the session stopped.  This also covers
+-abortModal sent from another thread, which its documentation allows.
+
+The test runs a panel modally three times and stops it from a timer with
+each of the three methods, checking the code and that it returns within
+two seconds; a second thread wakes the loop after four seconds so that,
+without the fix, the test fails rather than hangs.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/NSApplication.m                       |  13 ++
+ Tests/gui/NSApplication/stopModalFromTimer.m | 136 +++++++++++++++++++
+ 2 files changed, 149 insertions(+)
+ create mode 100644 Tests/gui/NSApplication/stopModalFromTimer.m
+
+diff --git a/Source/NSApplication.m b/Source/NSApplication.m
+index 6006342fc..baa5164a7 100644
+--- a/Source/NSApplication.m
++++ b/Source/NSApplication.m
+@@ -386,6 +386,7 @@ - (void) _windowWillClose: (NSNotification*) notification;
+ - (void) _workspaceNotification: (NSNotification*) notification;
+ - (NSArray *) _openFiles;
+ - (NSMenu *) _dockMenu;
++- (void) _postNullEvent;
+ @end
+ 
+ @interface NSWindow (TitleWithRepresentedFilename)
+@@ -2035,9 +2036,21 @@ - (void) stopModalWithCode: (NSInteger)returnCode
+ 	    format: @"stopModalWithCode: with NSRunContinuesResponse"];
+ 	}
+       _session->runState = returnCode;
++      [self performSelectorOnMainThread: @selector(_postNullEvent)
++                             withObject: nil
++                          waitUntilDone: NO
++                                  modes: [NSArray arrayWithObjects:
++                                    NSDefaultRunLoopMode,
++                                    NSModalPanelRunLoopMode,
++                                    NSEventTrackingRunLoopMode, nil]];
+     }
+ }
+ 
++- (void) _postNullEvent
++{
++  DPSPostEvent(GSCurrentServer(), null_event, NO);
++}
++
+ /**
+  * Put up a modal window centered relative to docWindow.  On OS X this is
+  * deprecated in favor of
+diff --git a/Tests/gui/NSApplication/stopModalFromTimer.m b/Tests/gui/NSApplication/stopModalFromTimer.m
+new file mode 100644
+index 000000000..77c0337ef
+--- /dev/null
++++ b/Tests/gui/NSApplication/stopModalFromTimer.m
+@@ -0,0 +1,136 @@
++/* A modal loop stopped by a timer, with -stopModal, -stopModalWithCode: or
++ * -abortModal, ends at once, as on macOS, where each of the three returns
++ * from -runModalForWindow: when the timer fires.  Nothing else happens in
++ * the session, so no event arrives to make the loop look at its state
++ * again: another thread has one posted after a few seconds, so that a loop
++ * that does wait for an event ends the test late rather than hanging it.
++ */
++#import "Testing.h"
++#import <Foundation/Foundation.h>
++#import <AppKit/AppKit.h>
++
++@interface ModalStopper : NSObject
++{
++  int how;
++  NSWindow *window;
++}
++- (id) initWithHow: (int)h window: (NSWindow *)w;
++@end
++
++@implementation ModalStopper
++- (id) initWithHow: (int)h window: (NSWindow *)w
++{
++  if ((self = [super init]) != nil)
++    {
++      how = h;
++      window = w;
++    }
++  return self;
++}
++
++- (void) stop: (NSTimer *)t
++{
++  if (how == 0)
++    [NSApp stopModal];
++  else if (how == 1)
++    [NSApp stopModalWithCode: 42];
++  else
++    [NSApp abortModal];
++}
++
++- (void) watch: (id)unused
++{
++  CREATE_AUTORELEASE_POOL(pool);
++  [NSThread sleepForTimeInterval: 4.0];
++  [self performSelectorOnMainThread: @selector(wake:)
++                         withObject: nil
++                      waitUntilDone: NO
++                              modes: [NSArray arrayWithObject:
++                                NSModalPanelRunLoopMode]];
++  DESTROY(pool);
++}
++
++- (void) wake: (id)unused
++{
++  [NSApp postEvent: [NSEvent otherEventWithType: NSApplicationDefined
++                                       location: NSZeroPoint
++                                  modifierFlags: 0
++                                      timestamp: 0
++                                   windowNumber: [window windowNumber]
++                                        context: nil
++                                        subtype: 0
++                                          data1: 0
++                                          data2: 0]
++           atStart: NO];
++}
++@end
++
++static NSTimeInterval
++runStopped(int how, NSInteger *code)
++{
++  NSPanel *p;
++  ModalStopper *s;
++  NSTimer *stop;
++  NSDate *start;
++  NSTimeInterval took;
++
++  p = [[NSPanel alloc] initWithContentRect: NSMakeRect(100, 100, 200, 100)
++                                 styleMask: NSTitledWindowMask
++                                   backing: NSBackingStoreBuffered
++                                     defer: NO];
++  s = [[ModalStopper alloc] initWithHow: how window: p];
++  stop = [NSTimer timerWithTimeInterval: 0.2
++                                 target: s
++                               selector: @selector(stop:)
++                               userInfo: nil
++                                repeats: NO];
++  [[NSRunLoop currentRunLoop] addTimer: stop forMode: NSModalPanelRunLoopMode];
++  [NSThread detachNewThreadSelector: @selector(watch:)
++                           toTarget: s
++                         withObject: nil];
++  start = [NSDate date];
++  *code = [NSApp runModalForWindow: p];
++  took = -[start timeIntervalSinceNow];
++  [p orderOut: nil];
++  [s release];
++  [p release];
++  return took;
++}
++
++int
++main(int argc, char **argv)
++{
++  CREATE_AUTORELEASE_POOL(arp);
++  START_SET("modal loop stopped from a timer")
++
++  NSInteger code;
++  NSTimeInterval took;
++
++  NS_DURING
++    {
++      [NSApplication sharedApplication];
++    }
++  NS_HANDLER
++    {
++      if ([[localException name]
++        isEqualToString: NSInternalInconsistencyException])
++        SKIP("It looks like GNUstep backend is not yet installed")
++    }
++  NS_ENDHANDLER
++
++  took = runStopped(0, &code);
++  PASS(code == NSRunStoppedResponse, "-stopModal stops the loop");
++  PASS(took < 2.0, "-stopModal from a timer ends the loop at once");
++
++  took = runStopped(1, &code);
++  PASS(code == 42, "-stopModalWithCode: returns the code");
++  PASS(took < 2.0, "-stopModalWithCode: from a timer ends the loop at once");
++
++  took = runStopped(2, &code);
++  PASS(code == NSRunAbortedResponse, "-abortModal aborts the loop");
++  PASS(took < 2.0, "-abortModal from a timer ends the loop at once");
++
++  END_SET("modal loop stopped from a timer")
++  DESTROY(arp);
++  return 0;
++}
+-- 
+2.50.1 (Apple Git-155)
+
