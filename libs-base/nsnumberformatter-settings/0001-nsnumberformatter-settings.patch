@@ -1,0 +1,1427 @@
+From 614db4251b62c83600300c625e7cb2522493afef Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Mon, 19 Oct 2026 17:14:08 +0000
+Subject: [PATCH] NSNumberFormatter: implement the settings macOS keeps
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The settings a number formatter's keyed archive holds, compared with what
+macOS 15 does with each:
+
+- nilSymbol did nothing, and zeroSymbol set ICU's zero digit, so that
+  "zip" stood for every 0 in a number.  nilSymbol, zeroSymbol and
+  notANumberSymbol are now the strings for nil, zero and NaN, the same
+  as attributedStringForNil, ...ForZero and ...ForNotANumber, and read
+  back when parsed.
+- The positive and negative infinity symbols were ICU's one infinity
+  symbol; they are apart, "+∞" and "-∞" unless set, and an
+  infinity formats as its symbol.
+- textAttributesForZero, ...ForNil, ...ForNotANumber,
+  ...ForPositiveInfinity and ...ForNegativeInfinity did nothing; they are
+  kept, and -attributedStringForObjectValue:withDefaultAttributes: lays
+  them over the defaults, as it now does the positive and negative ones.
+- partialStringValidationEnabled is kept.  macOS shows no effect of it in
+  either -isPartialStringValid: method, so neither does this.
+- roundingIncrement took only float and double numbers and was lost on a
+  change of style.  multiplier is kept, nil unless set; one that is not a
+  whole number scales the value before ICU formats it and after it
+  parses, since ICU takes whole multipliers only.
+- currencyCode was set as a symbol under the text attribute's key.
+- positiveFormat and negativeFormat were kept but ignored with the 10.4
+  behaviour; they are applied as ICU patterns, outlive a change of
+  style, and read back as the patterns in use.
+- Parsing checked neither minimum, maximum nor allowsFloats, and
+  -getObjectValue:forString:errorDescription: and -numberFromString:
+  took a string that only began with a number.  They now refuse what
+  macOS refuses, with its messages and NSFormattingError.
+- The ordinal, currency ISO code, currency plural and accounting styles.
+- Attribute getters kept what ICU first gave, and a BOOL as 1 or 2, so
+  after a change of locale or style a BOOL set to NO came back as YES,
+  and the 0 fraction digits -init set stayed with every style (a decimal
+  formatter showed no fraction).  Getters now give what was set, else
+  what ICU gives; what was set is laid over the style; and a formatter
+  without a style gets macOS's: no fraction digits, 42 integer digits,
+  no grouping.
+
+Tests/base/NSNumberFormatter/settings.m checks each against the values
+macOS 15 gives, and that they survive a keyed archive; 53 of its 70
+checks fail without the change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Headers/Foundation/NSNumberFormatter.h  |   6 +-
+ Source/NSNumberFormatter.m              | 670 ++++++++++++++++++------
+ Tests/base/NSNumberFormatter/settings.m | 278 ++++++++++
+ 3 files changed, 790 insertions(+), 164 deletions(-)
+ create mode 100644 Tests/base/NSNumberFormatter/settings.m
+
+diff --git a/Headers/Foundation/NSNumberFormatter.h b/Headers/Foundation/NSNumberFormatter.h
+index 27144af..e403366 100644
+--- a/Headers/Foundation/NSNumberFormatter.h
++++ b/Headers/Foundation/NSNumberFormatter.h
+@@ -47,7 +47,11 @@ enum
+   NSNumberFormatterCurrencyStyle = 2,
+   NSNumberFormatterPercentStyle = 3,
+   NSNumberFormatterScientificStyle = 4,
+-  NSNumberFormatterSpellOutStyle = 5
++  NSNumberFormatterSpellOutStyle = 5,
++  NSNumberFormatterOrdinalStyle = 6,
++  NSNumberFormatterCurrencyISOCodeStyle = 8,
++  NSNumberFormatterCurrencyPluralStyle = 9,
++  NSNumberFormatterCurrencyAccountingStyle = 10
+ };
+ typedef NSUInteger NSNumberFormatterStyle;
+ 
+diff --git a/Source/NSNumberFormatter.m b/Source/NSNumberFormatter.m
+index 9e12621..4e1ee87 100644
+--- a/Source/NSNumberFormatter.m
++++ b/Source/NSNumberFormatter.m
+@@ -33,6 +33,8 @@
+ #define MAX_SYMBOLS 27
+ #define MAX_TEXTATTRIBUTES 8
+ #define MAX_ATTRIBUTES 20
++/* An attribute the formatter's style decides, rather than its owner. */
++#define UNSET_ATTRIBUTE INT32_MIN
+ 
+ #define GS_NSNumberFormatter_IVARS \
+   NSUInteger	_behavior; \
+@@ -42,7 +44,17 @@
+   void		*_formatter; \
+   id		_symbols[MAX_SYMBOLS]; \
+   id		_textAttributes[MAX_TEXTATTRIBUTES]; \
+-  int		_attributes[MAX_ATTRIBUTES]
++  int		_attributes[MAX_ATTRIBUTES]; \
++  NSNumber	*_multiplier; \
++  NSNumber	*_roundingIncrement; \
++  NSString	*_positiveInfinitySymbol; \
++  NSString	*_negativeInfinitySymbol; \
++  NSDictionary	*_textAttributesForZero; \
++  NSDictionary	*_textAttributesForNil; \
++  NSDictionary	*_textAttributesForNotANumber; \
++  NSDictionary	*_textAttributesForPositiveInfinity; \
++  NSDictionary	*_textAttributesForNegativeInfinity; \
++  BOOL		_partialStringValidation
+ 
+ #import "common.h"
+ #define	EXPOSE_NSNumberFormatter_IVARS	1
+@@ -54,6 +66,7 @@
+ #import "Foundation/NSException.h"
+ #import "Foundation/NSLocale.h"
+ #import "Foundation/NSMapTable.h"
++#import "Foundation/NSNull.h"
+ #import "Foundation/NSValue.h"
+ #import "Foundation/NSNumberFormatter.h"
+ #import "Foundation/NSUserDefaults.h"
+@@ -73,6 +86,8 @@
+ 
+ #define BUFFER_SIZE 1024
+ 
++#include <math.h>
++
+ #if GS_USE_ICU == 1
+ static inline UNumberFormatStyle
+ NSToICUFormatStyle (NSNumberFormatterStyle style)
+@@ -96,6 +111,23 @@ NSToICUFormatStyle (NSNumberFormatterStyle style)
+       case NSNumberFormatterSpellOutStyle:
+         result = UNUM_SPELLOUT;
+         break;
++      case NSNumberFormatterOrdinalStyle:
++        result = UNUM_ORDINAL;
++        break;
++#if U_ICU_VERSION_MAJOR_NUM > 4 \
++  || (U_ICU_VERSION_MAJOR_NUM == 4 && U_ICU_VERSION_MINOR_NUM >= 8)
++      case NSNumberFormatterCurrencyISOCodeStyle:
++        result = UNUM_CURRENCY_ISO;
++        break;
++      case NSNumberFormatterCurrencyPluralStyle:
++        result = UNUM_CURRENCY_PLURAL;
++        break;
++#endif
++#if U_ICU_VERSION_MAJOR_NUM >= 53
++      case NSNumberFormatterCurrencyAccountingStyle:
++        result = UNUM_CURRENCY_ACCOUNTING;
++        break;
++#endif
+       case NSNumberFormatterNoStyle:
+       default:
+         result = UNUM_IGNORE;
+@@ -297,32 +329,23 @@ GS_PRIVATE_INTERNAL(NSNumberFormatter)
+   NSAssert(key >= 0
+     && key < sizeof(_attributes) / sizeof(*_attributes),
+     NSInvalidArgumentException);
+-#if GS_USE_ICU == 1
+-  if (_attributes[key] <= 0)
++  /* What was set is what is asked for, as on macOS, even where ICU
++   * adjusts it to agree with another setting.
++   */
++  if (_attributes[key] != UNSET_ATTRIBUTE)
+     {
+-      _attributes[key] = unum_getAttribute (_formatter, key);
++      return _attributes[key];
+     }
++#if GS_USE_ICU == 1
++  return unum_getAttribute (_formatter, key);
++#else
++  return 0;
+ #endif
+-  return _attributes[key];
+ }
+ 
+ - (BOOL) boolForKey: (int)key
+ {
+-  NSAssert(key >= 0
+-    && key < sizeof(_attributes) / sizeof(*_attributes),
+-    NSInvalidArgumentException);
+-#if GS_USE_ICU == 1
+-  if (0 == _attributes[key])
+-    {
+-      _attributes[key]
+-	= (1 == unum_getAttribute (_formatter, key)) ? 2 : 1;
+-    }
+-#endif
+-  if (2 == _attributes[key])
+-    {
+-      return YES;
+-    }
+-  return NO;
++  return [self attributeForKey: key] ? YES : NO;
+ }
+ 
+ - (NSString*) symbolForKey: (int)key
+@@ -368,10 +391,8 @@ GS_PRIVATE_INTERNAL(NSNumberFormatter)
+   NSAssert(key >= 0
+     && key < sizeof(_attributes) / sizeof(*_attributes),
+     NSInvalidArgumentException);
+-#if GS_USE_ICU == 1
+-  if (value < 0)
+-    value = -1;
+   _attributes[key] = value;
++#if GS_USE_ICU == 1
+   unum_setAttribute (_formatter, key, value);
+ #endif
+   return;
+@@ -379,14 +400,7 @@ GS_PRIVATE_INTERNAL(NSNumberFormatter)
+ 
+ - (void) setBool: (BOOL)value forKey: (int)key
+ {
+-  NSAssert(key >= 0
+-    && key < sizeof(_symbols) / sizeof(*_symbols),
+-    NSInvalidArgumentException);
+-#if GS_USE_ICU == 1
+-  _attributes[key] = (value ? 2 : 1);
+-  unum_setAttribute (_formatter, key, (int32_t)(value ? 1 : 0));
+-#endif
+-  return;
++  [self setAttribute: (value ? 1 : 0) forKey: key];
+ }
+ 
+ - (void) setSymbol: (NSString*)value forKey: (int)key
+@@ -432,8 +446,39 @@ GS_PRIVATE_INTERNAL(NSNumberFormatter)
+ 
+ @interface NSNumberFormatter (PrivateMethods)
+ - (void) _resetUNumberFormat;
++- (NSString*) _pattern;
+ @end
+ 
++static NSError *
++formattingError(NSString *description)
++{
++  return [NSError errorWithDomain: NSCocoaErrorDomain
++    code: 2048 // NSFormattingError
++    userInfo: [NSDictionary dictionaryWithObject: description
++					  forKey: NSLocalizedDescriptionKey]];
++}
++
++static NSError *
++invalidValue(NSString *string)
++{
++  return formattingError([NSString stringWithFormat:
++    @"The value \u201C%@\u201D is invalid.", string]);
++}
++
++/* A multiplier ICU can apply itself, as it takes a whole number. */
++static BOOL
++integralMultiplier(NSNumber *multiplier, int32_t *value)
++{
++  double	d = [multiplier doubleValue];
++
++  if (d == floor(d) && fabs(d) < 2147483647.0 && d != 0.0)
++    {
++      *value = (int32_t)d;
++      return YES;
++    }
++  return NO;
++}
++
+ @implementation NSNumberFormatter
+ 
+ #if GS_USE_ICU == 1
+@@ -451,47 +496,57 @@ static NSUInteger _defaultBehavior = NSNumberFormatterBehavior10_4;
+ - (NSAttributedString*) attributedStringForObjectValue: (id)anObject
+ 				 withDefaultAttributes: (NSDictionary*)attr
+ {
+-  NSString *stringForObjectValue;
+-  NSDecimalNumber *zeroNumber = [NSDecimalNumber zero];
+-  NSDecimalNumber *nanNumber = [NSDecimalNumber notANumber];
++  NSString	*string = [self stringForObjectValue: anObject];
++  NSDictionary	*specific = nil;
+ 
+-  if (anObject == nil)
+-    {
+-      return [self attributedStringForNil];
+-    }
+-  else if (![anObject isKindOfClass: [NSNumber class]])
++  if (nil == anObject)
+     {
+-      return [self attributedStringForNotANumber];
++      specific = internal->_textAttributesForNil;
+     }
+-  else if ([anObject isEqual: nanNumber])
++  else if (NO == [anObject isKindOfClass: [NSNumber class]])
+     {
+-      return [self attributedStringForNotANumber];
++      specific = internal->_textAttributesForNotANumber;
+     }
+-  else if ([anObject isEqual: zeroNumber])
++  else
+     {
+-      return [self attributedStringForZero];
+-    }
++      double	d = [anObject doubleValue];
+ 
+-  if (([(NSNumber*)anObject compare: zeroNumber] == NSOrderedDescending)
+-    && (_attributesForPositiveValues))
+-    {
+-      attr = _attributesForPositiveValues;
++      if ([anObject isEqual: [NSDecimalNumber notANumber]] || isnan(d))
++	{
++	  specific = internal->_textAttributesForNotANumber;
++	}
++      else if (isinf(d))
++	{
++	  specific = (d > 0) ? internal->_textAttributesForPositiveInfinity
++	    : internal->_textAttributesForNegativeInfinity;
++	}
++      else if (0.0 == d && nil != internal->_textAttributesForZero)
++	{
++	  specific = internal->_textAttributesForZero;
++	}
++      else if (d > 0)
++	{
++	  specific = _attributesForPositiveValues;
++	}
++      else if (d < 0)
++	{
++	  specific = _attributesForNegativeValues;
++	}
+     }
+-  else if (([(NSNumber*)anObject compare: zeroNumber] == NSOrderedAscending)
+-    && (_attributesForNegativeValues))
++  if (nil == string)
+     {
+-      attr = _attributesForNegativeValues;
++      string = @"";
+     }
+-
+-  stringForObjectValue = [self stringForObjectValue: anObject];
+-  
+-  if (stringForObjectValue == nil)
++  if (nil != specific)
+     {
+-      stringForObjectValue = @"";
+-    }
++      NSMutableDictionary	*m;
+ 
+-  return AUTORELEASE([[NSAttributedString alloc] initWithString:
+-     stringForObjectValue attributes: attr]);
++      m = [NSMutableDictionary dictionaryWithDictionary: attr];
++      [m addEntriesFromDictionary: specific];
++      attr = m;
++    }
++  return AUTORELEASE([[NSAttributedString alloc] initWithString: string
++						     attributes: attr]);
+ }
+ 
+ - (NSAttributedString*) attributedStringForNil
+@@ -538,6 +593,15 @@ static NSUInteger _defaultBehavior = NSNumberFormatterBehavior10_4;
+ 	  {
+ 	    [GSIVar(o,_textAttributes)[idx] retain];
+ 	  }
++	[GSIVar(o,_multiplier) retain];
++	[GSIVar(o,_roundingIncrement) retain];
++	[GSIVar(o,_positiveInfinitySymbol) retain];
++	[GSIVar(o,_negativeInfinitySymbol) retain];
++	[GSIVar(o,_textAttributesForZero) retain];
++	[GSIVar(o,_textAttributesForNil) retain];
++	[GSIVar(o,_textAttributesForNotANumber) retain];
++	[GSIVar(o,_textAttributesForPositiveInfinity) retain];
++	[GSIVar(o,_textAttributesForNegativeInfinity) retain];
+       )
+ #if GS_USE_ICU == 1
+       {
+@@ -577,6 +641,15 @@ static NSUInteger _defaultBehavior = NSNumberFormatterBehavior10_4;
+ 	{
+ 	  [internal->_textAttributes[idx] release];
+         }
++      RELEASE(internal->_multiplier);
++      RELEASE(internal->_roundingIncrement);
++      RELEASE(internal->_positiveInfinitySymbol);
++      RELEASE(internal->_negativeInfinitySymbol);
++      RELEASE(internal->_textAttributesForZero);
++      RELEASE(internal->_textAttributesForNil);
++      RELEASE(internal->_textAttributesForNotANumber);
++      RELEASE(internal->_textAttributesForPositiveInfinity);
++      RELEASE(internal->_textAttributesForNegativeInfinity);
+       GS_DESTROY_INTERNAL(NSNumberFormatter)
+     }
+   [super dealloc];
+@@ -640,6 +713,8 @@ static NSUInteger _defaultBehavior = NSNumberFormatterBehavior10_4;
+           behavior = NSNumberFormatterBehavior10_4;
+           reference = AUTORELEASE([NSNumberFormatter new]);
+           [reference setFormatterBehavior: behavior];
++          [reference setPositiveFormat: _positiveFormat];
++          [reference setNegativeFormat: _negativeFormat];
+           attributes = GSPrivateFormatterAttributes(self, reference,
+             [NSArray arrayWithObjects: @"locale", @"numberStyle", nil],
+             [NSArray arrayWithObjects:
+@@ -653,11 +728,10 @@ static NSUInteger _defaultBehavior = NSNumberFormatterBehavior10_4;
+               @"maximumSignificantDigits", @"minimum",
+               @"minimumFractionDigits", @"minimumIntegerDigits",
+               @"minimumSignificantDigits", @"minusSign", @"multiplier",
+-              @"negativeFormat", @"negativePrefix", @"negativeSuffix",
++              @"negativePrefix", @"negativeSuffix",
+               @"notANumberSymbol", @"paddingCharacter", @"paddingPosition",
+               @"partialStringValidationEnabled", @"perMillSymbol",
+-              @"percentSymbol", @"plusSign", @"positiveFormat",
+-              @"positivePrefix", @"positiveSuffix", @"roundingIncrement",
++              @"percentSymbol", @"plusSign", @"positivePrefix", @"positiveSuffix", @"roundingIncrement",
+               @"roundingMode", @"secondaryGroupingSize",
+               @"textAttributesForNegativeInfinity",
+               @"textAttributesForNegativeValues", @"textAttributesForNil",
+@@ -666,6 +740,17 @@ static NSUInteger _defaultBehavior = NSNumberFormatterBehavior10_4;
+               @"textAttributesForPositiveValues", @"textAttributesForZero",
+               @"usesGroupingSeparator", @"usesSignificantDigits",
+               @"zeroSymbol", nil]);
++          /* Only a format that was given, not the one the style makes. */
++          if (nil != _positiveFormat)
++            {
++              [attributes setObject: _positiveFormat
++                             forKey: @"positiveFormat"];
++            }
++          if (nil != _negativeFormat)
++            {
++              [attributes setObject: _negativeFormat
++                             forKey: @"negativeFormat"];
++            }
+         }
+       /* These are always written, as macOS does. */
+       [attributes setObject: [NSNumber numberWithUnsignedInteger: behavior]
+@@ -747,15 +832,33 @@ static NSUInteger _defaultBehavior = NSNumberFormatterBehavior10_4;
+     || MYBEHAVIOR == NSNumberFormatterBehaviorDefault)
+     {
+       BOOL result;
+-      NSRange range = NSMakeRange (0, [string length]);
++      NSRange range;
+       NSError *outError = nil;
+-      
+-      result = [self getObjectValue: anObject
++      id value = nil;
++
++      /* The whole string must be a number, but for white space around it. */
++      string = [string stringByTrimmingCharactersInSet:
++        [NSCharacterSet whitespaceAndNewlineCharacterSet]];
++      if ([string length] == 0)
++        {
++          if (anObject)
++            *anObject = nil;
++          return YES;
++        }
++      range = NSMakeRange (0, [string length]);
++      result = [self getObjectValue: &value
+                           forString: string
+                               range: &range
+                               error: &outError];
++      if (result && range.length != [string length])
++        {
++          result = NO;
++          outError = invalidValue(string);
++        }
+       if (!result && error)
+         *error = [outError localizedDescription];
++      if (result && anObject)
++        *anObject = value;
+       
+       return result;
+     }
+@@ -846,11 +949,13 @@ static NSUInteger _defaultBehavior = NSNumberFormatterBehavior10_4;
+       internal->_locale = RETAIN([NSLocale currentLocale]);
+       internal->_style = NSNumberFormatterNoStyle;
+ 
+-      /* Set all attributes to -1 before resetting the formatter.  When
+-       * resetting them only values < 0 will be skipped.
++      /* No attribute is set before resetting the formatter, so that the
++       * ones the style gives are kept.
+        */
+       for (idx = 0; idx < MAX_ATTRIBUTES; ++idx)
+-	internal->_attributes[idx] = -1;
++	internal->_attributes[idx] = UNSET_ATTRIBUTE;
++      internal->_positiveInfinitySymbol = @"+\u221E";
++      internal->_negativeInfinitySymbol = @"-\u221E";
+       
+       [self _resetUNumberFormat];
+ #if GS_USE_ICU == 1
+@@ -860,8 +965,6 @@ static NSUInteger _defaultBehavior = NSNumberFormatterBehavior10_4;
+ 	  return nil;
+ 	}
+ #endif
+-      
+-      [self setMaximumFractionDigits: 0];
+     }  
+   return self;
+ }
+@@ -1041,12 +1144,38 @@ static NSUInteger _defaultBehavior = NSNumberFormatterBehavior10_4;
+ 
+ - (NSString*) negativeFormat
+ {
+-  return _negativeFormat;
++  NSString	*pattern;
++  NSRange	r;
++
++  if (nil != _negativeFormat || MYBEHAVIOR == NSNumberFormatterBehavior10_0)
++    {
++      return _negativeFormat;
++    }
++  pattern = [self _pattern];
++  r = [pattern rangeOfString: @";"];
++  if (r.length > 0)
++    {
++      return [pattern substringFromIndex: NSMaxRange(r)];
++    }
++  return [self positiveFormat];
+ }
+ 
+ - (NSString*) positiveFormat
+ {
+-  return _positiveFormat;
++  NSString	*pattern;
++  NSRange	r;
++
++  if (nil != _positiveFormat || MYBEHAVIOR == NSNumberFormatterBehavior10_0)
++    {
++      return _positiveFormat;
++    }
++  pattern = [self _pattern];
++  r = [pattern rangeOfString: @";"];
++  if (r.length > 0)
++    {
++      return [pattern substringToIndex: r.location];
++    }
++  return pattern;
+ }
+ 
+ - (NSDecimalNumberHandler*) roundingBehavior
+@@ -1059,20 +1188,60 @@ static NSUInteger _defaultBehavior = NSNumberFormatterBehavior10_4;
+   _allowsFloats = flag;
+ }
+ 
++/* The attributes of a string such as the one for nil. */
++static NSDictionary *
++attributesOf(NSAttributedString *s)
++{
++  NSDictionary	*attributes = nil;
++
++  if ([s length] > 0)
++    {
++      attributes = [s attributesAtIndex: 0 effectiveRange: NULL];
++    }
++  return [attributes count] > 0 ? attributes : nil;
++}
++
++static NSAttributedString *
++attributedString(NSString *s, NSDictionary *attributes)
++{
++  if (nil == s)
++    {
++      return nil;
++    }
++  return AUTORELEASE([[NSAttributedString alloc] initWithString: s
++						     attributes: attributes]);
++}
++
+ - (void) setAttributedStringForNil: (NSAttributedString*)newAttributedString
+ {
+   ASSIGN(_attributedStringForNil, newAttributedString);
++  ASSIGNCOPY(internal->_textAttributesForNil,
++    attributesOf(newAttributedString));
+ }
+ 
+ - (void) setAttributedStringForNotANumber:
+   (NSAttributedString*)newAttributedString
+ {
+   ASSIGN(_attributedStringForNotANumber, newAttributedString);
++  ASSIGNCOPY(internal->_textAttributesForNotANumber,
++    attributesOf(newAttributedString));
++#if GS_USE_ICU == 1
++  if (nil != newAttributedString)
++    {
++      [internal setSymbol: [newAttributedString string]
++		   forKey: UNUM_NAN_SYMBOL];
++    }
++#endif
+ }
+ 
+ - (void) setAttributedStringForZero: (NSAttributedString*)newAttributedString
+ {
+   ASSIGN(_attributedStringForZero, newAttributedString);
++  if (nil != newAttributedString)
++    {
++      ASSIGNCOPY(internal->_textAttributesForZero,
++	attributesOf(newAttributedString));
++    }
+ }
+ 
+ - (void) setDecimalSeparator: (NSString*)newSeparator
+@@ -1145,14 +1314,20 @@ static NSUInteger _defaultBehavior = NSNumberFormatterBehavior10_4;
+ 
+ - (void) setNegativeFormat: (NSString*)aFormat
+ {
+-  // FIXME: Should extract separators and attributes
+-  ASSIGN(_negativeFormat, aFormat);
++  ASSIGNCOPY(_negativeFormat, aFormat);
++  if (MYBEHAVIOR != NSNumberFormatterBehavior10_0)
++    {
++      [self _resetUNumberFormat];
++    }
+ }
+ 
+ - (void) setPositiveFormat: (NSString*)aFormat
+ {
+-  // FIXME: Should extract separators and attributes
+-  ASSIGN(_positiveFormat, aFormat);
++  ASSIGNCOPY(_positiveFormat, aFormat);
++  if (MYBEHAVIOR != NSNumberFormatterBehavior10_0)
++    {
++      [self _resetUNumberFormat];
++    }
+ }
+ 
+ - (void) setRoundingBehavior: (NSDecimalNumberHandler*)newRoundingBehavior
+@@ -1208,7 +1383,7 @@ static NSUInteger _defaultBehavior = NSNumberFormatterBehavior10_4;
+   
+   // Handle NaN
+   nanNumber = [NSDecimalNumber notANumber];
+-  if ([anObject isEqual: nanNumber])
++  if ([anObject isEqual: nanNumber] || isnan([anObject doubleValue]))
+     {
+       attrStr = [self attributedStringForNotANumber];
+       if (attrStr != nil)
+@@ -1229,6 +1404,13 @@ static NSUInteger _defaultBehavior = NSNumberFormatterBehavior10_4;
+         }
+       // Fall through to normal formatting if no special zero string is set
+     }
++
++  // Handle infinities
++  if (isinf([anObject doubleValue]))
++    {
++      return ([anObject doubleValue] > 0)
++	? [self positiveInfinitySymbol] : [self negativeInfinitySymbol];
++    }
+   
+   if (MYBEHAVIOR == NSNumberFormatterBehaviorDefault
+     || MYBEHAVIOR == NSNumberFormatterBehavior10_4)
+@@ -1257,6 +1439,14 @@ static NSUInteger _defaultBehavior = NSNumberFormatterBehavior10_4;
+        * revisit this code when they have been.
+        */
+       UChar buffer[BUFFER_SIZE];
++      int32_t	m;
++
++      if (nil != internal->_multiplier
++        && NO == integralMultiplier(internal->_multiplier, &m))
++        {
++          anObject = [NSNumber numberWithDouble:
++            [anObject doubleValue] * [internal->_multiplier doubleValue]];
++        }
+       
+       /* FIXME: What to do with unsigned types?
+        *
+@@ -1573,56 +1763,15 @@ static NSUInteger _defaultBehavior = NSNumberFormatterBehavior10_4;
+ 
+ - (NSNumber *) numberFromString: (NSString *)string
+ {
+-  NSNumber	*result = nil;
+-// This is a 10.4 and above method and should not work with earlier version.
+-#if GS_USE_ICU == 1
+-  NSUInteger 	length = [string length];
++  id	result = nil;
+ 
+-  if (length > 0)
++  if (MYBEHAVIOR == NSNumberFormatterBehavior10_0
++    || NO == [self getObjectValue: &result
++			forString: string
++		 errorDescription: NULL])
+     {
+-      NSRange 		range;
+-      UErrorCode 	err = U_ZERO_ERROR;
+-      int64_t 		intNum;
+-      double 		doubleNum;
+-      GS_BEGINITEMBUF(ustring, length, unichar)
+-  
+-      [string getCharacters: ustring range: NSMakeRange(0, length)];
+-  
+-      // FIXME: Not sure if this is correct....
+-      range = [string rangeOfString: @"."];
+-      if (range.location == NSNotFound)
+-	{
+-	  intNum = unum_parseInt64(internal->_formatter,
+-	    ustring, length, NULL, &err);
+-	  if (!U_FAILURE(err))
+-	    {
+-	      if (intNum == 0 || intNum == 1)
+-		{
+-		  result = [NSNumber numberWithBool: (BOOL) intNum];
+-		}
+-	      else if (intNum < INT_MAX && intNum > INT_MIN)
+-		{
+-		  result = [NSNumber numberWithInt: (int32_t)intNum];
+-		}
+-	      else
+-		{
+-		  result = [NSNumber numberWithLongLong: intNum];
+-		}
+-	    }
+-	}
+-      else
+-	{
+-	  doubleNum = unum_parseDouble(internal->_formatter,
+-	    ustring, length, NULL, &err);
+-	  if (!U_FAILURE(err))
+-	    {
+-	      result = [NSNumber numberWithDouble: doubleNum];
+-	    }
+-	}
+-      
+-      GS_ENDITEMBUF()
++      return nil;
+     }
+-#endif
+   return result;
+ }
+ 
+@@ -1707,17 +1856,11 @@ static NSUInteger _defaultBehavior = NSNumberFormatterBehavior10_4;
+ 
+ - (void) setRoundingIncrement: (NSNumber *) number
+ {
+-  switch ([number objCType][0])
+-    {
+-      case 'd':
+-      case 'f':
++  ASSIGNCOPY(internal->_roundingIncrement, number);
+ #if GS_USE_ICU == 1
+-    unum_setDoubleAttribute (internal->_formatter, UNUM_ROUNDING_INCREMENT,
+-      [number doubleValue]);
++  unum_setDoubleAttribute (internal->_formatter, UNUM_ROUNDING_INCREMENT,
++    [number doubleValue]);
+ #endif
+-      default:
+-        return;
+-    }
+ }
+ 
+ - (NSNumber *) roundingIncrement
+@@ -1753,12 +1896,13 @@ static NSUInteger _defaultBehavior = NSNumberFormatterBehavior10_4;
+ 
+ - (void) setMultiplier: (NSNumber *) number
+ {
+-  [internal setAttribute: [number intValue] forKey: UNUM_MULTIPLIER];
++  ASSIGNCOPY(internal->_multiplier, number);
++  [self _resetUNumberFormat];
+ }
+ 
+ - (NSNumber *) multiplier
+ {
+-  return [NSNumber numberWithInt: [internal attributeForKey: UNUM_MULTIPLIER]];
++  return internal->_multiplier;
+ }
+ 
+ 
+@@ -1814,54 +1958,60 @@ static NSUInteger _defaultBehavior = NSNumberFormatterBehavior10_4;
+ 
+ - (void) setZeroSymbol: (NSString *) string
+ {
+-  [internal setSymbol: string forKey: UNUM_ZERO_DIGIT_SYMBOL];
++  [self setAttributedStringForZero:
++    attributedString(string, internal->_textAttributesForZero)];
+ }
+ 
+ - (NSString *) zeroSymbol
+ {
+-  return [internal symbolForKey: UNUM_ZERO_DIGIT_SYMBOL];
++  return [_attributedStringForZero string];
+ }
+ 
+ - (void) setNilSymbol: (NSString *) string
+ {
+-  return; // FIXME
++  NSDictionary	*attributes = internal->_textAttributesForNil;
++
++  [self setAttributedStringForNil: attributedString(string, attributes)];
++  ASSIGNCOPY(internal->_textAttributesForNil, attributes);
+ }
+ 
+ - (NSString *) nilSymbol
+ {
+-  return nil; // FIXME
++  return [_attributedStringForNil string];
+ }
+ 
+ - (void) setNotANumberSymbol: (NSString *) string
+ {
+-  [internal setSymbol: string forKey: UNUM_NAN_SYMBOL];
++  NSDictionary	*attributes = internal->_textAttributesForNotANumber;
++
++  [self setAttributedStringForNotANumber:
++    attributedString(string, attributes)];
++  ASSIGNCOPY(internal->_textAttributesForNotANumber, attributes);
+ }
+ 
+ - (NSString *) notANumberSymbol
+ {
+-  return [internal symbolForKey: UNUM_NAN_SYMBOL];
++  return [_attributedStringForNotANumber string];
+ }
+ 
+ - (void) setNegativeInfinitySymbol: (NSString *) string
+ {
+-  // FIXME: ICU doesn't differenciate between positive and negative infinity.
+-  [internal setSymbol: string forKey: UNUM_INFINITY_SYMBOL];
++  ASSIGNCOPY(internal->_negativeInfinitySymbol, string);
+ }
+ 
+ - (NSString *) negativeInfinitySymbol
+ {
+-  return [internal symbolForKey: UNUM_INFINITY_SYMBOL];
++  return internal->_negativeInfinitySymbol;
+ }
+ 
+ - (void) setPositiveInfinitySymbol: (NSString *) string
+ {
+-  // FIXME: ICU doesn't differenciate between positive and negative infinity.
+-  [internal setSymbol: string forKey: UNUM_INFINITY_SYMBOL];
++  ASSIGNCOPY(internal->_positiveInfinitySymbol, string);
+ }
+ 
+ - (NSString *) positiveInfinitySymbol
+ {
+-  return [internal symbolForKey: UNUM_INFINITY_SYMBOL];
++  return internal->_positiveInfinitySymbol;
+ }
+ 
+ 
+@@ -1877,7 +2027,7 @@ static NSUInteger _defaultBehavior = NSNumberFormatterBehavior10_4;
+ 
+ - (void) setCurrencyCode: (NSString *) string
+ {
+-  [internal setSymbol: string forKey: UNUM_CURRENCY_CODE];
++  [internal setTextAttribute: string forKey: UNUM_CURRENCY_CODE];
+ }
+ 
+ - (NSString *) currencyCode
+@@ -1939,52 +2089,61 @@ static NSUInteger _defaultBehavior = NSNumberFormatterBehavior10_4;
+ 
+ - (void) setTextAttributesForZero: (NSDictionary *) newAttributes
+ {
+-  return;  // FIXME
++  ASSIGNCOPY(internal->_textAttributesForZero, newAttributes);
++  if (nil != _attributedStringForZero)
++    {
++      ASSIGN(_attributedStringForZero, attributedString(
++	[_attributedStringForZero string], newAttributes));
++    }
+ }
+ 
+ - (NSDictionary *) textAttributesForZero
+ {
+-  return nil; // FIXME
++  return internal->_textAttributesForZero;
+ }
+ 
+ - (void) setTextAttributesForNil: (NSDictionary *) newAttributes
+ {
+-  return;
++  ASSIGNCOPY(internal->_textAttributesForNil, newAttributes);
++  ASSIGN(_attributedStringForNil, attributedString(
++    [_attributedStringForNil string], newAttributes));
+ }
+ 
+ - (NSDictionary *) textAttributesForNil
+ {
+-  return nil; // FIXME
++  return internal->_textAttributesForNil;
+ }
+ 
+ - (void) setTextAttributesForNotANumber: (NSDictionary *) newAttributes
+ {
+-  return; // FIXME
++  ASSIGNCOPY(internal->_textAttributesForNotANumber, newAttributes);
++  ASSIGN(_attributedStringForNotANumber, attributedString(
++    [_attributedStringForNotANumber string], newAttributes));
+ }
+ 
+ - (NSDictionary *) textAttributesForNotANumber
+ {
+-  return nil; // FIXME
++  return internal->_textAttributesForNotANumber;
+ }
+ 
+ - (void) setTextAttributesForPositiveInfinity: (NSDictionary *) newAttributes
+ {
+-  return; // FIXME
++  ASSIGNCOPY(internal->_textAttributesForPositiveInfinity, newAttributes);
+ }
+ 
+ - (NSDictionary *) textAttributesForPositiveInfinity
+ {
+-  return nil; // FIXME
++  return internal->_textAttributesForPositiveInfinity;
+ }
+ 
+ - (void) setTextAttributesForNegativeInfinity: (NSDictionary *) newAttributes
+ {
+-  return; // FIXME
++  ASSIGNCOPY(internal->_textAttributesForNegativeInfinity, newAttributes);
+ }
+ 
+ - (NSDictionary *) textAttributesForNegativeInfinity
+ {
+-  return nil; // FIXME
++  return internal->_textAttributesForNegativeInfinity;
+ }
+ 
+ 
+@@ -2198,6 +2357,55 @@ static NSUInteger _defaultBehavior = NSNumberFormatterBehavior10_4;
+           result = NO;
+         }
+     }
++
++  if (result)
++    {
++      *rangep = NSMakeRange (rangep->location, parsePos - rangep->location);
++      result = [self _acceptParsed: anObject
++			    string: [aString substringWithRange: *rangep]
++			     error: error];
++    }
++  else
++    {
++      NSString	*s = [aString substringFromIndex: rangep->location];
++      id	special = nil;
++      NSString	*symbol = nil;
++
++      /* The strings this formatter gives for special values read back. */
++      if ([s isEqual: [self zeroSymbol]])
++        {
++          special = genDec ? [NSDecimalNumber zero]
++            : [NSNumber numberWithInt: 0];
++          symbol = [self zeroSymbol];
++        }
++      else if ([s isEqual: [self positiveInfinitySymbol]])
++        {
++          special = [NSNumber numberWithDouble: INFINITY];
++          symbol = [self positiveInfinitySymbol];
++        }
++      else if ([s isEqual: [self negativeInfinitySymbol]])
++        {
++          special = [NSNumber numberWithDouble: -INFINITY];
++          symbol = [self negativeInfinitySymbol];
++        }
++      else if ([s length] > 0 && [s isEqual: [self nilSymbol]])
++        {
++          special = [NSNull null];
++          symbol = [self nilSymbol];
++        }
++      if (nil != special)
++        {
++          *anObject = (special == [NSNull null]) ? nil : special;
++          *rangep = NSMakeRange (rangep->location, [symbol length]);
++          if (error)
++            *error = nil;
++          result = YES;
++        }
++      else if (error)
++        {
++          *error = invalidValue([aString substringWithRange: *rangep]);
++        }
++    }
+   
+   return result;
+ #else
+@@ -2205,6 +2413,60 @@ static NSUInteger _defaultBehavior = NSNumberFormatterBehavior10_4;
+ #endif
+ }
+ 
++- (BOOL) _acceptParsed: (id*)anObject
++                string: (NSString*)string
++                 error: (NSError**)error
++{
++  id		value = *anObject;
++  NSNumber	*multiplier = internal->_multiplier;
++  int32_t	m;
++
++  if (nil != multiplier && NO == integralMultiplier(multiplier, &m))
++    {
++      if ([value isKindOfClass: [NSDecimalNumber class]])
++        {
++          value = [value decimalNumberByDividingBy:
++            [NSDecimalNumber decimalNumberWithDecimal:
++              [multiplier decimalValue]]];
++        }
++      else
++        {
++          value = [NSNumber numberWithDouble:
++            [value doubleValue] / [multiplier doubleValue]];
++        }
++    }
++  if (NO == _allowsFloats)
++    {
++      double	d = [value doubleValue];
++
++      if (d != floor(d))
++        {
++          if (error)
++            *error = invalidValue(string);
++          *anObject = nil;
++          return NO;
++        }
++    }
++  if (nil != _minimum && [value compare: _minimum] == NSOrderedAscending)
++    {
++      if (error)
++        *error = formattingError([NSString stringWithFormat:
++          @"The value %@ is too small.", value]);
++      *anObject = nil;
++      return NO;
++    }
++  if (nil != _maximum && [value compare: _maximum] == NSOrderedDescending)
++    {
++      if (error)
++        *error = formattingError([NSString stringWithFormat:
++          @"The value %@ is too large.", value]);
++      *anObject = nil;
++      return NO;
++    }
++  *anObject = value;
++  return YES;
++}
++
+ 
+ - (void) setUsesSignificantDigits: (BOOL)flag
+ {
+@@ -2265,12 +2527,12 @@ static NSUInteger _defaultBehavior = NSNumberFormatterBehavior10_4;
+ 
+ - (void) setPartialStringValidationEnabled: (BOOL) enabled
+ {
+-  return;
++  internal->_partialStringValidation = (enabled ? YES : NO);
+ }
+ 
+ - (BOOL) isPartialStringValidationEnabled
+ {
+-  return NO;
++  return internal->_partialStringValidation;
+ }
+ 
+ 
+@@ -2316,7 +2578,46 @@ static NSUInteger _defaultBehavior = NSNumberFormatterBehavior10_4;
+   if (U_FAILURE(err))
+     {
+       internal->_formatter = NULL;
+-     } 
++      return;
++    } 
++  if (NSNumberFormatterNoStyle == internal->_style)
++    {
++      /* What macOS gives a formatter with no style. */
++      unum_setAttribute (internal->_formatter, UNUM_MAX_FRACTION_DIGITS, 0);
++      unum_setAttribute (internal->_formatter, UNUM_MAX_INTEGER_DIGITS, 42);
++      unum_setAttribute (internal->_formatter, UNUM_GROUPING_USED, 0);
++      unum_setAttribute (internal->_formatter, UNUM_GROUPING_SIZE, 0);
++    }
++  if (MYBEHAVIOR != NSNumberFormatterBehavior10_0
++    && (nil != _positiveFormat || nil != _negativeFormat))
++    {
++      NSString	*pattern = _positiveFormat;
++
++      if (nil == pattern)
++        {
++          pattern = [self _pattern];
++          if ([pattern rangeOfString: @";"].length > 0)
++            {
++              pattern = [pattern substringToIndex:
++                [pattern rangeOfString: @";"].location];
++            }
++        }
++      if (nil != _negativeFormat)
++        {
++          pattern = [NSString stringWithFormat: @"%@;%@",
++            pattern, _negativeFormat];
++        }
++      length = [pattern length];
++      if (length > BUFFER_SIZE)
++        {
++          length = BUFFER_SIZE;
++        }
++      [pattern getCharacters: buffer range: NSMakeRange (0, length)];
++      err = U_ZERO_ERROR;
++      unum_applyPattern (internal->_formatter, 0, buffer, length,
++        NULL, &err);
++      err = U_ZERO_ERROR;
++    }
+   // Reset all properties
+   for (idx = 0; idx < MAX_SYMBOLS; ++idx)
+     {
+@@ -2351,14 +2652,57 @@ static NSUInteger _defaultBehavior = NSNumberFormatterBehavior10_4;
+ 
+   for (idx = 0; idx < MAX_ATTRIBUTES; ++idx)
+     {
+-      if (internal->_attributes[idx] >= 0)
++      if (internal->_attributes[idx] != UNSET_ATTRIBUTE)
+ 	{
+           unum_setAttribute (internal->_formatter, idx,
+ 	    internal->_attributes[idx]);
+ 	}
+     }
++
++  if (nil != internal->_multiplier)
++    {
++      int32_t	m;
++
++      if (NO == integralMultiplier(internal->_multiplier, &m))
++        {
++          m = 1;	// -stringForObjectValue: and parsing scale by it
++        }
++      unum_setAttribute (internal->_formatter, UNUM_MULTIPLIER, m);
++    }
++  if (nil != internal->_roundingIncrement)
++    {
++      unum_setDoubleAttribute (internal->_formatter, UNUM_ROUNDING_INCREMENT,
++        [internal->_roundingIncrement doubleValue]);
++    }
+ #else
+   return;
+ #endif
+ }
++
++- (NSString*) _pattern
++{
++#if GS_USE_ICU == 1
++  UChar		buffer[BUFFER_SIZE];
++  UErrorCode	err = U_ZERO_ERROR;
++  int32_t	length;
++
++  if (NULL == internal->_formatter)
++    {
++      return nil;
++    }
++  length = unum_toPattern (internal->_formatter, 0, buffer, BUFFER_SIZE,
++    &err);
++  if (U_FAILURE(err))
++    {
++      return nil;
++    }
++  if (length > BUFFER_SIZE)
++    {
++      length = BUFFER_SIZE;
++    }
++  return [NSString stringWithCharacters: buffer length: length];
++#else
++  return nil;
++#endif
++}
+ @end
+diff --git a/Tests/base/NSNumberFormatter/settings.m b/Tests/base/NSNumberFormatter/settings.m
+new file mode 100644
+index 0000000..0921540
+--- /dev/null
++++ b/Tests/base/NSNumberFormatter/settings.m
+@@ -0,0 +1,278 @@
++#import <Foundation/Foundation.h>
++#import "Testing.h"
++#include <math.h>
++
++#if	defined(GS_USE_ICU)
++#define	NSLOCALE_SUPPORTED	GS_USE_ICU
++#else
++#define	NSLOCALE_SUPPORTED	1 /* Assume Apple support */
++#endif
++
++/* Each expected value is what macOS 15 gives for the same calls. */
++
++static NSNumberFormatter *
++decimalFormatter(void)
++{
++  NSNumberFormatter	*f = [[NSNumberFormatter new] autorelease];
++
++  [f setLocale: [[[NSLocale alloc] initWithLocaleIdentifier: @"en_US"]
++    autorelease]];
++  [f setNumberStyle: NSNumberFormatterDecimalStyle];
++  return f;
++}
++
++static NSString *
++parsed(NSNumberFormatter *f, NSString *s)
++{
++  id		v = nil;
++  NSString	*e = nil;
++  BOOL		ok = [f getObjectValue: &v forString: s errorDescription: &e];
++
++  return [NSString stringWithFormat: @"%d %@ %@", ok, v, e];
++}
++
++static NSArray *
++keysOf(NSDictionary *d)
++{
++  return [[d allKeys] sortedArrayUsingSelector: @selector(compare:)];
++}
++
++static NSDictionary *
++attributesOf(NSAttributedString *s)
++{
++  return [s attributesAtIndex: 0 effectiveRange: NULL];
++}
++
++static NSDictionary *
++one(NSString *key)
++{
++  return [NSDictionary dictionaryWithObject: @"1" forKey: key];
++}
++
++static id
++roundTrip(id o)
++{
++  return [NSKeyedUnarchiver unarchiveObjectWithData:
++    [NSKeyedArchiver archivedDataWithRootObject: o]];
++}
++
++int main()
++{
++  NSAutoreleasePool	*arp = [NSAutoreleasePool new];
++  NSNumberFormatter	*f;
++  NSNumberFormatter	*back;
++  NSDictionary		*def = one(@"default");
++  NSNumber		*inf = [NSNumber numberWithDouble: INFINITY];
++  NSNumber		*ninf = [NSNumber numberWithDouble: -INFINITY];
++
++  START_SET("NSNumberFormatter settings")
++    if (!NSLOCALE_SUPPORTED)
++      SKIP("NSLocale not supported\nThe ICU library was not available when GNUstep-base was built")
++
++    f = decimalFormatter();
++    PASS([f maximumFractionDigits] == 3 && [f usesGroupingSeparator],
++      "the decimal style gives three fraction digits and grouping")
++    [f setUsesGroupingSeparator: NO];
++    [f setLocale: [[[NSLocale alloc] initWithLocaleIdentifier: @"fr_FR"]
++      autorelease]];
++    [f setLocale: [[[NSLocale alloc] initWithLocaleIdentifier: @"en_US"]
++      autorelease]];
++    PASS_EQUAL([f stringFromNumber: [NSNumber numberWithDouble: 12345.6789]],
++      @"12345.679", "turning grouping off survives a change of locale")
++    [f setMaximumFractionDigits: 1];
++    [f setNumberStyle: NSNumberFormatterPercentStyle];
++    PASS_EQUAL([f stringFromNumber: [NSNumber numberWithDouble: 0.12345]],
++      @"12.3%", "a digit count survives a change of style")
++
++    f = decimalFormatter();
++    [f setMinimum: [NSNumber numberWithInt: 0]];
++    [f setMaximum: [NSNumber numberWithInt: 100]];
++    PASS_EQUAL(parsed(f, @"150"), @"0 (null) The value 150 is too large.",
++      "a number over the maximum is refused")
++    PASS_EQUAL(parsed(f, @"-1"), @"0 (null) The value -1 is too small.",
++      "a number under the minimum is refused")
++    PASS_EQUAL(parsed(f, @"50"), @"1 50 (null)", "a number in range is read")
++    PASS([f numberFromString: @"150"] == nil,
++      "-numberFromString: keeps to the range too")
++    [f setAllowsFloats: NO];
++    PASS_EQUAL(parsed(f, @"1.5"), @"0 (null) The value “1.5” is invalid.",
++      "a fraction is refused when floats are not allowed")
++    PASS_EQUAL(parsed(f, @"2"), @"1 2 (null)", "a whole number is read")
++
++    f = decimalFormatter();
++    PASS_EQUAL(parsed(f, @"12abc"),
++      @"0 (null) The value “12abc” is invalid.",
++      "the whole string must be a number")
++    PASS_EQUAL(parsed(f, @" 12 "), @"1 12 (null)",
++      "white space around a number is allowed")
++    PASS_EQUAL(parsed(f, @""), @"1 (null) (null)", "an empty string is nil")
++    {
++      NSRange	r = NSMakeRange(0, 5);
++      id	v = nil;
++      BOOL	ok;
++
++      ok = [f getObjectValue: &v forString: @"12abc" range: &r error: NULL];
++      PASS(ok && [v intValue] == 12 && r.length == 2,
++	"a range is read as far as it is a number")
++    }
++
++    f = decimalFormatter();
++    PASS_EQUAL([f nilSymbol], @"", "the nil symbol is empty")
++    PASS([f zeroSymbol] == nil, "there is no zero symbol")
++    PASS_EQUAL([f notANumberSymbol], @"NaN", "the NaN symbol is NaN")
++    PASS_EQUAL([f stringFromNumber: inf], @"+∞",
++      "positive infinity is +∞")
++    PASS_EQUAL([f stringFromNumber: ninf], @"-∞",
++      "negative infinity is -∞")
++    [f setNilSymbol: @"none"];
++    [f setZeroSymbol: @"zip"];
++    [f setNotANumberSymbol: @"nn"];
++    [f setPositiveInfinitySymbol: @"PI"];
++    [f setNegativeInfinitySymbol: @"NI"];
++    PASS_EQUAL([f stringForObjectValue: nil], @"none", "nil gives its symbol")
++    PASS_EQUAL([f stringFromNumber: [NSNumber numberWithInt: 0]], @"zip",
++      "zero gives its symbol")
++    PASS_EQUAL([f stringFromNumber: [NSNumber numberWithInt: 10]], @"10",
++      "the zero symbol is not a digit")
++    PASS_EQUAL([f stringFromNumber: [NSNumber numberWithDouble: NAN]], @"nn",
++      "NaN gives its symbol")
++    PASS_EQUAL([f stringFromNumber: inf], @"PI",
++      "positive infinity gives its symbol")
++    PASS_EQUAL([f stringFromNumber: ninf], @"NI",
++      "negative infinity gives its own symbol")
++    PASS_EQUAL([[f attributedStringForNil] string], @"none",
++      "the nil symbol is the string for nil")
++    PASS_EQUAL([[f attributedStringForZero] string], @"zip",
++      "the zero symbol is the string for zero")
++    PASS_EQUAL(parsed(f, @"zip"), @"1 0 (null)", "the zero symbol is read")
++    PASS_EQUAL(parsed(f, @"PI"), @"1 inf (null)", "an infinity is read")
++    PASS_EQUAL(parsed(f, @"none"), @"1 (null) (null)",
++      "the nil symbol is read as nil")
++    [f setTextAttributesForZero: one(@"zero")];
++    [f setTextAttributesForNil: one(@"nil")];
++    [f setTextAttributesForNotANumber: one(@"nan")];
++    [f setTextAttributesForPositiveInfinity: one(@"pinf")];
++    [f setTextAttributesForNegativeInfinity: one(@"ninf")];
++    [f setTextAttributesForPositiveValues: one(@"pos")];
++    [f setTextAttributesForNegativeValues: one(@"neg")];
++#define	ATTRIBUTED(v, s, k) \
++    PASS_EQUAL(keysOf(attributesOf([f attributedStringForObjectValue: v \
++      withDefaultAttributes: def])), \
++      ([NSArray arrayWithObjects: @"default", k, nil]), s)
++    ATTRIBUTED([NSNumber numberWithInt: 0], "zero has its attributes", @"zero");
++    ATTRIBUTED(nil, "nil has its attributes", @"nil");
++    ATTRIBUTED([NSNumber numberWithDouble: NAN], "NaN has its attributes", @"nan");
++    ATTRIBUTED(inf, "positive infinity has its attributes", @"pinf");
++    ATTRIBUTED(ninf, "negative infinity has its attributes", @"ninf");
++    ATTRIBUTED([NSNumber numberWithInt: 5], "a positive value has its attributes", @"pos");
++    ATTRIBUTED([NSNumber numberWithInt: -5], "a negative value has its attributes", @"neg");
++    PASS_EQUAL(keysOf(attributesOf([f attributedStringForNil])),
++      [NSArray arrayWithObject: @"nil"],
++      "the string for nil has the attributes for nil")
++
++    f = decimalFormatter();
++    PASS_EQUAL([f roundingIncrement], [NSNumber numberWithInt: 0],
++      "there is no rounding increment")
++    PASS([f multiplier] == nil, "there is no multiplier")
++    [f setRoundingIncrement: [NSNumber numberWithDouble: 0.25]];
++    PASS_EQUAL([f stringFromNumber: [NSNumber numberWithDouble: 1.1]], @"1",
++      "a rounding increment of 0.25 rounds 1.1 to 1")
++    PASS_EQUAL([f stringFromNumber: [NSNumber numberWithDouble: 1.13]], @"1.25",
++      "a rounding increment of 0.25 rounds 1.13 to 1.25")
++    [f setNumberStyle: NSNumberFormatterPercentStyle];
++    [f setNumberStyle: NSNumberFormatterDecimalStyle];
++    PASS_EQUAL([f stringFromNumber: [NSNumber numberWithDouble: 1.13]], @"1.25",
++      "the rounding increment survives a change of style")
++    [f setRoundingIncrement: [NSNumber numberWithInt: 5]];
++    [f setMaximumFractionDigits: 0];
++    PASS_EQUAL([f stringFromNumber: [NSNumber numberWithInt: 12]], @"10",
++      "a whole rounding increment is taken")
++
++    f = decimalFormatter();
++    [f setMultiplier: [NSNumber numberWithInt: 100]];
++    PASS_EQUAL([f stringFromNumber: [NSNumber numberWithDouble: 1.5]], @"150",
++      "a multiplier of 100 is applied in formatting")
++    PASS_EQUAL([f numberFromString: @"150"], [NSNumber numberWithDouble: 1.5],
++      "and undone in parsing")
++    [f setMultiplier: [NSNumber numberWithDouble: 0.5]];
++    PASS_EQUAL([f stringFromNumber: [NSNumber numberWithInt: 4]], @"2",
++      "a multiplier of 0.5 is applied in formatting")
++    PASS_EQUAL([f numberFromString: @"1.5"], [NSNumber numberWithInt: 3],
++      "and undone in parsing")
++    f = decimalFormatter();
++    [f setNumberStyle: NSNumberFormatterPercentStyle];
++    [f setMultiplier: [NSNumber numberWithInt: 10]];
++    PASS_EQUAL([f stringFromNumber: [NSNumber numberWithDouble: 1.5]], @"15%",
++      "a multiplier replaces the percent style's")
++
++    f = decimalFormatter();
++    [f setPositiveFormat: @"0.00 'u'"];
++    PASS_EQUAL([f stringFromNumber: [NSNumber numberWithDouble: 3.14159]],
++      @"3.14 u", "a positive format is applied")
++    PASS([f maximumFractionDigits] == 2, "the format sets the digits")
++    [f setNegativeFormat: @"(0.0)"];
++    PASS_EQUAL([f stringFromNumber: [NSNumber numberWithDouble: -2.25]],
++      @"(2.25)", "a negative format is applied")
++    [f setNumberStyle: NSNumberFormatterPercentStyle];
++    PASS_EQUAL([f stringFromNumber: [NSNumber numberWithDouble: 2.25]],
++      @"2.25 u", "the formats survive a change of style")
++
++    f = decimalFormatter();
++    [f setNumberStyle: 6];
++    PASS_EQUAL([f stringFromNumber: [NSNumber numberWithDouble: 1234.5]],
++      @"1,234th", "the ordinal style")
++    [f setNumberStyle: 8];
++    PASS_EQUAL([f stringFromNumber: [NSNumber numberWithDouble: 1234.5]],
++      @"USD 1,234.50", "the currency ISO code style")
++    [f setNumberStyle: 9];
++    PASS_EQUAL([f stringFromNumber: [NSNumber numberWithDouble: 1234.5]],
++      @"1,234.50 US dollars", "the currency plural style")
++    [f setNumberStyle: 10];
++    PASS_EQUAL([f stringFromNumber: [NSNumber numberWithDouble: 1234.5]],
++      @"$1,234.50", "the currency accounting style")
++    [f setNumberStyle: NSNumberFormatterCurrencyStyle];
++    [f setCurrencyCode: @"EUR"];
++    PASS_EQUAL([f currencyCode], @"EUR", "the currency code is set")
++    PASS_EQUAL([f stringFromNumber: [NSNumber numberWithDouble: 1234.5]],
++      @"€1,234.50", "the currency code is used")
++    [f setPartialStringValidationEnabled: YES];
++    PASS([f isPartialStringValidationEnabled],
++      "partial string validation is kept")
++
++    /* All of them survive a keyed archive. */
++    f = decimalFormatter();
++    [f setNilSymbol: @"none"];
++    [f setZeroSymbol: @"zip"];
++    [f setNotANumberSymbol: @"nn"];
++    [f setPositiveInfinitySymbol: @"PI"];
++    [f setNegativeInfinitySymbol: @"NI"];
++    [f setTextAttributesForZero: one(@"zero")];
++    [f setTextAttributesForPositiveInfinity: one(@"pinf")];
++    [f setRoundingIncrement: [NSNumber numberWithDouble: 0.25]];
++    [f setMultiplier: [NSNumber numberWithInt: 10]];
++    [f setPartialStringValidationEnabled: YES];
++    [f setPositiveFormat: @"0.00 'u'"];
++    back = roundTrip(f);
++    PASS_EQUAL([back nilSymbol], @"none", "the nil symbol survives")
++    PASS_EQUAL([back zeroSymbol], @"zip", "the zero symbol survives")
++    PASS_EQUAL([back notANumberSymbol], @"nn", "the NaN symbol survives")
++    PASS_EQUAL([back positiveInfinitySymbol], @"PI",
++      "the positive infinity symbol survives")
++    PASS_EQUAL([back negativeInfinitySymbol], @"NI",
++      "the negative infinity symbol survives")
++    PASS_EQUAL([back textAttributesForZero], one(@"zero"),
++      "the attributes for zero survive")
++    PASS_EQUAL([back textAttributesForPositiveInfinity], one(@"pinf"),
++      "the attributes for infinity survive")
++    PASS_EQUAL([back roundingIncrement], [NSNumber numberWithDouble: 0.25],
++      "the rounding increment survives")
++    PASS_EQUAL([back multiplier], [NSNumber numberWithInt: 10],
++      "the multiplier survives")
++    PASS([back isPartialStringValidationEnabled],
++      "partial string validation survives")
++    PASS_EQUAL([back positiveFormat], @"0.00 'u'", "the format survives")
++  END_SET("NSNumberFormatter settings")
++
++  [arp release];
++  return 0;
++}
+-- 
+2.43.0
+

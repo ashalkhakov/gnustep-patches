@@ -1,0 +1,137 @@
+From f0b38a09304c1486fce113c39edc67788933494a Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Mon, 19 Oct 2026 16:12:48 +0000
+Subject: [PATCH] Parse decimal numbers when a number formatter generates them
+
+With generatesDecimalNumbers set, -getObjectValue:forString:range:error:
+refused every string: its unum_parseDecimal() call was compiled out with
+a note that the function needs ICU 4.4, and the branch ended in
+result = NO.  So a field whose formatter generates decimal numbers, as
+one for a Core Data decimal attribute does, took nothing typed into it.
+ICU has had unum_parseDecimal() since 4.4; it is used when the headers
+are at least that, and an older ICU parses a double and makes a decimal
+number of it.
+
+Tests/base/NSNumberFormatter/parseDecimal.m parses an integer, a
+fraction and a grouped number in en_US's decimal style as decimal
+numbers equal to them, and refuses "abc"; 9 of its 10 checks fail
+without the change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/NSNumberFormatter.m                  | 18 +++++--
+ Tests/base/NSNumberFormatter/parseDecimal.m | 59 +++++++++++++++++++++
+ 2 files changed, 74 insertions(+), 3 deletions(-)
+ create mode 100644 Tests/base/NSNumberFormatter/parseDecimal.m
+
+diff --git a/Source/NSNumberFormatter.m b/Source/NSNumberFormatter.m
+index 00aaa27..bd91ef9 100644
+--- a/Source/NSNumberFormatter.m
++++ b/Source/NSNumberFormatter.m
+@@ -2021,7 +2021,8 @@ static NSUInteger _defaultBehavior = NSNumberFormatterBehavior10_4;
+   
+   if (genDec)  // Generate decimal number?  This should be the default.
+     {
+-#if 0 // FIXME: The unum_parseDecimal function is only available on ICU > 4.4
++#if U_ICU_VERSION_MAJOR_NUM > 4 \
++  || (U_ICU_VERSION_MAJOR_NUM == 4 && U_ICU_VERSION_MINOR_NUM >= 4)
+       int32_t outLen;
+       char outBuffer[BUFFER_SIZE];
+       
+@@ -2035,6 +2036,19 @@ static NSUInteger _defaultBehavior = NSNumberFormatterBehavior10_4;
+           *anObject = [NSDecimalNumber decimalNumberWithString: outStr];
+           result = YES;
+         }
++#else
++      double output;
++
++      output =
++        unum_parseDouble (internal->_formatter, inBuffer, inLen, &parsePos,
++          &err);
++      if (U_SUCCESS(err))
++        {
++          *anObject = [NSDecimalNumber decimalNumberWithDecimal:
++            [[NSNumber numberWithDouble: output] decimalValue]];
++          result = YES;
++        }
++#endif
+       else
+         {
+           if (error)
+@@ -2045,8 +2059,6 @@ static NSUInteger _defaultBehavior = NSNumberFormatterBehavior10_4;
+           *rangep = NSMakeRange (rangep->location, parsePos);
+           result = NO;
+         }
+-#endif
+-      result = NO;
+     }
+   else  // If not generating NSDecimalNumber use unum_parseDouble()
+     {
+diff --git a/Tests/base/NSNumberFormatter/parseDecimal.m b/Tests/base/NSNumberFormatter/parseDecimal.m
+new file mode 100644
+index 0000000..016fe45
+--- /dev/null
++++ b/Tests/base/NSNumberFormatter/parseDecimal.m
+@@ -0,0 +1,59 @@
++#import <Foundation/Foundation.h>
++#import "Testing.h"
++
++#if	defined(GS_USE_ICU)
++#define	NSLOCALE_SUPPORTED	GS_USE_ICU
++#else
++#define	NSLOCALE_SUPPORTED	1 /* Assume Apple support */
++#endif
++
++int main()
++{
++  NSAutoreleasePool	*arp = [NSAutoreleasePool new];
++  NSNumberFormatter	*fmt;
++  id			num;
++  NSString		*error;
++
++  START_SET("NSNumberFormatter generatesDecimalNumbers")
++    if (!NSLOCALE_SUPPORTED)
++      SKIP("NSLocale not supported\nThe ICU library was not available when GNUstep-base was built")
++
++    fmt = [[[NSNumberFormatter alloc] init] autorelease];
++    [fmt setFormatterBehavior: NSNumberFormatterBehavior10_4];
++    [fmt setLocale: [[[NSLocale alloc] initWithLocaleIdentifier: @"en_US"]
++      autorelease]];
++    [fmt setNumberStyle: NSNumberFormatterDecimalStyle];
++    [fmt setGeneratesDecimalNumbers: YES];
++
++    num = nil;
++    PASS([fmt getObjectValue: &num forString: @"12345" errorDescription: 0],
++      "an integer is parsed")
++    PASS([num isKindOfClass: [NSDecimalNumber class]],
++      "the integer is parsed as a decimal number")
++    PASS_EQUAL(num, [NSDecimalNumber decimalNumberWithString: @"12345"],
++      "the integer has its value")
++
++    num = nil;
++    PASS([fmt getObjectValue: &num forString: @"40.5" errorDescription: 0],
++      "a fraction is parsed")
++    PASS([num isKindOfClass: [NSDecimalNumber class]],
++      "the fraction is parsed as a decimal number")
++    PASS_EQUAL(num, [NSDecimalNumber decimalNumberWithString: @"40.5"],
++      "the fraction has its value")
++
++    num = nil;
++    PASS([fmt getObjectValue: &num forString: @"1,234.25" errorDescription: 0],
++      "a number with a grouping separator is parsed")
++    PASS_EQUAL(num, [NSDecimalNumber decimalNumberWithString: @"1234.25"],
++      "the grouped number has its value")
++
++    num = nil;
++    error = nil;
++    PASS([fmt getObjectValue: &num forString: @"abc" errorDescription: &error]
++      == NO, "text that is not a number is refused")
++    PASS(error != nil, "the refusal is described")
++  END_SET("NSNumberFormatter generatesDecimalNumbers")
++
++  [arp release];
++  return 0;
++}
+-- 
+2.43.0
+

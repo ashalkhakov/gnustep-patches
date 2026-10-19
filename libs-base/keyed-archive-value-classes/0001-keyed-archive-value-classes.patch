@@ -1,0 +1,2046 @@
+From c8510ae232af8f4d1d21338931621654db91939b Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Mon, 19 Oct 2026 17:14:08 +0000
+Subject: [PATCH] Keep locales, time zones, calendars and decimals in keyed
+ archives as macOS does
+
+A formatter's keyed archive holds its locale, time zone and calendar,
+its minimum and maximum (decimal numbers) and its rounding behaviour.
+GNUstep archived each of these the unkeyed way even in a keyed archive,
+under generated keys, so macOS could read none of them and GNUstep none
+of macOS's: on macOS -[NSLocale initWithCoder:] refused a GNUstep
+archive, and on GNUstep a 10.0 number formatter from macOS failed with
+"no class for name 'NSDecimalNumberPlaceholder'".  Each now uses macOS's
+keys in a keyed archive, and still reads the generated keys of older
+GNUstep archives:
+
+- NSLocale: NS.identifier.
+- NSTimeZone: NS.name, and NS.data with the zone's data where it has
+  any; a zone is read by its name.
+- NSCalendar: NS.identifier, NS.locale, NS.timezone, NS.firstwkdy and
+  NS.mindays.
+- NSDecimalNumber: NS.mantissa (128 bits as eight 16 bit words, least
+  significant first, in the byte order NS.mantissa.bo gives), NS.length
+  (the words in use), NS.exponent, NS.negative and NS.compact; NaN is an
+  empty negative mantissa.
+- NSDecimalNumberHandler conforms to NSCoding: NS.roundingmode, NS.scale
+  (left out for no scale), and each NS.raise.* that is set.
+
+NSKeyedUnarchiver now tries the classes an archive lists in $classes
+when the class named is missing, as macOS does for the fallbacks of
++classFallbacksForKeyedArchiver; macOS archives a decimal number as
+NSDecimalNumberPlaceholder, a class GNUstep does not have.
+
+Tests/base/NSKeyedArchiver/macosValueClasses.m reads archives macOS 15
+wrote (macos-*.plist) and checks the keys GNUstep writes; 20 of its 25
+checks fail without the change.  NSNumberFormatter/macosArchive.m and
+NSDateFormatter/macosArchive.m read formatters archived on macOS, which
+also needs the change reading NS.attributes; without this one they fail
+at the first check.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Headers/Foundation/NSDecimalNumber.h          |   2 +-
+ Source/NSCalendar.m                           |  41 +-
+ Source/NSDecimalNumber.m                      | 239 ++++++++++-
+ Source/NSKeyedUnarchiver.m                    |  10 +
+ Source/NSLocale.m                             |  19 +-
+ Source/NSTimeZone.m                           |  30 +-
+ .../NSDateFormatter/macos-dateformatter.plist | 340 +++++++++++++++
+ Tests/base/NSDateFormatter/macosArchive.m     |  36 ++
+ .../base/NSKeyedArchiver/macos-calendar.plist | 116 ++++++
+ .../base/NSKeyedArchiver/macos-decimals.plist | 178 ++++++++
+ .../base/NSKeyedArchiver/macos-handler.plist  |  46 ++
+ Tests/base/NSKeyedArchiver/macos-locale.plist |  44 ++
+ .../base/NSKeyedArchiver/macos-timezone.plist | 117 ++++++
+ .../base/NSKeyedArchiver/macosValueClasses.m  | 147 +++++++
+ .../macos-numberformatter.plist               | 392 ++++++++++++++++++
+ Tests/base/NSNumberFormatter/macosArchive.m   |  43 ++
+ 16 files changed, 1790 insertions(+), 10 deletions(-)
+ create mode 100644 Tests/base/NSDateFormatter/macos-dateformatter.plist
+ create mode 100644 Tests/base/NSDateFormatter/macosArchive.m
+ create mode 100644 Tests/base/NSKeyedArchiver/macos-calendar.plist
+ create mode 100644 Tests/base/NSKeyedArchiver/macos-decimals.plist
+ create mode 100644 Tests/base/NSKeyedArchiver/macos-handler.plist
+ create mode 100644 Tests/base/NSKeyedArchiver/macos-locale.plist
+ create mode 100644 Tests/base/NSKeyedArchiver/macos-timezone.plist
+ create mode 100644 Tests/base/NSKeyedArchiver/macosValueClasses.m
+ create mode 100644 Tests/base/NSNumberFormatter/macos-numberformatter.plist
+ create mode 100644 Tests/base/NSNumberFormatter/macosArchive.m
+
+diff --git a/Headers/Foundation/NSDecimalNumber.h b/Headers/Foundation/NSDecimalNumber.h
+index 715b73f..628fced 100644
+--- a/Headers/Foundation/NSDecimalNumber.h
++++ b/Headers/Foundation/NSDecimalNumber.h
+@@ -119,7 +119,7 @@ extern "C" {
+  *  with <code>...Behavior:</code>.
+  */
+ GS_EXPORT_CLASS
+-@interface	NSDecimalNumberHandler : NSObject <NSDecimalNumberBehaviors>
++@interface	NSDecimalNumberHandler : NSObject <NSDecimalNumberBehaviors, NSCoding>
+ {
+ #if	GS_EXPOSE(NSDecimalNumberHandler)
+   NSRoundingMode _roundingMode;
+diff --git a/Source/NSCalendar.m b/Source/NSCalendar.m
+index 6c3d6be..7140268 100644
+--- a/Source/NSCalendar.m
++++ b/Source/NSCalendar.m
+@@ -1186,6 +1186,16 @@ yearForWeekOfYear: (NSInteger*)yearValuePointer
+ 
+ - (void) encodeWithCoder: (NSCoder*)encoder
+ {
++  if ([encoder allowsKeyedCoding])
++    {
++      [encoder encodeObject: my->identifier forKey: @"NS.identifier"];
++      [encoder encodeObject: [self locale] forKey: @"NS.locale"];
++      [encoder encodeObject: my->tz forKey: @"NS.timezone"];
++      [encoder encodeInteger: [self firstWeekday] forKey: @"NS.firstwkdy"];
++      [encoder encodeInteger: [self minimumDaysInFirstWeek]
++		      forKey: @"NS.mindays"];
++      return;
++    }
+   [encoder encodeObject: my->identifier];
+   [encoder encodeObject: my->localeID];
+   [encoder encodeObject: my->tz];
+@@ -1193,8 +1203,35 @@ yearForWeekOfYear: (NSInteger*)yearValuePointer
+ 
+ - (id) initWithCoder: (NSCoder*)decoder
+ {
+-  NSString	*s = [decoder decodeObject];
+-
++  NSString	*s = nil;
++
++  if ([decoder allowsKeyedCoding]
++    && nil != (s = [decoder decodeObjectForKey: @"NS.identifier"]))
++    {
++      if (nil != (self = [self initWithCalendarIdentifier: s]))
++	{
++	  if ([decoder containsValueForKey: @"NS.locale"])
++	    {
++	      [self setLocale: [decoder decodeObjectForKey: @"NS.locale"]];
++	    }
++	  if ([decoder containsValueForKey: @"NS.timezone"])
++	    {
++	      [self setTimeZone: [decoder decodeObjectForKey: @"NS.timezone"]];
++	    }
++	  if ([decoder containsValueForKey: @"NS.firstwkdy"])
++	    {
++	      [self setFirstWeekday:
++		[decoder decodeIntegerForKey: @"NS.firstwkdy"]];
++	    }
++	  if ([decoder containsValueForKey: @"NS.mindays"])
++	    {
++	      [self setMinimumDaysInFirstWeek:
++		[decoder decodeIntegerForKey: @"NS.mindays"]];
++	    }
++	}
++      return self;
++    }
++  s = [decoder decodeObject];
+   if (nil != (self = [self initWithCalendarIdentifier: s]))
+     {
+       [self _setLocaleIdentifier: [decoder decodeObject]];
+diff --git a/Source/NSDecimalNumber.m b/Source/NSDecimalNumber.m
+index d840232..00e2777 100644
+--- a/Source/NSDecimalNumber.m
++++ b/Source/NSDecimalNumber.m
+@@ -51,6 +51,101 @@
+ // shared default behavior for NSDecimalNumber class
+ static NSDecimalNumberHandler *handler;
+ 
++/* A keyed archive keeps the mantissa as a 128 bit integer, in eight 16 bit
++ * words with the least significant first.
++ */
++static NSString *
++wordsString(const uint16_t *source)
++{
++  uint16_t	words[8];
++  char		digits[48];
++  int		n = sizeof(digits) - 1;
++  BOOL		zero;
++  int		i;
++
++  memcpy(words, source, sizeof(words));
++  digits[n] = '\0';
++  do
++    {
++      uint32_t	remainder = 0;
++
++      zero = YES;
++      for (i = 7; i >= 0; i--)
++	{
++	  uint32_t	value = (remainder << 16) | words[i];
++
++	  words[i] = value / 10;
++	  remainder = value % 10;
++	  if (words[i] != 0)
++	    {
++	      zero = NO;
++	    }
++	}
++      digits[--n] = '0' + remainder;
++    }
++  while (NO == zero && n > 0);
++  return [NSString stringWithUTF8String: digits + n];
++}
++
++static void
++decimalWords(NSString *s, uint16_t *words, int *exponent, BOOL *negative)
++{
++  const char	*p = [s UTF8String];
++  char		digits[64];
++  int		count = 0;
++  BOOL		point = NO;
++  int		i;
++  int		j;
++
++  *exponent = 0;
++  *negative = NO;
++  if (*p == '-')
++    {
++      *negative = YES;
++      p++;
++    }
++  for (; *p != '\0'; p++)
++    {
++      if (*p == '.')
++	{
++	  point = YES;
++	}
++      else if (*p >= '0' && *p <= '9')
++	{
++	  if (point)
++	    {
++	      (*exponent)--;
++	    }
++	  if ((count > 0 || *p != '0') && count < (int)sizeof(digits))
++	    {
++	      digits[count++] = *p;
++	    }
++	}
++      else if (*p == 'E' || *p == 'e')
++	{
++	  *exponent += atoi(p + 1);
++	  break;
++	}
++    }
++  while (count > 0 && digits[count - 1] == '0')
++    {
++      count--;
++      (*exponent)++;
++    }
++  for (j = 0; j < count; j++)
++    {
++      uint32_t	carry = digits[j] - '0';
++
++      for (i = 0; i < 8; i++)
++	{
++	  uint32_t	value = words[i] * 10 + carry;
++
++	  words[i] = value & 0xffff;
++	  carry = value >> 16;
++	}
++    }
++}
++
+ @implementation NSDecimalNumberHandler
+ 
+ + (id) defaultDecimalNumberHandler
+@@ -150,6 +245,79 @@ static NSDecimalNumberHandler *handler;
+   return _scale;
+ }
+ 
++- (void) encodeWithCoder: (NSCoder*)coder
++{
++  if ([coder allowsKeyedCoding])
++    {
++      [coder encodeInt: _roundingMode forKey: @"NS.roundingmode"];
++      if (_scale != NSDecimalNoScale)
++	{
++	  [coder encodeInt: _scale forKey: @"NS.scale"];
++	}
++      if (_raiseOnExactness)
++	{
++	  [coder encodeBool: YES forKey: @"NS.raise.exactness"];
++	}
++      if (_raiseOnOverflow)
++	{
++	  [coder encodeBool: YES forKey: @"NS.raise.overflow"];
++	}
++      if (_raiseOnUnderflow)
++	{
++	  [coder encodeBool: YES forKey: @"NS.raise.underflow"];
++	}
++      if (_raiseOnDivideByZero)
++	{
++	  [coder encodeBool: YES forKey: @"NS.raise.dividebyzero"];
++	}
++    }
++  else
++    {
++      int	mode = _roundingMode;
++
++      [coder encodeValueOfObjCType: @encode(int) at: &mode];
++      [coder encodeValueOfObjCType: @encode(short) at: &_scale];
++      [coder encodeValueOfObjCType: @encode(BOOL) at: &_raiseOnExactness];
++      [coder encodeValueOfObjCType: @encode(BOOL) at: &_raiseOnOverflow];
++      [coder encodeValueOfObjCType: @encode(BOOL) at: &_raiseOnUnderflow];
++      [coder encodeValueOfObjCType: @encode(BOOL) at: &_raiseOnDivideByZero];
++    }
++}
++
++- (id) initWithCoder: (NSCoder*)coder
++{
++  if ([coder allowsKeyedCoding])
++    {
++      _roundingMode = [coder decodeIntForKey: @"NS.roundingmode"];
++      if ([coder containsValueForKey: @"NS.scale"])
++	{
++	  _scale = [coder decodeIntForKey: @"NS.scale"];
++	}
++      else
++	{
++	  _scale = NSDecimalNoScale;
++	}
++      _raiseOnExactness = [coder decodeBoolForKey: @"NS.raise.exactness"];
++      _raiseOnOverflow = [coder decodeBoolForKey: @"NS.raise.overflow"];
++      _raiseOnUnderflow = [coder decodeBoolForKey: @"NS.raise.underflow"];
++      _raiseOnDivideByZero
++	= [coder decodeBoolForKey: @"NS.raise.dividebyzero"];
++    }
++  else
++    {
++      int	mode;
++
++      [coder decodeValueOfObjCType: @encode(int) at: &mode];
++      _roundingMode = mode;
++      [coder decodeValueOfObjCType: @encode(short) at: &_scale];
++      [coder decodeValueOfObjCType: @encode(BOOL) at: &_raiseOnExactness];
++      [coder decodeValueOfObjCType: @encode(BOOL) at: &_raiseOnOverflow];
++      [coder decodeValueOfObjCType: @encode(BOOL) at: &_raiseOnUnderflow];
++      [coder decodeValueOfObjCType: @encode(BOOL) at: &_raiseOnDivideByZero];
++    }
++  return self;
++}
++
+ @end
+ 
+ 
+@@ -983,13 +1151,82 @@ static NSDecimalNumber *one;
+ {
+   NSString	*s = [self descriptionWithLocale: nil];
+ 
++  if ([coder allowsKeyedCoding])
++    {
++      uint16_t	words[8];
++      uint8_t	bytes[16];
++      int	exponent = 0;
++      int	length = 0;
++      BOOL	negative = NO;
++      BOOL	nan = NSDecimalIsNotANumber(&data);
++      int	i;
++
++      memset(words, 0, sizeof(words));
++      if (NO == nan)
++	{
++	  decimalWords(s, words, &exponent, &negative);
++	  for (i = 0; i < 8; i++)
++	    {
++	      if (words[i] != 0)
++		{
++		  length = i + 1;
++		}
++	    }
++	}
++      for (i = 0; i < 8; i++)
++	{
++	  bytes[2 * i] = words[i] & 0xff;
++	  bytes[2 * i + 1] = words[i] >> 8;
++	}
++      [coder encodeInt: exponent forKey: @"NS.exponent"];
++      [coder encodeInt: length forKey: @"NS.length"];
++      [coder encodeBool: (nan || negative) forKey: @"NS.negative"];
++      [coder encodeBool: (length > 0) forKey: @"NS.compact"];
++      [coder encodeInt: 1 forKey: @"NS.mantissa.bo"];
++      [coder encodeBytes: bytes length: 16 forKey: @"NS.mantissa"];
++      return;
++    }
+   [coder encodeObject: s];
+ }
+ 
+ - (id) initWithCoder: (NSCoder*)coder
+ {
+-  NSString	*s = [coder decodeObject];
++  NSString	*s;
+ 
++  if ([coder allowsKeyedCoding]
++    && [coder containsValueForKey: @"NS.mantissa"])
++    {
++      const uint8_t	*bytes;
++      NSUInteger	count = 0;
++      uint16_t		words[8];
++      int		length = [coder decodeIntForKey: @"NS.length"];
++      int		order = [coder decodeIntForKey: @"NS.mantissa.bo"];
++      int		i;
++
++      bytes = [coder decodeBytesForKey: @"NS.mantissa" returnedLength: &count];
++      memset(words, 0, sizeof(words));
++      for (i = 0; i < 8 && i < length && 2 * i + 1 < count; i++)
++	{
++	  if (order == 1)
++	    {
++	      words[i] = bytes[2 * i] | (bytes[2 * i + 1] << 8);
++	    }
++	  else
++	    {
++	      words[i] = (bytes[2 * i] << 8) | bytes[2 * i + 1];
++	    }
++	}
++      if (0 == length && [coder decodeBoolForKey: @"NS.negative"])
++	{
++	  DESTROY(self);
++	  return RETAIN([NSDecimalNumber notANumber]);
++	}
++      s = [NSString stringWithFormat: @"%@%@E%d",
++	[coder decodeBoolForKey: @"NS.negative"] ? @"-" : @"",
++	wordsString(words), [coder decodeIntForKey: @"NS.exponent"]];
++      return [self initWithString: s locale: nil];
++    }
++  s = [coder decodeObject];
+   return [self initWithString: s locale: nil];
+ }
+ 
+diff --git a/Source/NSKeyedUnarchiver.m b/Source/NSKeyedUnarchiver.m
+index b09e3f8..b169c15 100644
+--- a/Source/NSKeyedUnarchiver.m
++++ b/Source/NSKeyedUnarchiver.m
+@@ -262,6 +262,16 @@ GSNSErrorFromUnarchiverException(NSException *exception)
+ 	  if (c == nil)
+ 	    {
+ 	      c = NSClassFromString(classname);
++	      if (c == nil && [classes count] > 1)
++		{
++		  NSUInteger	i;
++
++		  /* The fallbacks the archiver wrote for a missing class. */
++		  for (i = 1; c == nil && i < [classes count]; i++)
++		    {
++		      c = NSClassFromString([classes objectAtIndex: i]);
++		    }
++		}
+ 	      if (c == nil)
+ 		{
+ 		  c = [_delegate unarchiver: self
+diff --git a/Source/NSLocale.m b/Source/NSLocale.m
+index c46ef2c..01ff758 100644
+--- a/Source/NSLocale.m
++++ b/Source/NSLocale.m
+@@ -887,13 +887,28 @@ static NSRecursiveLock *classLock = nil;
+ 
+ - (void) encodeWithCoder: (NSCoder*)encoder
+ {
+-  [encoder encodeObject: _localeId];
++  if ([encoder allowsKeyedCoding])
++    {
++      [encoder encodeObject: _localeId forKey: @"NS.identifier"];
++    }
++  else
++    {
++      [encoder encodeObject: _localeId];
++    }
+ }
+ 
+ - (id) initWithCoder: (NSCoder*)decoder
+ {
+-  NSString	*s = [decoder decodeObject];
++  NSString	*s = nil;
+ 
++  if ([decoder allowsKeyedCoding])
++    {
++      s = [decoder decodeObjectForKey: @"NS.identifier"];
++    }
++  if (nil == s)
++    {
++      s = [decoder decodeObject];
++    }
+   return [self initWithLocaleIdentifier: s];
+ }
+ 
+diff --git a/Source/NSTimeZone.m b/Source/NSTimeZone.m
+index 627aee5..d020b40 100644
+--- a/Source/NSTimeZone.m
++++ b/Source/NSTimeZone.m
+@@ -669,7 +669,14 @@ static int		uninitialisedOffset = 100000;
+ 
+ - (void) encodeWithCoder: (NSCoder*)aCoder
+ {
+-  [aCoder encodeObject: name];
++  if ([aCoder allowsKeyedCoding])
++    {
++      [aCoder encodeObject: name forKey: @"NS.name"];
++    }
++  else
++    {
++      [aCoder encodeObject: name];
++    }
+ }
+ 
+ - (id) initWithOffset: (NSInteger)anOffset name: (NSString*)aName
+@@ -2146,7 +2153,15 @@ localZoneString, [zone name], sign, s/3600, (s/60)%60);
+ 
+ - (void) encodeWithCoder: (NSCoder*)aCoder
+ {
+-  [aCoder encodeObject: [self name]];
++  if ([aCoder allowsKeyedCoding])
++    {
++      [aCoder encodeObject: [self name] forKey: @"NS.name"];
++      [aCoder encodeObject: [self data] forKey: @"NS.data"];
++    }
++  else
++    {
++      [aCoder encodeObject: [self name]];
++    }
+ }
+ 
+ - (NSUInteger) hash
+@@ -2165,9 +2180,16 @@ localZoneString, [zone name], sign, s/3600, (s/60)%60);
+ 
+ - (id) initWithCoder: (NSCoder*)aDecoder
+ {
+-  NSString	*name;
++  NSString	*name = nil;
+ 
+-  name = [aDecoder decodeObject];
++  if ([aDecoder allowsKeyedCoding])
++    {
++      name = [aDecoder decodeObjectForKey: @"NS.name"];
++    }
++  if (nil == name)
++    {
++      name = [aDecoder decodeObject];
++    }
+   self = [self initWithName: name data: nil];
+   return self;
+ }
+diff --git a/Tests/base/NSDateFormatter/macos-dateformatter.plist b/Tests/base/NSDateFormatter/macos-dateformatter.plist
+new file mode 100644
+index 0000000..c3aafdf
+--- /dev/null
++++ b/Tests/base/NSDateFormatter/macos-dateformatter.plist
+@@ -0,0 +1,340 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
++<plist version="1.0">
++<dict>
++	<key>$archiver</key>
++	<string>NSKeyedArchiver</string>
++	<key>$objects</key>
++	<array>
++		<string>$null</string>
++		<dict>
++			<key>$class</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>29</integer>
++			</dict>
++			<key>NS.attributes</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>2</integer>
++			</dict>
++			<key>NS.format</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>28</integer>
++			</dict>
++			<key>NS.natural</key>
++			<false/>
++		</dict>
++		<dict>
++			<key>$class</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>27</integer>
++			</dict>
++			<key>NS.keys</key>
++			<array>
++				<dict>
++					<key>CF$UID</key>
++					<integer>3</integer>
++				</dict>
++				<dict>
++					<key>CF$UID</key>
++					<integer>4</integer>
++				</dict>
++				<dict>
++					<key>CF$UID</key>
++					<integer>5</integer>
++				</dict>
++				<dict>
++					<key>CF$UID</key>
++					<integer>6</integer>
++				</dict>
++				<dict>
++					<key>CF$UID</key>
++					<integer>7</integer>
++				</dict>
++				<dict>
++					<key>CF$UID</key>
++					<integer>8</integer>
++				</dict>
++			</array>
++			<key>NS.objects</key>
++			<array>
++				<dict>
++					<key>CF$UID</key>
++					<integer>9</integer>
++				</dict>
++				<dict>
++					<key>CF$UID</key>
++					<integer>19</integer>
++				</dict>
++				<dict>
++					<key>CF$UID</key>
++					<integer>20</integer>
++				</dict>
++				<dict>
++					<key>CF$UID</key>
++					<integer>22</integer>
++				</dict>
++				<dict>
++					<key>CF$UID</key>
++					<integer>25</integer>
++				</dict>
++				<dict>
++					<key>CF$UID</key>
++					<integer>26</integer>
++				</dict>
++			</array>
++		</dict>
++		<string>calendar</string>
++		<string>timeStyle</string>
++		<string>locale</string>
++		<string>timeZone</string>
++		<string>formatterBehavior</string>
++		<string>dateStyle</string>
++		<dict>
++			<key>$class</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>18</integer>
++			</dict>
++			<key>NS.firstwkdy</key>
++			<integer>1</integer>
++			<key>NS.identifier</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>10</integer>
++			</dict>
++			<key>NS.locale</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>11</integer>
++			</dict>
++			<key>NS.mindays</key>
++			<integer>1</integer>
++			<key>NS.timezone</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>14</integer>
++			</dict>
++		</dict>
++		<string>gregorian</string>
++		<dict>
++			<key>$class</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>13</integer>
++			</dict>
++			<key>NS.identifier</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>12</integer>
++			</dict>
++		</dict>
++		<string></string>
++		<dict>
++			<key>$classes</key>
++			<array>
++				<string>NSLocale</string>
++				<string>NSObject</string>
++			</array>
++			<key>$classname</key>
++			<string>NSLocale</string>
++		</dict>
++		<dict>
++			<key>$class</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>17</integer>
++			</dict>
++			<key>NS.data</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>16</integer>
++			</dict>
++			<key>NS.name</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>15</integer>
++			</dict>
++		</dict>
++		<string>Asia/Almaty</string>
++		<data>
++		VFppZjIAAAAAAAAAAAAAAAAAAAAAAAAAAAAACQAAAAAAAAA0AAAACQAAABCq
++		GXvctaPvMBUnfaAWGLIQFwixIBf55ZAY6eSgGdsZEBrMaaAbvHbAHKxnwB2c
++		WMAejEnAH3w6wCBsK8AhXBzAIkwNwCM7/sAkK+/AJRvgwCYL0cAnBP1AJ/Tu
++		QCjk7VApeJVQKdTQQCrEwUArtLJALKSjQC2UlEAuhIVAL3R2QDBkZ0AxXZLA
++		MnJtwDM9dMA0Uk/ANR1WwDYyMcA2/TjAOBtOQDjdGsA5+zBAOrz8wDvbEkA8
++		phlAPbr0QD6F+0A/mtZAQGXdQEGD8sBl4MYgAQMCAwIDAgMCBAUEBQQFBAUE
++		BQQFBAYHBAUEBQQFBAUEBQQFBAUEBQQFBAUEBQQFBAUEAQAASCQAAAAARlAA
++		BAAAYnABCAAAVGAADAAAVGAADAAAYnABCAAAVGABDAAARlAABAAAYnABCExN
++		VAArMDUAKzA3ACswNgAAAAAAAQEBAQFUWmlmMgAAAAAAAAAAAAAAAAAAAAAA
++		AAAAAAAJAAAAAAAAADQAAAAJAAAAEP////+qGXvc/////7Wj7zAAAAAAFSd9
++		oAAAAAAWGLIQAAAAABcIsSAAAAAAF/nlkAAAAAAY6eSgAAAAABnbGRAAAAAA
++		GsxpoAAAAAAbvHbAAAAAABysZ8AAAAAAHZxYwAAAAAAejEnAAAAAAB98OsAA
++		AAAAIGwrwAAAAAAhXBzAAAAAACJMDcAAAAAAIzv+wAAAAAAkK+/AAAAAACUb
++		4MAAAAAAJgvRwAAAAAAnBP1AAAAAACf07kAAAAAAKOTtUAAAAAApeJVQAAAA
++		ACnU0EAAAAAAKsTBQAAAAAArtLJAAAAAACyko0AAAAAALZSUQAAAAAAuhIVA
++		AAAAAC90dkAAAAAAMGRnQAAAAAAxXZLAAAAAADJybcAAAAAAMz10wAAAAAA0
++		Uk/AAAAAADUdVsAAAAAANjIxwAAAAAA2/TjAAAAAADgbTkAAAAAAON0awAAA
++		AAA5+zBAAAAAADq8/MAAAAAAO9sSQAAAAAA8phlAAAAAAD269EAAAAAAPoX7
++		QAAAAAA/mtZAAAAAAEBl3UAAAAAAQYPywAAAAABl4MYgAQMCAwIDAgMCBAUE
++		BQQFBAUEBQQFBAYHBAUEBQQFBAUEBQQFBAUEBQQFBAUEBQQFBAUEAQAASCQA
++		AAAARlAABAAAYnABCAAAVGAADAAAVGAADAAAYnABCAAAVGABDAAARlAABAAA
++		YnABCExNVAArMDUAKzA3ACswNgAAAAAAAQEBAQEKPCswNT4tNQo=
++		</data>
++		<dict>
++			<key>$classes</key>
++			<array>
++				<string>NSTimeZone</string>
++				<string>NSObject</string>
++			</array>
++			<key>$classname</key>
++			<string>NSTimeZone</string>
++		</dict>
++		<dict>
++			<key>$classes</key>
++			<array>
++				<string>NSCalendar</string>
++				<string>NSObject</string>
++			</array>
++			<key>$classname</key>
++			<string>NSCalendar</string>
++		</dict>
++		<integer>1</integer>
++		<dict>
++			<key>$class</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>13</integer>
++			</dict>
++			<key>NS.identifier</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>21</integer>
++			</dict>
++		</dict>
++		<string>fr_FR</string>
++		<dict>
++			<key>$class</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>17</integer>
++			</dict>
++			<key>NS.data</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>24</integer>
++			</dict>
++			<key>NS.name</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>23</integer>
++			</dict>
++		</dict>
++		<string>Europe/Paris</string>
++		<data>
++		VFppZjIAAAAAAAAAAAAAAAAAAAAAAAANAAAADQAAAAAAAAC4AAAADQAAAB+A
++		AAAAkWBQT5tHePCb1yxwnLyRcJ3ASPCeif5wn6Aq8KBgpfChgAzwoi4S8KN6
++		TPCkNYHwpV4jcKYlNfCnJ5vwqFgmcKkHffCp7jRwqudf8KvXUPCsx0Hwrcmn
++		8K6nI/CvoE9wsIcF8LGJa/CycCJws3KIcLRQBHC1SS/wti/mcLcyTHC4D8hw
++		uP+5cLnvqnC61mDwu9jG8LzIt/C9uKjwvp9fcL+YivDAmvDwwXhs8MJoXfDD
++		WE7wxD8FcMU4MPDGOpbwx1iscMfaCaDIbCfgzOdLEM2pF5DOokMQz5I0ENBP
++		4eDQifHw0XIWENJOQJALuzkADKsb8A2kY5AOixoQD4RFkBB0NpARZCeQElQY
++		kBNNRBAUM/qQFSPrkBYT3JAXA82QF/O+kBjjr5AZ06CQGsORkBu8vRAcrK4Q
++		HZyfEB6MkBAffIEQIGxyECFcYxAiTFQQIzxFECQsNhAlHCcQJgwYECcFQ5An
++		9TSQKOUlkCnVFpAqxQeQK7T4kCyk6ZAtlNqQLoTLkC90vJAwZK2QMV3ZEDJy
++		tBAzPbsQNFKWEDUdnRA2MngQNv1/EDgblJA43WEQOft2kDq9QxA721iQPKZf
++		kD27OpA+hkGQP5sckEBmI5BBhDkQQkYFkENkGxBEJeeQRUP9EEYFyZBHI98Q
++		R+7mEEkDwRBJzsgQSuOjEEuuqhBMzL+QTY6MEE6soZBPbm4QUIyDkFFXipBS
++		bGWQUzdskFRMR5BVF06QViwpkFb3MJBYFUYQWNcSkFn1KBBatvSQW9UKEFyg
++		ERBdtOwQXn/zEF+UzhBgX9UQYX3qkGI/txBjXcyQZB+ZEGU9rpBmCLWQZx2Q
++		kGfol5Bo/XKQach5kGrdVJBrqFuQbMZxEG2IPZBuplMQb2gfkHCGNRBxUTwQ
++		cmYXEHMxHhB0RfkQdREAEHYvFZB28OIQeA73kHjQxBB57tmQerCmEHvOu5B8
++		mcKQfa6dkH55pJB/jn+QAQUCAwIDAgMCAwIDAgMCAwIDAgMCAwIDAgMCAwID
++		AgMCAwIDAgMCAwIDAgMCAwIDAgMECAYHBgcJBAkKCAoLDAsMCwwLDAsMCwwL
++		DAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsM
++		CwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwL
++		DAsMCwwLDAsMCwwLDAsMCwwLDAAAAjEAAAAAAjEABAAADhABCAAAAAAADQAA
++		DhABCAAAAAAADQAADhAAEQAAHCABFQAAHCABFQAAHCABGgAADhAAEQAAHCAB
++		FQAADhAAEUxNVABQTVQAV0VTVABXRVQAQ0VUAENFU1QAV0VNVAAAAAEBAAAB
++		AQAAAAEBAAAAAAAAAAAAAAABAVRaaWYyAAAAAAAAAAAAAAAAAAAAAAAADQAA
++		AA0AAAAAAAAAuAAAAA0AAAAf/////2vJm8//////kWBQT/////+bR3jw////
++		/5vXLHD/////nLyRcP////+dwEjw/////56J/nD/////n6Aq8P////+gYKXw
++		/////6GADPD/////oi4S8P////+jekzw/////6Q1gfD/////pV4jcP////+m
++		JTXw/////6cnm/D/////qFgmcP////+pB33w/////6nuNHD/////qudf8P//
++		//+r11Dw/////6zHQfD/////rcmn8P////+upyPw/////6+gT3D/////sIcF
++		8P////+xiWvw/////7JwInD/////s3KIcP////+0UARw/////7VJL/D/////
++		ti/mcP////+3Mkxw/////7gPyHD/////uP+5cP////+576pw/////7rWYPD/
++		////u9jG8P////+8yLfw/////724qPD/////vp9fcP////+/mIrw/////8Ca
++		8PD/////wXhs8P/////CaF3w/////8NYTvD/////xD8FcP/////FODDw////
++		/8Y6lvD/////x1iscP/////H2gmg/////8hsJ+D/////zOdLEP/////NqReQ
++		/////86iQxD/////z5I0EP/////QT+Hg/////9CJ8fD/////0XIWEP/////S
++		TkCQAAAAAAu7OQAAAAAADKsb8AAAAAANpGOQAAAAAA6LGhAAAAAAD4RFkAAA
++		AAAQdDaQAAAAABFkJ5AAAAAAElQYkAAAAAATTUQQAAAAABQz+pAAAAAAFSPr
++		kAAAAAAWE9yQAAAAABcDzZAAAAAAF/O+kAAAAAAY46+QAAAAABnToJAAAAAA
++		GsORkAAAAAAbvL0QAAAAABysrhAAAAAAHZyfEAAAAAAejJAQAAAAAB98gRAA
++		AAAAIGxyEAAAAAAhXGMQAAAAACJMVBAAAAAAIzxFEAAAAAAkLDYQAAAAACUc
++		JxAAAAAAJgwYEAAAAAAnBUOQAAAAACf1NJAAAAAAKOUlkAAAAAAp1RaQAAAA
++		ACrFB5AAAAAAK7T4kAAAAAAspOmQAAAAAC2U2pAAAAAALoTLkAAAAAAvdLyQ
++		AAAAADBkrZAAAAAAMV3ZEAAAAAAycrQQAAAAADM9uxAAAAAANFKWEAAAAAA1
++		HZ0QAAAAADYyeBAAAAAANv1/EAAAAAA4G5SQAAAAADjdYRAAAAAAOft2kAAA
++		AAA6vUMQAAAAADvbWJAAAAAAPKZfkAAAAAA9uzqQAAAAAD6GQZAAAAAAP5sc
++		kAAAAABAZiOQAAAAAEGEORAAAAAAQkYFkAAAAABDZBsQAAAAAEQl55AAAAAA
++		RUP9EAAAAABGBcmQAAAAAEcj3xAAAAAAR+7mEAAAAABJA8EQAAAAAEnOyBAA
++		AAAASuOjEAAAAABLrqoQAAAAAEzMv5AAAAAATY6MEAAAAABOrKGQAAAAAE9u
++		bhAAAAAAUIyDkAAAAABRV4qQAAAAAFJsZZAAAAAAUzdskAAAAABUTEeQAAAA
++		AFUXTpAAAAAAViwpkAAAAABW9zCQAAAAAFgVRhAAAAAAWNcSkAAAAABZ9SgQ
++		AAAAAFq29JAAAAAAW9UKEAAAAABcoBEQAAAAAF207BAAAAAAXn/zEAAAAABf
++		lM4QAAAAAGBf1RAAAAAAYX3qkAAAAABiP7cQAAAAAGNdzJAAAAAAZB+ZEAAA
++		AABlPa6QAAAAAGYItZAAAAAAZx2QkAAAAABn6JeQAAAAAGj9cpAAAAAAach5
++		kAAAAABq3VSQAAAAAGuoW5AAAAAAbMZxEAAAAABtiD2QAAAAAG6mUxAAAAAA
++		b2gfkAAAAABwhjUQAAAAAHFRPBAAAAAAcmYXEAAAAABzMR4QAAAAAHRF+RAA
++		AAAAdREAEAAAAAB2LxWQAAAAAHbw4hAAAAAAeA73kAAAAAB40MQQAAAAAHnu
++		2ZAAAAAAerCmEAAAAAB7zruQAAAAAHyZwpAAAAAAfa6dkAAAAAB+eaSQAAAA
++		AH+Of5ABBQIDAgMCAwIDAgMCAwIDAgMCAwIDAgMCAwIDAgMCAwIDAgMCAwID
++		AgMCAwIDAgMCAwQIBgcGBwkECQoICgsMCwwLDAsMCwwLDAsMCwwLDAsMCwwL
++		DAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsM
++		CwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwL
++		DAsMCwwLDAsMAAACMQAAAAACMQAEAAAOEAEIAAAAAAANAAAOEAEIAAAAAAAN
++		AAAOEAARAAAcIAEVAAAcIAEVAAAcIAEaAAAOEAARAAAcIAEVAAAOEAARTE1U
++		AFBNVABXRVNUAFdFVABDRVQAQ0VTVABXRU1UAAAAAQEAAAEBAAAAAQEAAAAA
++		AAAAAAAAAAEBCkNFVC0xQ0VTVCxNMy41LjAsTTEwLjUuMC8zCg==
++		</data>
++		<integer>1040</integer>
++		<integer>3</integer>
++		<dict>
++			<key>$classes</key>
++			<array>
++				<string>NSMutableDictionary</string>
++				<string>NSDictionary</string>
++				<string>NSObject</string>
++			</array>
++			<key>$classname</key>
++			<string>NSMutableDictionary</string>
++		</dict>
++		<string>d MMMM y 'à' HH:mm</string>
++		<dict>
++			<key>$classes</key>
++			<array>
++				<string>NSDateFormatter</string>
++				<string>NSFormatter</string>
++				<string>NSObject</string>
++			</array>
++			<key>$classname</key>
++			<string>NSDateFormatter</string>
++		</dict>
++	</array>
++	<key>$top</key>
++	<dict>
++		<key>root</key>
++		<dict>
++			<key>CF$UID</key>
++			<integer>1</integer>
++		</dict>
++	</dict>
++	<key>$version</key>
++	<integer>100000</integer>
++</dict>
++</plist>
+diff --git a/Tests/base/NSDateFormatter/macosArchive.m b/Tests/base/NSDateFormatter/macosArchive.m
+new file mode 100644
+index 0000000..80e3174
+--- /dev/null
++++ b/Tests/base/NSDateFormatter/macosArchive.m
+@@ -0,0 +1,36 @@
++#import <Foundation/Foundation.h>
++#import "Testing.h"
++
++/* macos-dateformatter.plist was written by NSKeyedArchiver on macOS 15,
++ * from a formatter for fr_FR in Europe/Paris, with the gregorian calendar,
++ * the long date style and the short time style.
++ */
++int main()
++{
++  NSAutoreleasePool	*arp = [NSAutoreleasePool new];
++  NSDateFormatter	*fmt;
++  NSData		*data;
++
++  START_SET("NSDateFormatter archived on macOS")
++
++    data = [NSData dataWithContentsOfFile: @"macos-dateformatter.plist"];
++    fmt = [NSKeyedUnarchiver unarchiveObjectWithData: data];
++    PASS([fmt isKindOfClass: [NSDateFormatter class]],
++      "a date formatter archived on macOS is read")
++    PASS_EQUAL([[fmt locale] objectForKey: NSLocaleLanguageCode], @"fr",
++      "its locale is read")
++    PASS_EQUAL([[fmt timeZone] name], @"Europe/Paris",
++      "its time zone is read")
++    PASS_EQUAL([[fmt calendar] calendarIdentifier],
++      NSCalendarIdentifierGregorian, "its calendar is read")
++    PASS([fmt dateStyle] == NSDateFormatterLongStyle
++      && [fmt timeStyle] == NSDateFormatterShortStyle,
++      "its styles are read")
++    PASS_EQUAL([fmt stringFromDate:
++      [NSDate dateWithTimeIntervalSinceReferenceDate: 15 * 3600]],
++      @"1 janvier 2001 à 16:00", "it formats as on macOS")
++  END_SET("NSDateFormatter archived on macOS")
++
++  [arp release];
++  return 0;
++}
+diff --git a/Tests/base/NSKeyedArchiver/macos-calendar.plist b/Tests/base/NSKeyedArchiver/macos-calendar.plist
+new file mode 100644
+index 0000000..fe45db7
+--- /dev/null
++++ b/Tests/base/NSKeyedArchiver/macos-calendar.plist
+@@ -0,0 +1,116 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
++<plist version="1.0">
++<dict>
++	<key>$archiver</key>
++	<string>NSKeyedArchiver</string>
++	<key>$objects</key>
++	<array>
++		<string>$null</string>
++		<dict>
++			<key>$class</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>10</integer>
++			</dict>
++			<key>NS.firstwkdy</key>
++			<integer>2</integer>
++			<key>NS.identifier</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>2</integer>
++			</dict>
++			<key>NS.locale</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>3</integer>
++			</dict>
++			<key>NS.mindays</key>
++			<integer>4</integer>
++			<key>NS.timezone</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>6</integer>
++			</dict>
++		</dict>
++		<string>gregorian</string>
++		<dict>
++			<key>$class</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>5</integer>
++			</dict>
++			<key>NS.identifier</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>4</integer>
++			</dict>
++		</dict>
++		<string>de_DE</string>
++		<dict>
++			<key>$classes</key>
++			<array>
++				<string>NSLocale</string>
++				<string>NSObject</string>
++			</array>
++			<key>$classname</key>
++			<string>NSLocale</string>
++		</dict>
++		<dict>
++			<key>$class</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>9</integer>
++			</dict>
++			<key>NS.data</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>8</integer>
++			</dict>
++			<key>NS.name</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>7</integer>
++			</dict>
++		</dict>
++		<string>Asia/Tokyo</string>
++		<data>
++		VFppZjIAAAAAAAAAAAAAAAAAAAAAAAAEAAAABAAAAAAAAAAJAAAABAAAAAyA
++		AAAA1z4CcNftWfDY+Ppw2c078NsHAPDbrR3w3Obi8N2M//ADAQIBAgECAQIA
++		AIMDAAAAAIygAQQAAH6QAAgAAH6QAAhMTVQASkRUAEpTVAAAAAABAAAAAVRa
++		aWYyAAAAAAAAAAAAAAAAAAAAAAAABAAAAAQAAAAAAAAACQAAAAQAAAAM////
++		/2XCpHD/////1z4CcP/////X7Vnw/////9j4+nD/////2c078P/////bBwDw
++		/////9utHfD/////3Obi8P/////djP/wAwECAQIBAgECAACDAwAAAACMoAEE
++		AAB+kAAIAAB+kAAITE1UAEpEVABKU1QAAAAAAQAAAAEKSlNULTkK
++		</data>
++		<dict>
++			<key>$classes</key>
++			<array>
++				<string>NSTimeZone</string>
++				<string>NSObject</string>
++			</array>
++			<key>$classname</key>
++			<string>NSTimeZone</string>
++		</dict>
++		<dict>
++			<key>$classes</key>
++			<array>
++				<string>NSCalendar</string>
++				<string>NSObject</string>
++			</array>
++			<key>$classname</key>
++			<string>NSCalendar</string>
++		</dict>
++	</array>
++	<key>$top</key>
++	<dict>
++		<key>root</key>
++		<dict>
++			<key>CF$UID</key>
++			<integer>1</integer>
++		</dict>
++	</dict>
++	<key>$version</key>
++	<integer>100000</integer>
++</dict>
++</plist>
+diff --git a/Tests/base/NSKeyedArchiver/macos-decimals.plist b/Tests/base/NSKeyedArchiver/macos-decimals.plist
+new file mode 100644
+index 0000000..00b0374
+--- /dev/null
++++ b/Tests/base/NSKeyedArchiver/macos-decimals.plist
+@@ -0,0 +1,178 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
++<plist version="1.0">
++<dict>
++	<key>$archiver</key>
++	<string>NSKeyedArchiver</string>
++	<key>$objects</key>
++	<array>
++		<string>$null</string>
++		<dict>
++			<key>$class</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>8</integer>
++			</dict>
++			<key>NS.objects</key>
++			<array>
++				<dict>
++					<key>CF$UID</key>
++					<integer>2</integer>
++				</dict>
++				<dict>
++					<key>CF$UID</key>
++					<integer>4</integer>
++				</dict>
++				<dict>
++					<key>CF$UID</key>
++					<integer>5</integer>
++				</dict>
++				<dict>
++					<key>CF$UID</key>
++					<integer>6</integer>
++				</dict>
++				<dict>
++					<key>CF$UID</key>
++					<integer>7</integer>
++				</dict>
++			</array>
++		</dict>
++		<dict>
++			<key>$class</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>3</integer>
++			</dict>
++			<key>NS.compact</key>
++			<true/>
++			<key>NS.exponent</key>
++			<integer>-3</integer>
++			<key>NS.length</key>
++			<integer>2</integer>
++			<key>NS.mantissa</key>
++			<data>
++			TmG8AAAAAAAAAAAAAAAAAA==
++			</data>
++			<key>NS.mantissa.bo</key>
++			<integer>1</integer>
++			<key>NS.negative</key>
++			<true/>
++		</dict>
++		<dict>
++			<key>$classes</key>
++			<array>
++				<string>NSDecimalNumberPlaceholder</string>
++				<string>NSDecimalNumber</string>
++				<string>NSNumber</string>
++				<string>NSValue</string>
++				<string>NSObject</string>
++			</array>
++			<key>$classname</key>
++			<string>NSDecimalNumberPlaceholder</string>
++		</dict>
++		<dict>
++			<key>$class</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>3</integer>
++			</dict>
++			<key>NS.compact</key>
++			<true/>
++			<key>NS.exponent</key>
++			<integer>0</integer>
++			<key>NS.length</key>
++			<integer>8</integer>
++			<key>NS.mantissa</key>
++			<data>
++			wLrccnFB7OreD9e/48YXAA==
++			</data>
++			<key>NS.mantissa.bo</key>
++			<integer>1</integer>
++			<key>NS.negative</key>
++			<false/>
++		</dict>
++		<dict>
++			<key>$class</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>3</integer>
++			</dict>
++			<key>NS.compact</key>
++			<false/>
++			<key>NS.exponent</key>
++			<integer>0</integer>
++			<key>NS.length</key>
++			<integer>0</integer>
++			<key>NS.mantissa</key>
++			<data>
++			AAAAAAAAAAAAAAAAAAAAAA==
++			</data>
++			<key>NS.mantissa.bo</key>
++			<integer>1</integer>
++			<key>NS.negative</key>
++			<false/>
++		</dict>
++		<dict>
++			<key>$class</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>3</integer>
++			</dict>
++			<key>NS.compact</key>
++			<false/>
++			<key>NS.exponent</key>
++			<integer>0</integer>
++			<key>NS.length</key>
++			<integer>0</integer>
++			<key>NS.mantissa</key>
++			<data>
++			AAAAAAAAAAAAAAAAAAAAAA==
++			</data>
++			<key>NS.mantissa.bo</key>
++			<integer>1</integer>
++			<key>NS.negative</key>
++			<true/>
++		</dict>
++		<dict>
++			<key>$class</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>3</integer>
++			</dict>
++			<key>NS.compact</key>
++			<true/>
++			<key>NS.exponent</key>
++			<integer>19</integer>
++			<key>NS.length</key>
++			<integer>1</integer>
++			<key>NS.mantissa</key>
++			<data>
++			DwAAAAAAAAAAAAAAAAAAAA==
++			</data>
++			<key>NS.mantissa.bo</key>
++			<integer>1</integer>
++			<key>NS.negative</key>
++			<false/>
++		</dict>
++		<dict>
++			<key>$classes</key>
++			<array>
++				<string>NSArray</string>
++				<string>NSObject</string>
++			</array>
++			<key>$classname</key>
++			<string>NSArray</string>
++		</dict>
++	</array>
++	<key>$top</key>
++	<dict>
++		<key>root</key>
++		<dict>
++			<key>CF$UID</key>
++			<integer>1</integer>
++		</dict>
++	</dict>
++	<key>$version</key>
++	<integer>100000</integer>
++</dict>
++</plist>
+diff --git a/Tests/base/NSKeyedArchiver/macos-handler.plist b/Tests/base/NSKeyedArchiver/macos-handler.plist
+new file mode 100644
+index 0000000..2930659
+--- /dev/null
++++ b/Tests/base/NSKeyedArchiver/macos-handler.plist
+@@ -0,0 +1,46 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
++<plist version="1.0">
++<dict>
++	<key>$archiver</key>
++	<string>NSKeyedArchiver</string>
++	<key>$objects</key>
++	<array>
++		<string>$null</string>
++		<dict>
++			<key>$class</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>2</integer>
++			</dict>
++			<key>NS.raise.exactness</key>
++			<true/>
++			<key>NS.raise.underflow</key>
++			<true/>
++			<key>NS.roundingmode</key>
++			<integer>3</integer>
++			<key>NS.scale</key>
++			<integer>2</integer>
++		</dict>
++		<dict>
++			<key>$classes</key>
++			<array>
++				<string>NSDecimalNumberHandler</string>
++				<string>NSObject</string>
++			</array>
++			<key>$classname</key>
++			<string>NSDecimalNumberHandler</string>
++		</dict>
++	</array>
++	<key>$top</key>
++	<dict>
++		<key>root</key>
++		<dict>
++			<key>CF$UID</key>
++			<integer>1</integer>
++		</dict>
++	</dict>
++	<key>$version</key>
++	<integer>100000</integer>
++</dict>
++</plist>
+diff --git a/Tests/base/NSKeyedArchiver/macos-locale.plist b/Tests/base/NSKeyedArchiver/macos-locale.plist
+new file mode 100644
+index 0000000..41b55f5
+--- /dev/null
++++ b/Tests/base/NSKeyedArchiver/macos-locale.plist
+@@ -0,0 +1,44 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
++<plist version="1.0">
++<dict>
++	<key>$archiver</key>
++	<string>NSKeyedArchiver</string>
++	<key>$objects</key>
++	<array>
++		<string>$null</string>
++		<dict>
++			<key>$class</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>3</integer>
++			</dict>
++			<key>NS.identifier</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>2</integer>
++			</dict>
++		</dict>
++		<string>fr_FR</string>
++		<dict>
++			<key>$classes</key>
++			<array>
++				<string>NSLocale</string>
++				<string>NSObject</string>
++			</array>
++			<key>$classname</key>
++			<string>NSLocale</string>
++		</dict>
++	</array>
++	<key>$top</key>
++	<dict>
++		<key>root</key>
++		<dict>
++			<key>CF$UID</key>
++			<integer>1</integer>
++		</dict>
++	</dict>
++	<key>$version</key>
++	<integer>100000</integer>
++</dict>
++</plist>
+diff --git a/Tests/base/NSKeyedArchiver/macos-timezone.plist b/Tests/base/NSKeyedArchiver/macos-timezone.plist
+new file mode 100644
+index 0000000..6813ef9
+--- /dev/null
++++ b/Tests/base/NSKeyedArchiver/macos-timezone.plist
+@@ -0,0 +1,117 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
++<plist version="1.0">
++<dict>
++	<key>$archiver</key>
++	<string>NSKeyedArchiver</string>
++	<key>$objects</key>
++	<array>
++		<string>$null</string>
++		<dict>
++			<key>$class</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>4</integer>
++			</dict>
++			<key>NS.data</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>3</integer>
++			</dict>
++			<key>NS.name</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>2</integer>
++			</dict>
++		</dict>
++		<string>Europe/Paris</string>
++		<data>
++		VFppZjIAAAAAAAAAAAAAAAAAAAAAAAANAAAADQAAAAAAAAC4AAAADQAAAB+A
++		AAAAkWBQT5tHePCb1yxwnLyRcJ3ASPCeif5wn6Aq8KBgpfChgAzwoi4S8KN6
++		TPCkNYHwpV4jcKYlNfCnJ5vwqFgmcKkHffCp7jRwqudf8KvXUPCsx0Hwrcmn
++		8K6nI/CvoE9wsIcF8LGJa/CycCJws3KIcLRQBHC1SS/wti/mcLcyTHC4D8hw
++		uP+5cLnvqnC61mDwu9jG8LzIt/C9uKjwvp9fcL+YivDAmvDwwXhs8MJoXfDD
++		WE7wxD8FcMU4MPDGOpbwx1iscMfaCaDIbCfgzOdLEM2pF5DOokMQz5I0ENBP
++		4eDQifHw0XIWENJOQJALuzkADKsb8A2kY5AOixoQD4RFkBB0NpARZCeQElQY
++		kBNNRBAUM/qQFSPrkBYT3JAXA82QF/O+kBjjr5AZ06CQGsORkBu8vRAcrK4Q
++		HZyfEB6MkBAffIEQIGxyECFcYxAiTFQQIzxFECQsNhAlHCcQJgwYECcFQ5An
++		9TSQKOUlkCnVFpAqxQeQK7T4kCyk6ZAtlNqQLoTLkC90vJAwZK2QMV3ZEDJy
++		tBAzPbsQNFKWEDUdnRA2MngQNv1/EDgblJA43WEQOft2kDq9QxA721iQPKZf
++		kD27OpA+hkGQP5sckEBmI5BBhDkQQkYFkENkGxBEJeeQRUP9EEYFyZBHI98Q
++		R+7mEEkDwRBJzsgQSuOjEEuuqhBMzL+QTY6MEE6soZBPbm4QUIyDkFFXipBS
++		bGWQUzdskFRMR5BVF06QViwpkFb3MJBYFUYQWNcSkFn1KBBatvSQW9UKEFyg
++		ERBdtOwQXn/zEF+UzhBgX9UQYX3qkGI/txBjXcyQZB+ZEGU9rpBmCLWQZx2Q
++		kGfol5Bo/XKQach5kGrdVJBrqFuQbMZxEG2IPZBuplMQb2gfkHCGNRBxUTwQ
++		cmYXEHMxHhB0RfkQdREAEHYvFZB28OIQeA73kHjQxBB57tmQerCmEHvOu5B8
++		mcKQfa6dkH55pJB/jn+QAQUCAwIDAgMCAwIDAgMCAwIDAgMCAwIDAgMCAwID
++		AgMCAwIDAgMCAwIDAgMCAwIDAgMECAYHBgcJBAkKCAoLDAsMCwwLDAsMCwwL
++		DAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsM
++		CwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwL
++		DAsMCwwLDAsMCwwLDAsMCwwLDAAAAjEAAAAAAjEABAAADhABCAAAAAAADQAA
++		DhABCAAAAAAADQAADhAAEQAAHCABFQAAHCABFQAAHCABGgAADhAAEQAAHCAB
++		FQAADhAAEUxNVABQTVQAV0VTVABXRVQAQ0VUAENFU1QAV0VNVAAAAAEBAAAB
++		AQAAAAEBAAAAAAAAAAAAAAABAVRaaWYyAAAAAAAAAAAAAAAAAAAAAAAADQAA
++		AA0AAAAAAAAAuAAAAA0AAAAf/////2vJm8//////kWBQT/////+bR3jw////
++		/5vXLHD/////nLyRcP////+dwEjw/////56J/nD/////n6Aq8P////+gYKXw
++		/////6GADPD/////oi4S8P////+jekzw/////6Q1gfD/////pV4jcP////+m
++		JTXw/////6cnm/D/////qFgmcP////+pB33w/////6nuNHD/////qudf8P//
++		//+r11Dw/////6zHQfD/////rcmn8P////+upyPw/////6+gT3D/////sIcF
++		8P////+xiWvw/////7JwInD/////s3KIcP////+0UARw/////7VJL/D/////
++		ti/mcP////+3Mkxw/////7gPyHD/////uP+5cP////+576pw/////7rWYPD/
++		////u9jG8P////+8yLfw/////724qPD/////vp9fcP////+/mIrw/////8Ca
++		8PD/////wXhs8P/////CaF3w/////8NYTvD/////xD8FcP/////FODDw////
++		/8Y6lvD/////x1iscP/////H2gmg/////8hsJ+D/////zOdLEP/////NqReQ
++		/////86iQxD/////z5I0EP/////QT+Hg/////9CJ8fD/////0XIWEP/////S
++		TkCQAAAAAAu7OQAAAAAADKsb8AAAAAANpGOQAAAAAA6LGhAAAAAAD4RFkAAA
++		AAAQdDaQAAAAABFkJ5AAAAAAElQYkAAAAAATTUQQAAAAABQz+pAAAAAAFSPr
++		kAAAAAAWE9yQAAAAABcDzZAAAAAAF/O+kAAAAAAY46+QAAAAABnToJAAAAAA
++		GsORkAAAAAAbvL0QAAAAABysrhAAAAAAHZyfEAAAAAAejJAQAAAAAB98gRAA
++		AAAAIGxyEAAAAAAhXGMQAAAAACJMVBAAAAAAIzxFEAAAAAAkLDYQAAAAACUc
++		JxAAAAAAJgwYEAAAAAAnBUOQAAAAACf1NJAAAAAAKOUlkAAAAAAp1RaQAAAA
++		ACrFB5AAAAAAK7T4kAAAAAAspOmQAAAAAC2U2pAAAAAALoTLkAAAAAAvdLyQ
++		AAAAADBkrZAAAAAAMV3ZEAAAAAAycrQQAAAAADM9uxAAAAAANFKWEAAAAAA1
++		HZ0QAAAAADYyeBAAAAAANv1/EAAAAAA4G5SQAAAAADjdYRAAAAAAOft2kAAA
++		AAA6vUMQAAAAADvbWJAAAAAAPKZfkAAAAAA9uzqQAAAAAD6GQZAAAAAAP5sc
++		kAAAAABAZiOQAAAAAEGEORAAAAAAQkYFkAAAAABDZBsQAAAAAEQl55AAAAAA
++		RUP9EAAAAABGBcmQAAAAAEcj3xAAAAAAR+7mEAAAAABJA8EQAAAAAEnOyBAA
++		AAAASuOjEAAAAABLrqoQAAAAAEzMv5AAAAAATY6MEAAAAABOrKGQAAAAAE9u
++		bhAAAAAAUIyDkAAAAABRV4qQAAAAAFJsZZAAAAAAUzdskAAAAABUTEeQAAAA
++		AFUXTpAAAAAAViwpkAAAAABW9zCQAAAAAFgVRhAAAAAAWNcSkAAAAABZ9SgQ
++		AAAAAFq29JAAAAAAW9UKEAAAAABcoBEQAAAAAF207BAAAAAAXn/zEAAAAABf
++		lM4QAAAAAGBf1RAAAAAAYX3qkAAAAABiP7cQAAAAAGNdzJAAAAAAZB+ZEAAA
++		AABlPa6QAAAAAGYItZAAAAAAZx2QkAAAAABn6JeQAAAAAGj9cpAAAAAAach5
++		kAAAAABq3VSQAAAAAGuoW5AAAAAAbMZxEAAAAABtiD2QAAAAAG6mUxAAAAAA
++		b2gfkAAAAABwhjUQAAAAAHFRPBAAAAAAcmYXEAAAAABzMR4QAAAAAHRF+RAA
++		AAAAdREAEAAAAAB2LxWQAAAAAHbw4hAAAAAAeA73kAAAAAB40MQQAAAAAHnu
++		2ZAAAAAAerCmEAAAAAB7zruQAAAAAHyZwpAAAAAAfa6dkAAAAAB+eaSQAAAA
++		AH+Of5ABBQIDAgMCAwIDAgMCAwIDAgMCAwIDAgMCAwIDAgMCAwIDAgMCAwID
++		AgMCAwIDAgMCAwQIBgcGBwkECQoICgsMCwwLDAsMCwwLDAsMCwwLDAsMCwwL
++		DAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsM
++		CwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwLDAsMCwwL
++		DAsMCwwLDAsMAAACMQAAAAACMQAEAAAOEAEIAAAAAAANAAAOEAEIAAAAAAAN
++		AAAOEAARAAAcIAEVAAAcIAEVAAAcIAEaAAAOEAARAAAcIAEVAAAOEAARTE1U
++		AFBNVABXRVNUAFdFVABDRVQAQ0VTVABXRU1UAAAAAQEAAAEBAAAAAQEAAAAA
++		AAAAAAAAAAEBCkNFVC0xQ0VTVCxNMy41LjAsTTEwLjUuMC8zCg==
++		</data>
++		<dict>
++			<key>$classes</key>
++			<array>
++				<string>NSTimeZone</string>
++				<string>NSObject</string>
++			</array>
++			<key>$classname</key>
++			<string>NSTimeZone</string>
++		</dict>
++	</array>
++	<key>$top</key>
++	<dict>
++		<key>root</key>
++		<dict>
++			<key>CF$UID</key>
++			<integer>1</integer>
++		</dict>
++	</dict>
++	<key>$version</key>
++	<integer>100000</integer>
++</dict>
++</plist>
+diff --git a/Tests/base/NSKeyedArchiver/macosValueClasses.m b/Tests/base/NSKeyedArchiver/macosValueClasses.m
+new file mode 100644
+index 0000000..fb691ea
+--- /dev/null
++++ b/Tests/base/NSKeyedArchiver/macosValueClasses.m
+@@ -0,0 +1,147 @@
++#import <Foundation/Foundation.h>
++#import "Testing.h"
++
++/* The macos-*.plist archives were written by NSKeyedArchiver on macOS 15. */
++static id
++macosArchive(NSString *name)
++{
++  NSString	*path;
++  NSData	*data;
++
++  path = [NSString stringWithFormat: @"macos-%@.plist", name];
++  data = [NSData dataWithContentsOfFile: path];
++  return [NSKeyedUnarchiver unarchiveObjectWithData: data];
++}
++
++/* The keys an object was archived with. */
++static NSDictionary *
++archivedKeys(id object)
++{
++  NSData	*data = [NSKeyedArchiver archivedDataWithRootObject: object];
++  NSDictionary	*plist;
++
++  plist = [NSPropertyListSerialization propertyListWithData: data
++    options: NSPropertyListImmutable format: NULL error: NULL];
++  /* The root object is the first one archived, after $null. */
++  return [[plist objectForKey: @"$objects"] objectAtIndex: 1];
++}
++
++int main()
++{
++  NSAutoreleasePool	*arp = [NSAutoreleasePool new];
++  NSArray		*decimals;
++  NSDecimalNumberHandler	*handler;
++  NSCalendar		*calendar;
++  NSTimeZone		*zone;
++  NSLocale		*locale;
++  id			o;
++
++  START_SET("keyed archives of value classes from macOS")
++
++    locale = macosArchive(@"locale");
++    PASS([locale isKindOfClass: [NSLocale class]]
++      && [[locale localeIdentifier] isEqual: @"fr_FR"],
++      "a locale archived on macOS is read")
++
++    zone = macosArchive(@"timezone");
++    PASS([zone isKindOfClass: [NSTimeZone class]]
++      && [[zone name] isEqual: @"Europe/Paris"],
++      "a time zone archived on macOS is read")
++
++    calendar = macosArchive(@"calendar");
++    PASS([calendar isKindOfClass: [NSCalendar class]]
++      && [[calendar calendarIdentifier] isEqual: NSCalendarIdentifierGregorian],
++      "a calendar archived on macOS is read")
++    PASS_EQUAL([[calendar locale] objectForKey: NSLocaleLanguageCode], @"de",
++      "the calendar's locale is read")
++    PASS_EQUAL([[calendar timeZone] name], @"Asia/Tokyo",
++      "the calendar's time zone is read")
++    PASS([calendar firstWeekday] == 2 && [calendar minimumDaysInFirstWeek] == 4,
++      "the calendar's week settings are read")
++
++    decimals = macosArchive(@"decimals");
++    PASS([decimals count] == 5, "decimal numbers archived on macOS are read")
++    PASS_EQUAL([decimals objectAtIndex: 0],
++      [NSDecimalNumber decimalNumberWithString: @"-12345.678"],
++      "a negative fraction is read")
++    PASS_EQUAL([decimals objectAtIndex: 1],
++      [NSDecimalNumber decimalNumberWithString:
++	@"123456789012345678901234567890123456"],
++      "a number with all eight words of mantissa is read")
++    PASS_EQUAL([decimals objectAtIndex: 2], [NSDecimalNumber zero],
++      "zero is read")
++    PASS([[decimals objectAtIndex: 3] isEqual: [NSDecimalNumber notANumber]],
++      "NaN is read")
++    PASS_EQUAL([decimals objectAtIndex: 4],
++      [NSDecimalNumber decimalNumberWithString: @"1.5E20"],
++      "a number with an exponent is read")
++
++    handler = macosArchive(@"handler");
++    PASS([handler isKindOfClass: [NSDecimalNumberHandler class]]
++      && [handler roundingMode] == NSRoundBankers && [handler scale] == 2,
++      "a decimal number handler archived on macOS is read")
++
++  END_SET("keyed archives of value classes from macOS")
++
++  START_SET("keyed archives of value classes as macOS writes them")
++
++    locale = [[[NSLocale alloc] initWithLocaleIdentifier: @"fr_FR"]
++      autorelease];
++    PASS([archivedKeys(locale) objectForKey: @"NS.identifier"] != nil,
++      "a locale is archived under NS.identifier")
++    o = [NSKeyedUnarchiver unarchiveObjectWithData:
++      [NSKeyedArchiver archivedDataWithRootObject: locale]];
++    PASS_EQUAL([o localeIdentifier], @"fr_FR", "a locale survives")
++
++    zone = [NSTimeZone timeZoneWithName: @"Europe/Paris"];
++    PASS([archivedKeys(zone) objectForKey: @"NS.name"] != nil,
++      "a time zone is archived under NS.name")
++    o = [NSKeyedUnarchiver unarchiveObjectWithData:
++      [NSKeyedArchiver archivedDataWithRootObject: zone]];
++    PASS_EQUAL([o name], @"Europe/Paris", "a time zone survives")
++
++    calendar = [[[NSCalendar alloc]
++      initWithCalendarIdentifier: NSCalendarIdentifierGregorian] autorelease];
++    [calendar setFirstWeekday: 2];
++    [calendar setTimeZone: zone];
++    o = archivedKeys(calendar);
++    PASS([o objectForKey: @"NS.identifier"] != nil
++      && [o objectForKey: @"NS.timezone"] != nil
++      && [o objectForKey: @"NS.firstwkdy"] != nil,
++      "a calendar is archived under macOS's keys")
++    o = [NSKeyedUnarchiver unarchiveObjectWithData:
++      [NSKeyedArchiver archivedDataWithRootObject: calendar]];
++    PASS([[o calendarIdentifier] isEqual: NSCalendarIdentifierGregorian]
++      && [o firstWeekday] == 2 && [[[o timeZone] name] isEqual: @"Europe/Paris"],
++      "a calendar survives")
++
++    o = [NSDecimalNumber decimalNumberWithString: @"-12345.678"];
++    PASS([archivedKeys(o) objectForKey: @"NS.mantissa"] != nil,
++      "a decimal number is archived as its mantissa and exponent")
++    PASS_EQUAL([NSKeyedUnarchiver unarchiveObjectWithData:
++      [NSKeyedArchiver archivedDataWithRootObject: o]], o,
++      "a decimal number survives")
++    o = [NSDecimalNumber decimalNumberWithString:
++      @"123456789012345678901234567890123456"];
++    PASS_EQUAL([NSKeyedUnarchiver unarchiveObjectWithData:
++      [NSKeyedArchiver archivedDataWithRootObject: o]], o,
++      "a long decimal number survives")
++    o = [NSKeyedUnarchiver unarchiveObjectWithData:
++      [NSKeyedArchiver archivedDataWithRootObject: [NSDecimalNumber notANumber]]];
++    PASS([o isEqual: [NSDecimalNumber notANumber]], "NaN survives")
++
++    handler = [NSDecimalNumberHandler decimalNumberHandlerWithRoundingMode:
++      NSRoundDown scale: 3 raiseOnExactness: NO raiseOnOverflow: YES
++      raiseOnUnderflow: NO raiseOnDivideByZero: NO];
++    PASS([archivedKeys(handler) objectForKey: @"NS.roundingmode"] != nil,
++      "a decimal number handler is archived under macOS's keys")
++    o = [NSKeyedUnarchiver unarchiveObjectWithData:
++      [NSKeyedArchiver archivedDataWithRootObject: handler]];
++    PASS([o roundingMode] == NSRoundDown && [o scale] == 3,
++      "a decimal number handler survives")
++
++  END_SET("keyed archives of value classes as macOS writes them")
++
++  [arp release];
++  return 0;
++}
+diff --git a/Tests/base/NSNumberFormatter/macos-numberformatter.plist b/Tests/base/NSNumberFormatter/macos-numberformatter.plist
+new file mode 100644
+index 0000000..ce598ff
+--- /dev/null
++++ b/Tests/base/NSNumberFormatter/macos-numberformatter.plist
+@@ -0,0 +1,392 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
++<plist version="1.0">
++<dict>
++	<key>$archiver</key>
++	<string>NSKeyedArchiver</string>
++	<key>$objects</key>
++	<array>
++		<string>$null</string>
++		<dict>
++			<key>$class</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>38</integer>
++			</dict>
++			<key>NS.allowsfloats</key>
++			<true/>
++			<key>NS.attributes</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>2</integer>
++			</dict>
++			<key>NS.decimal</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>36</integer>
++			</dict>
++			<key>NS.hasthousands</key>
++			<true/>
++			<key>NS.localized</key>
++			<true/>
++			<key>NS.max</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>33</integer>
++			</dict>
++			<key>NS.min</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>23</integer>
++			</dict>
++			<key>NS.nan</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>29</integer>
++			</dict>
++			<key>NS.negativeattrs</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>0</integer>
++			</dict>
++			<key>NS.negativeformat</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>26</integer>
++			</dict>
++			<key>NS.nil</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>27</integer>
++			</dict>
++			<key>NS.positiveattrs</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>0</integer>
++			</dict>
++			<key>NS.positiveformat</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>26</integer>
++			</dict>
++			<key>NS.rounding</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>34</integer>
++			</dict>
++			<key>NS.thousand</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>37</integer>
++			</dict>
++			<key>NS.zero</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>0</integer>
++			</dict>
++		</dict>
++		<dict>
++			<key>$class</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>25</integer>
++			</dict>
++			<key>NS.keys</key>
++			<array>
++				<dict>
++					<key>CF$UID</key>
++					<integer>3</integer>
++				</dict>
++				<dict>
++					<key>CF$UID</key>
++					<integer>4</integer>
++				</dict>
++				<dict>
++					<key>CF$UID</key>
++					<integer>5</integer>
++				</dict>
++				<dict>
++					<key>CF$UID</key>
++					<integer>6</integer>
++				</dict>
++				<dict>
++					<key>CF$UID</key>
++					<integer>7</integer>
++				</dict>
++				<dict>
++					<key>CF$UID</key>
++					<integer>8</integer>
++				</dict>
++				<dict>
++					<key>CF$UID</key>
++					<integer>9</integer>
++				</dict>
++				<dict>
++					<key>CF$UID</key>
++					<integer>10</integer>
++				</dict>
++				<dict>
++					<key>CF$UID</key>
++					<integer>11</integer>
++				</dict>
++				<dict>
++					<key>CF$UID</key>
++					<integer>12</integer>
++				</dict>
++			</array>
++			<key>NS.objects</key>
++			<array>
++				<dict>
++					<key>CF$UID</key>
++					<integer>13</integer>
++				</dict>
++				<dict>
++					<key>CF$UID</key>
++					<integer>14</integer>
++				</dict>
++				<dict>
++					<key>CF$UID</key>
++					<integer>17</integer>
++				</dict>
++				<dict>
++					<key>CF$UID</key>
++					<integer>18</integer>
++				</dict>
++				<dict>
++					<key>CF$UID</key>
++					<integer>19</integer>
++				</dict>
++				<dict>
++					<key>CF$UID</key>
++					<integer>17</integer>
++				</dict>
++				<dict>
++					<key>CF$UID</key>
++					<integer>20</integer>
++				</dict>
++				<dict>
++					<key>CF$UID</key>
++					<integer>21</integer>
++				</dict>
++				<dict>
++					<key>CF$UID</key>
++					<integer>22</integer>
++				</dict>
++				<dict>
++					<key>CF$UID</key>
++					<integer>23</integer>
++				</dict>
++			</array>
++		</dict>
++		<string>positiveInfinitySymbol</string>
++		<string>locale</string>
++		<string>allowsFloats</string>
++		<string>maximumFractionDigits</string>
++		<string>nilSymbol</string>
++		<string>generatesDecimalNumbers</string>
++		<string>negativeInfinitySymbol</string>
++		<string>formatterBehavior</string>
++		<string>numberStyle</string>
++		<string>minimum</string>
++		<string>+∞</string>
++		<dict>
++			<key>$class</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>16</integer>
++			</dict>
++			<key>NS.identifier</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>15</integer>
++			</dict>
++		</dict>
++		<string>de_DE</string>
++		<dict>
++			<key>$classes</key>
++			<array>
++				<string>NSLocale</string>
++				<string>NSObject</string>
++			</array>
++			<key>$classname</key>
++			<string>NSLocale</string>
++		</dict>
++		<true/>
++		<integer>2</integer>
++		<string></string>
++		<string>-∞</string>
++		<integer>1040</integer>
++		<integer>1</integer>
++		<dict>
++			<key>$class</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>24</integer>
++			</dict>
++			<key>NS.compact</key>
++			<true/>
++			<key>NS.exponent</key>
++			<integer>-1</integer>
++			<key>NS.length</key>
++			<integer>1</integer>
++			<key>NS.mantissa</key>
++			<data>
++			BQAAAAAAAAAAAAAAAAAAAA==
++			</data>
++			<key>NS.mantissa.bo</key>
++			<integer>1</integer>
++			<key>NS.negative</key>
++			<false/>
++		</dict>
++		<dict>
++			<key>$classes</key>
++			<array>
++				<string>NSDecimalNumberPlaceholder</string>
++				<string>NSDecimalNumber</string>
++				<string>NSNumber</string>
++				<string>NSValue</string>
++				<string>NSObject</string>
++			</array>
++			<key>$classname</key>
++			<string>NSDecimalNumberPlaceholder</string>
++		</dict>
++		<dict>
++			<key>$classes</key>
++			<array>
++				<string>NSMutableDictionary</string>
++				<string>NSDictionary</string>
++				<string>NSObject</string>
++			</array>
++			<key>$classname</key>
++			<string>NSMutableDictionary</string>
++		</dict>
++		<string>#,##0.##</string>
++		<dict>
++			<key>$class</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>28</integer>
++			</dict>
++			<key>NSString</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>19</integer>
++			</dict>
++		</dict>
++		<dict>
++			<key>$classes</key>
++			<array>
++				<string>NSAttributedString</string>
++				<string>NSObject</string>
++			</array>
++			<key>$classname</key>
++			<string>NSAttributedString</string>
++		</dict>
++		<dict>
++			<key>$class</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>28</integer>
++			</dict>
++			<key>NSAttributes</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>31</integer>
++			</dict>
++			<key>NSString</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>30</integer>
++			</dict>
++		</dict>
++		<string>NaN</string>
++		<dict>
++			<key>$class</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>32</integer>
++			</dict>
++			<key>NS.keys</key>
++			<array/>
++			<key>NS.objects</key>
++			<array/>
++		</dict>
++		<dict>
++			<key>$classes</key>
++			<array>
++				<string>NSDictionary</string>
++				<string>NSObject</string>
++			</array>
++			<key>$classname</key>
++			<string>NSDictionary</string>
++		</dict>
++		<dict>
++			<key>$class</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>24</integer>
++			</dict>
++			<key>NS.compact</key>
++			<false/>
++			<key>NS.exponent</key>
++			<integer>0</integer>
++			<key>NS.length</key>
++			<integer>0</integer>
++			<key>NS.mantissa</key>
++			<data>
++			AAAAAAAAAAAAAAAAAAAAAA==
++			</data>
++			<key>NS.mantissa.bo</key>
++			<integer>1</integer>
++			<key>NS.negative</key>
++			<true/>
++		</dict>
++		<dict>
++			<key>$class</key>
++			<dict>
++				<key>CF$UID</key>
++				<integer>35</integer>
++			</dict>
++			<key>NS.raise.dividebyzero</key>
++			<true/>
++			<key>NS.raise.overflow</key>
++			<true/>
++			<key>NS.raise.underflow</key>
++			<true/>
++			<key>NS.roundingmode</key>
++			<integer>3</integer>
++		</dict>
++		<dict>
++			<key>$classes</key>
++			<array>
++				<string>NSDecimalNumberHandler</string>
++				<string>NSObject</string>
++			</array>
++			<key>$classname</key>
++			<string>NSDecimalNumberHandler</string>
++		</dict>
++		<string>,</string>
++		<string>.</string>
++		<dict>
++			<key>$classes</key>
++			<array>
++				<string>NSNumberFormatter</string>
++				<string>NSFormatter</string>
++				<string>NSObject</string>
++			</array>
++			<key>$classname</key>
++			<string>NSNumberFormatter</string>
++		</dict>
++	</array>
++	<key>$top</key>
++	<dict>
++		<key>root</key>
++		<dict>
++			<key>CF$UID</key>
++			<integer>1</integer>
++		</dict>
++	</dict>
++	<key>$version</key>
++	<integer>100000</integer>
++</dict>
++</plist>
+diff --git a/Tests/base/NSNumberFormatter/macosArchive.m b/Tests/base/NSNumberFormatter/macosArchive.m
+new file mode 100644
+index 0000000..6b72204
+--- /dev/null
++++ b/Tests/base/NSNumberFormatter/macosArchive.m
+@@ -0,0 +1,43 @@
++#import <Foundation/Foundation.h>
++#import "Testing.h"
++
++#if	defined(GS_USE_ICU)
++#define	NSLOCALE_SUPPORTED	GS_USE_ICU
++#else
++#define	NSLOCALE_SUPPORTED	1 /* Assume Apple support */
++#endif
++
++/* macos-numberformatter.plist was written by NSKeyedArchiver on macOS 15,
++ * from a decimal formatter for de_DE with two fraction digits, a minimum
++ * of 0.5 and generatesDecimalNumbers set.
++ */
++int main()
++{
++  NSAutoreleasePool	*arp = [NSAutoreleasePool new];
++  NSNumberFormatter	*fmt;
++  NSData		*data;
++
++  START_SET("NSNumberFormatter archived on macOS")
++    if (!NSLOCALE_SUPPORTED)
++      SKIP("NSLocale not supported\nThe ICU library was not available when GNUstep-base was built")
++
++    data = [NSData dataWithContentsOfFile: @"macos-numberformatter.plist"];
++    fmt = [NSKeyedUnarchiver unarchiveObjectWithData: data];
++    PASS([fmt isKindOfClass: [NSNumberFormatter class]],
++      "a number formatter archived on macOS is read")
++    PASS_EQUAL([[fmt locale] localeIdentifier], @"de_DE",
++      "its locale is read")
++    PASS([fmt numberStyle] == NSNumberFormatterDecimalStyle
++      && [fmt maximumFractionDigits] == 2 && [fmt generatesDecimalNumbers],
++      "its settings are read")
++    PASS_EQUAL([fmt minimum], [NSDecimalNumber decimalNumberWithString: @"0.5"],
++      "its minimum is read")
++    PASS_EQUAL([fmt decimalSeparator], @",",
++      "its decimal separator is the locale's")
++    PASS_EQUAL([fmt stringFromNumber: [NSNumber numberWithDouble: 1234.5678]],
++      @"1.234,57", "it formats as on macOS")
++  END_SET("NSNumberFormatter archived on macOS")
++
++  [arp release];
++  return 0;
++}
+-- 
+2.43.0
+

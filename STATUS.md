@@ -392,6 +392,88 @@ master alone too.
 the fix and passes with it on libs-base 7c81d0c; with every libs-base
 patch here applied, the NSPredicate suite passes 433 of 433.
 
+Added on 2026-10-19 for Logbook, ORMKit's sample app, whose decimal
+fields lost their formatters' settings on GNUstep, so "12345" typed
+into one became a double instead of the NSDecimalNumber its Core Data
+attribute needs.  Every setting macOS keeps for a formatter now takes
+effect and survives a keyed archive, read or written on either system.
+Each fix below was checked against macOS 15: the tests' expected values
+are what macOS gives (each test also passes there), and archives of the
+same 13 formatters, written on each system and read on the other,
+describe the same formatters (the 10.0 number formatter aside, see
+below).
+
+- `formatter-keyed-attributes` (libs-base).  macOS archives a formatter's
+  settings in an `NS.attributes` dictionary keyed by property name, beside
+  10.0 keys such as `NS.decimal` and `NS.format`.  NSNumberFormatter read
+  only the 10.0 keys, NSDateFormatter read a keyed archive as an unkeyed
+  one, and neither wrote one macOS could read.  Both now read
+  `NS.attributes` by key-value coding (behaviour, locale and style first);
+  with the 10.4 behaviour the 10.0 keys, which repeat settings as they
+  stood in the writer's locale, are read for a 10.0 formatter only.  They
+  write what differs from a new formatter with the same locale and style,
+  plus what macOS always writes, BOOLs as booleans.
+  `NSNumberFormatter/keyedAttributes.m` fails 20 of 27 checks without the
+  fix and `NSDateFormatter/keyedAttributes.m` 15 of 21.
+- `keyed-archive-value-classes` (libs-base).  NSLocale, NSTimeZone,
+  NSCalendar, NSDecimalNumber and NSDecimalNumberHandler (now NSCoding)
+  archive themselves with macOS's keys in a keyed archive, so each system
+  reads the other's; NSKeyedUnarchiver falls back on the classes in
+  `$classes`, as macOS does (macOS writes decimals as
+  NSDecimalNumberPlaceholder).  `NSKeyedArchiver/macosValueClasses.m`,
+  with archives macOS wrote (`macos-*.plist`), fails 20 of 25 checks
+  without the fix; `NSNumberFormatter/macosArchive.m` and
+  `NSDateFormatter/macosArchive.m` read formatters macOS archived.
+- `nsdateformatter-settings` (libs-base, on `formatter-keyed-attributes`).
+  AM/PM symbols could not be set; symbols, leniency and the two-digit
+  start were lost whenever ICU's formatter was remade; setting weekday
+  symbols raised; defaultDate, gregorianStartDate and
+  generatesCalendarDates did nothing; formattingContext was missing;
+  -getObjectValue:forString:range:error: always failed.  Defaults are
+  macOS's (not lenient, two-digit years from 1950, missing fields from
+  2000).  NSHTTPCookie relied on ICU's old leniency for Expires dates and
+  now asks for it.  `NSDateFormatter/settings.m` fails 35 of 42 checks
+  without the fix.
+- `nsnumberformatter-settings` (libs-base, on `formatter-keyed-attributes`).
+  nilSymbol did nothing and zeroSymbol replaced the zero digit; the
+  infinity symbols were one; the five textAttributesFor... did nothing;
+  roundingIncrement took only doubles and multiplier only whole numbers;
+  currencyCode used the wrong ICU key; positive and negative formats were
+  ignored with the 10.4 behaviour; parsing checked neither minimum,
+  maximum nor allowsFloats and took a string that only began with a
+  number; four styles were missing.  Attribute getters cached ICU's
+  values, so a BOOL set to NO came back YES after a change of locale or
+  style.  `NSNumberFormatter/settings.m` fails 53 of 70 checks without
+  the fix.
+- `numberformatter-parse-decimal` (libs-base).  With
+  generatesDecimalNumbers set, -getObjectValue:forString:range:error:
+  refused every string: its unum_parseDecimal() call was under `#if 0`.
+  `NSNumberFormatter/parseDecimal.m` fails 9 of its 10 checks without the
+  fix.
+- `xib-formatter-attributes` (libs-gui).  A xib's numberFormatter and
+  dateFormatter elements carry their settings as attributes and child
+  elements; the xib unarchiver presents them as `NS.attributes`, turning
+  Interface Builder's names into values, and gives a date formatter the
+  10.4 behaviour whatever the xib says, as macOS does.  It needs
+  `formatter-keyed-attributes`.  With the libs-base fixes,
+  `GSXib5KeyedUnarchiver/formatters.m` fails 19 of its 28 checks without
+  this one.
+
+`formatter-keyed-attributes`, `keyed-archive-value-classes` and
+`numberformatter-parse-decimal` apply alone to libs-base 7b3a12c; the two
+settings patches apply on top of `formatter-keyed-attributes`, which
+`apply-patches.sh` applies first.  With every patch here, the base suite
+passes 14320 checks (one file, `GSMime/encoded-word-stack.m`, aborts on
+unpatched master as well; NSURLSession's local-server tests sometimes
+time out, and pass 147 of 147 when run again) and the gui suite 5006.
+Not done: a 10.0 number formatter still formats with GNUstep's own 10.0
+code, which differs from macOS (grouping, padding); NSCalendar's -locale
+and a date formatter's -locale carry a calendar keyword once a calendar is
+set (archives leave it out, as macOS's do); a pattern with a suffix
+(`0.00 'u'`) parses only with the suffix, where macOS also takes it
+without; and `[NSDate dateWithTimeIntervalSinceReferenceDate: 0]` is 2
+seconds on GNUstep, a separate bug in NSDate's small dates.
+
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
 | `autoreleased-return-value` | libobjc2 | test | [#426](https://github.com/gnustep/libobjc2/pull/426) closed unmerged | (none: ODataStore works around it) |
@@ -405,12 +487,18 @@ patch here applied, the NSPredicate suite passes 433 of 433.
 | `nonretained-value-identity` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
 | `xml-detached-namespaces` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
 | `xml-remove-namespace-in-use` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
+| `formatter-keyed-attributes` | libs-base | test | not sent yet | (none: ORMKit's apps use it from here) |
+| `numberformatter-parse-decimal` | libs-base | test | not sent yet | (none: ORMKit's apps use it from here) |
+| `keyed-archive-value-classes` | libs-base | test | not sent yet | (none: ORMKit's apps use it from here) |
+| `nsdateformatter-settings` | libs-base | test | not sent yet (needs `formatter-keyed-attributes`) | (none: ORMKit's apps use it from here) |
+| `nsnumberformatter-settings` | libs-base | test | not sent yet (needs `formatter-keyed-attributes`) | (none: ORMKit's apps use it from here) |
 | `popover-placement` | libs-gui | test | not sent yet | (none: UDCodeKit places its own child windows meanwhile) |
 | `tableview-prototype-copy` | libs-gui | test | not sent yet | (none: UDCodeKit's issues navigator is cell-based meanwhile) |
 | `tooltip-mouse-moved` | libs-gui | test | not sent yet | (none: UDCodeKit resets the flag itself) |
 | `view-overlapping-siblings` | libs-gui | test | not sent yet | (none: UDCodeKit's jump-to-line box needs it, ashalkhakov/UDCodeKit#43) |
 | `opengl-view-hidden` | libs-gui | test | not sent yet | (none: UDQuakeTools' GUI editor uses it from here; its workaround is gone) |
 | `xib-segment-image` | libs-gui | test | not sent yet | (none: UDCode's navigator bar uses it from here) |
+| `xib-formatter-attributes` | libs-gui | test | not sent yet | (none: ORMKit's apps use it from here) |
 | `tableview-column-autoresizing-style` | libs-gui | test | [#982](https://github.com/gnustep/libs-gui/pull/982) | gnustep-coredata |
 | `collectionview-make-item` | libs-gui | test | [#1001](https://github.com/gnustep/libs-gui/pull/1001) | (none: TopoText uses it from here) |
 | `collectionview-flow-layout` | libs-gui | test | [#1002](https://github.com/gnustep/libs-gui/pull/1002) | (none: TopoText uses it from here) |
