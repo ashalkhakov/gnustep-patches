@@ -348,11 +348,23 @@ other eighteen libs-gui patches apply to master 87c1129.  RDLKit, which the tabl
 listed as carrying it, applies this repository at a pinned commit and holds
 no copy.
 
+Added on 2026-10-19 for FreeCoreData's in-memory predicate evaluation:
+`predicate-aggregate-of-nil`.  A comparison with ANY, ALL or NONE raised
+when its left hand side was nil, so `ANY owner.vehicles.odometer > 5`
+raised for an object without an owner.  macOS takes nil as an empty
+collection there (ANY false, ALL and NONE true; checked on macOS 15 over a
+nil to-one, a nil to-many and a missing key, with `>` and `== nil`), and
+so does this now; a value that is neither nil nor a collection still
+raises on both.  `NSPredicate/aggregateOfNil.m` fails 9 of its 11 checks
+without the fix and passes with it; the NSPredicate suite passes 362 of
+362 on libs-base 7c81d0c, and every libs-base patch here co-applies.
+
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
 | `autoreleased-return-value` | libobjc2 | test | [#426](https://github.com/gnustep/libobjc2/pull/426) closed unmerged | (none: ODataStore works around it) |
 | `urlsession-lowercase-location` | libs-base | test | not sent yet | (none: UDCodeKit follows 3xx itself) |
 | `predicate-secure-coding` | libs-base | test | not sent yet ([#766](https://github.com/gnustep/libs-base/issues/766)) | (none: FreeCoreData will use it from here) |
+| `predicate-aggregate-of-nil` | libs-base | test | not sent yet | (none: FreeCoreData will use it from here) |
 | `arc4random-glibc` | libs-base | test | not sent yet | (none: every app built on the stack uses it from here; HomeRow's and UDCalc's shims are gone) |
 | `collection-copy-is-shallow` | libs-base | test | not sent yet | (none: FreeCoreData uses it from here) |
 | `nonretained-value-identity` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
