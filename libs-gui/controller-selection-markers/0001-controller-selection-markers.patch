@@ -1,4 +1,4 @@
-From a1bea336f7d8f5ca82276533913496bac4d33e7c Mon Sep 17 00:00:00 2001
+From 3143a2ebae570e982199599adfd986ff8366ba0e Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Mon, 19 Oct 2026 16:49:44 +0000
 Subject: [PATCH] Answer selection markers from a controller's selection
@@ -31,24 +31,55 @@ itself raises and the binding substitutes the marker; here the binding
 reads its new value from the change dictionary, which key-value observing
 fills by asking the proxy, so the proxy answers the marker.
 
+A marker that reaches a binding is replaced by a placeholder: the
+binding's option for that marker, or else the default, which was "No
+Selection", "Multiple Values" or "Not Applicable" for every binding. On
+macOS the default is +defaultPlaceholderForMarker:withBinding: of the
+bound object's class, nil for every class and binding but NSTextField's
+value, which has those three strings (checked on macOS 15). With a
+string for its default, content bound through a selection became the
+string: an array controller whose contentSet is bound to another's
+selection.records failed to load from its nib, "NSConstantString
+(instance) does not recognize sortedArrayUsingDescriptors:", and an
+NSTableView's or an NSPopUpButton's content, a table column's font and a
+text view's value would have been given the string too. On macOS they
+get nil, so content through no selection or multiple values is empty.
++defaultPlaceholderForMarker:withBinding: and
++setDefaultPlaceholder:forMarker:withBinding:, declared here but never
+implemented, now keep a placeholder per class, binding and marker,
+inherited by subclasses; a binding without the option uses its bound
+object's, and NSTextField sets its value's three.
+
 Tests/gui/NSObjectController/selectionMarkers.m covers each marker, values
 set through the selection, and the notifications; eleven of its seventeen
 checks fail without the change. Tests/gui/NSArrayController/selectionKVO.m
 checked that -selection was the selected object itself and nil for no
 selection; it now checks what AppKit gives instead.
+Tests/gui/NSObjectController/markerPlaceholders.m binds an array
+controller's contentSet and contentArray, an object controller's
+contentObject, a popup's and a table's content and a text field's value
+through a selection, with and without placeholder options, and checks
+the default placeholders; it passes on macOS 15. Without the change six
+of its checks fail, and its second set stops at the first call to
++defaultPlaceholderForMarker:withBinding:, not implemented.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  Source/GNUmakefile                            |   1 +
+ Source/GSBindingHelpers.h                     |   1 +
  Source/GSControllerSelectionProxy.h           |  42 +++
  Source/GSControllerSelectionProxy.m           | 246 ++++++++++++++++++
  Source/NSArrayController.m                    |  11 -
+ Source/NSKeyValueBinding.m                    | 103 ++++++--
  Source/NSObjectController.m                   |   5 +-
+ Source/NSTextField.m                          |  10 +
  Tests/gui/NSArrayController/selectionKVO.m    |  19 +-
+ .../NSObjectController/markerPlaceholders.m   | 212 +++++++++++++++
  .../gui/NSObjectController/selectionMarkers.m | 134 ++++++++++
- 7 files changed, 437 insertions(+), 21 deletions(-)
+ 11 files changed, 739 insertions(+), 45 deletions(-)
  create mode 100644 Source/GSControllerSelectionProxy.h
  create mode 100644 Source/GSControllerSelectionProxy.m
+ create mode 100644 Tests/gui/NSObjectController/markerPlaceholders.m
  create mode 100644 Tests/gui/NSObjectController/selectionMarkers.m
 
 diff --git a/Source/GNUmakefile b/Source/GNUmakefile
@@ -63,6 +94,18 @@ index c7f67a752..da8f7a669 100644
  GSControllerTreeProxy.m \
  GSDisplayServer.m \
  GSHelpManagerPanel.m \
+diff --git a/Source/GSBindingHelpers.h b/Source/GSBindingHelpers.h
+index 7d74001ad..1731f25b2 100644
+--- a/Source/GSBindingHelpers.h
++++ b/Source/GSBindingHelpers.h
+@@ -40,6 +40,7 @@
+ {
+ @public
+   NSDictionary *info;
++  NSString *bindingName;
+   id src;
+   BOOL inReverseSet;
+ }
 diff --git a/Source/GSControllerSelectionProxy.h b/Source/GSControllerSelectionProxy.h
 new file mode 100644
 index 000000000..a0fb1e949
@@ -364,10 +407,10 @@ index 000000000..7c3f96caa
 +@end
 +
 diff --git a/Source/NSArrayController.m b/Source/NSArrayController.m
-index 682b4a387..7876ed91e 100644
+index 2aa680bac..732221051 100644
 --- a/Source/NSArrayController.m
 +++ b/Source/NSArrayController.m
-@@ -431,17 +431,6 @@
+@@ -486,17 +486,6 @@
      NSContentBinding, nil];
  }
  
@@ -385,8 +428,167 @@ index 682b4a387..7876ed91e 100644
  - (NSUInteger) selectionIndex
  {
    return [_selection_indexes firstIndex];
+diff --git a/Source/NSKeyValueBinding.m b/Source/NSKeyValueBinding.m
+index 5ee0981ab..92c5c763a 100644
+--- a/Source/NSKeyValueBinding.m
++++ b/Source/NSKeyValueBinding.m
+@@ -137,6 +137,7 @@
+ static NSRecursiveLock *bindingLock = nil;
+ static NSMapTable *classTable = NULL;      //available bindings
+ static NSMapTable *objectTable = NULL;     //bound bindings
++static NSMutableDictionary *placeholders = nil;
+ 
+ typedef enum {
+   GSBindingOperationAnd = 0,
+@@ -151,6 +152,61 @@ BOOL GSBindingResolveMultipleValueBool(NSString *key, NSDictionary *bindings,
+ void GSBindingInvokeAction(NSString *targetKey, NSString *argumentKey,
+     NSDictionary *bindings);
+ 
++@implementation NSObject (NSPlaceholder)
++
+++ (id) defaultPlaceholderForMarker: (id)marker
++                       withBinding: (NSString *)binding
++{
++  Class c;
++  id placeholder = nil;
++
++  [GSKeyValueBinding class];
++  [bindingLock lock];
++  for (c = self; c != Nil && placeholder == nil; c = [c superclass])
++    {
++      placeholder = [[[placeholders objectForKey: NSStringFromClass(c)]
++        objectForKey: binding] objectForKey: marker];
++    }
++  RETAIN(placeholder);
++  [bindingLock unlock];
++  return AUTORELEASE(placeholder);
++}
++
+++ (void) setDefaultPlaceholder: (id)placeholder
++                     forMarker: (id)marker
++                   withBinding: (NSString *)binding
++{
++  NSString *key = NSStringFromClass(self);
++  NSMutableDictionary *forClass;
++  NSMutableDictionary *forBinding;
++
++  [GSKeyValueBinding class];
++  [bindingLock lock];
++  forClass = [placeholders objectForKey: key];
++  if (forClass == nil)
++    {
++      forClass = [NSMutableDictionary dictionary];
++      [placeholders setObject: forClass forKey: key];
++    }
++  forBinding = [forClass objectForKey: binding];
++  if (forBinding == nil)
++    {
++      forBinding = [NSMutableDictionary dictionary];
++      [forClass setObject: forBinding forKey: binding];
++    }
++  if (placeholder == nil)
++    {
++      [forBinding removeObjectForKey: marker];
++    }
++  else
++    {
++      [forBinding setObject: placeholder forKey: marker];
++    }
++  [bindingLock unlock];
++}
++
++@end
++
+ @implementation GSKeyValueBinding
+ 
+ + (void) initialize
+@@ -162,6 +218,7 @@ void GSBindingInvokeAction(NSString *targetKey, NSString *argumentKey,
+           NSObjectMapValueCallBacks, 128);
+       objectTable = NSCreateMapTable(NSNonRetainedObjectMapKeyCallBacks,
+           NSObjectMapValueCallBacks, 128);
++      placeholders = [NSMutableDictionary new];
+     }
+ }
+ 
+@@ -292,6 +349,7 @@ void GSBindingInvokeAction(NSString *targetKey, NSString *argumentKey,
+   NSMutableDictionary *bindings;
+   
+   src = source;
++  ASSIGN(bindingName, name);
+   if (options == nil)
+     {
+       info = [[NSDictionary alloc] initWithObjectsAndKeys:
+@@ -332,6 +390,7 @@ void GSBindingInvokeAction(NSString *targetKey, NSString *argumentKey,
+ - (void)dealloc
+ {
+   DESTROY(info);
++  DESTROY(bindingName);
+   src = nil; 
+   [super dealloc];
+ }
+@@ -429,40 +488,36 @@ void GSBindingInvokeAction(NSString *targetKey, NSString *argumentKey,
+ {
+   NSString *valueTransformerName;
+   NSValueTransformer *valueTransformer;
+-  NSString *placeholder;
++  id placeholder;
+ 
+-  if (value == NSMultipleValuesMarker)
++  if (value == NSMultipleValuesMarker || value == NSNoSelectionMarker
++    || value == NSNotApplicableMarker)
+     {
+-      placeholder = [options objectForKey: NSMultipleValuesPlaceholderBindingOption];
+-      if (placeholder == nil)
++      NSString *option;
++
++      if (value == NSMultipleValuesMarker)
+         {
+-          placeholder = @"Multiple Values";
++          option = NSMultipleValuesPlaceholderBindingOption;
+         }
+-      return placeholder;
+-    }
+-  if (value == NSNoSelectionMarker)
+-    {
+-      placeholder = [options objectForKey: NSNoSelectionPlaceholderBindingOption];
+-      if (placeholder == nil)
++      else if (value == NSNoSelectionMarker)
+         {
+-          placeholder = @"No Selection";
++          option = NSNoSelectionPlaceholderBindingOption;
+         }
+-      return placeholder;
+-    }
+-  if (value == NSNotApplicableMarker)
+-    {
+-      if ([[options objectForKey: NSRaisesForNotApplicableKeysBindingOption]
+-          boolValue])
++      else
+         {
+-          [NSException raise: NSGenericException
+-                      format: @"This binding does not accept not applicable keys"];
++          if ([[options objectForKey: NSRaisesForNotApplicableKeysBindingOption]
++            boolValue])
++            {
++              [NSException raise: NSGenericException
++                          format: @"This binding does not accept not applicable keys"];
++            }
++          option = NSNotApplicablePlaceholderBindingOption;
+         }
+-
+-      placeholder = [options objectForKey:
+-        NSNotApplicablePlaceholderBindingOption];
++      placeholder = [options objectForKey: option];
+       if (placeholder == nil)
+         {
+-          placeholder = @"Not Applicable";
++          placeholder = [[src class] defaultPlaceholderForMarker: value
++                                                     withBinding: bindingName];
+         }
+       return placeholder;
+     }
 diff --git a/Source/NSObjectController.m b/Source/NSObjectController.m
-index 71f00d785..77145b47a 100644
+index 4bfac5188..b8d8ca9f2 100644
 --- a/Source/NSObjectController.m
 +++ b/Source/NSObjectController.m
 @@ -31,6 +31,7 @@
@@ -397,7 +599,7 @@ index 71f00d785..77145b47a 100644
  #import <Foundation/NSKeyedArchiver.h>
  #import <Foundation/NSKeyValueObserving.h>
  #import <Foundation/NSKeyValueCoding.h>
-@@ -134,6 +135,7 @@
+@@ -188,6 +189,7 @@ static NSString *GSObjectsChangedInManagingContextNotification
  - (void) dealloc
  {
    [GSKeyValueBinding unbindAllForObject: self];
@@ -405,7 +607,7 @@ index 71f00d785..77145b47a 100644
    RELEASE(_content);
    RELEASE(_entity_name_key);
    RELEASE(_fetch_predicate);
-@@ -363,8 +365,7 @@
+@@ -438,8 +440,7 @@ static NSString *GSObjectsChangedInManagingContextNotification
  
  - (id) selection
  {
@@ -414,6 +616,34 @@ index 71f00d785..77145b47a 100644
 +  return [GSControllerSelectionProxy proxyForController: self];
  }
  
+ 
+diff --git a/Source/NSTextField.m b/Source/NSTextField.m
+index 2ebd2772b..a1b6f7185 100644
+--- a/Source/NSTextField.m
++++ b/Source/NSTextField.m
+@@ -47,6 +47,7 @@
+ #import "AppKit/NSWindow.h"
+ #import "AppKit/NSKeyValueBinding.h"
+ #import "GSBindingHelpers.h"
++#import "GSGuiPrivate.h"
+ 
+ static NSNotificationCenter *nc;
+ 
+@@ -71,6 +72,15 @@ static Class textFieldCellClass;
+ 
+       [self exposeBinding: NSEditableBinding];
+       [self exposeBinding: NSTextColorBinding];
++      [self setDefaultPlaceholder: _(@"Multiple Values")
++                        forMarker: NSMultipleValuesMarker
++                      withBinding: NSValueBinding];
++      [self setDefaultPlaceholder: _(@"No Selection")
++                        forMarker: NSNoSelectionMarker
++                      withBinding: NSValueBinding];
++      [self setDefaultPlaceholder: _(@"Not Applicable")
++                        forMarker: NSNotApplicableMarker
++                      withBinding: NSValueBinding];
+     }
+ }
  
 diff --git a/Tests/gui/NSArrayController/selectionKVO.m b/Tests/gui/NSArrayController/selectionKVO.m
 index 74952f703..3fd8223ab 100644
@@ -463,6 +693,224 @@ index 74952f703..3fd8223ab 100644
      }
    NS_HANDLER
      if ([[localException name] isEqualToString: NSInternalInconsistencyException]
+diff --git a/Tests/gui/NSObjectController/markerPlaceholders.m b/Tests/gui/NSObjectController/markerPlaceholders.m
+new file mode 100644
+index 000000000..94fd4f971
+--- /dev/null
++++ b/Tests/gui/NSObjectController/markerPlaceholders.m
+@@ -0,0 +1,212 @@
++/* A marker read through a controller's selection reaches a binding as the
++   placeholder for it: the binding's option when it has one, otherwise the
++   default placeholder of the bound object's class for that binding, which
++   is nil but for a text field's value.  So content bound through
++   selection.<key> is empty with no selection or multiple values, as on
++   AppKit, rather than the marker. */
++#include "Testing.h"
++
++#include <Foundation/NSArray.h>
++#include <Foundation/NSAutoreleasePool.h>
++#include <Foundation/NSDictionary.h>
++#include <Foundation/NSException.h>
++#include <Foundation/NSIndexSet.h>
++#include <Foundation/NSSet.h>
++#include <Foundation/NSString.h>
++
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSArrayController.h>
++#include <AppKit/NSKeyValueBinding.h>
++#include <AppKit/NSObjectController.h>
++#include <AppKit/NSPopUpButton.h>
++#include <AppKit/NSTableColumn.h>
++#include <AppKit/NSTableView.h>
++#include <AppKit/NSTextField.h>
++#include <AppKit/NSTextFieldCell.h>
++
++@interface DefaultingController : NSArrayController
++@end
++
++@implementation DefaultingController
++@end
++
++static NSMutableDictionary *
++vehicle(NSString *name, NSArray *records)
++{
++  return [NSMutableDictionary dictionaryWithObjectsAndKeys:
++    name, @"name",
++    [NSMutableSet setWithArray: records], @"records",
++    [NSMutableArray arrayWithArray: records], @"list",
++    [NSMutableDictionary dictionaryWithObject: name forKey: @"name"], @"owner",
++    nil];
++}
++
++int
++main(int argc, const char **argv)
++{
++  NSArrayController	*vehicles;
++  NSArrayController	*bySet;
++  NSArrayController	*byArray;
++  NSArrayController	*withOptions;
++  DefaultingController	*defaulting;
++  NSObjectController	*byObject;
++  NSPopUpButton		*popup;
++  NSTableView		*table;
++  NSTextField		*field;
++  NSIndexSet		*both;
++  NSArray		*none;
++  NSArray		*several;
++  id			placeholder;
++
++  START_SET("NSObjectController marker placeholders")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  none = [NSArray arrayWithObject: @"none"];
++  several = [NSArray arrayWithObject: @"several"];
++
++  vehicles = AUTORELEASE([[NSArrayController alloc] init]);
++  [vehicles setAvoidsEmptySelection: NO];
++  [vehicles setContent: [NSMutableArray arrayWithObjects:
++    vehicle(@"car", [NSArray arrayWithObjects: @"r1", @"r2", nil]),
++    vehicle(@"van", [NSArray arrayWithObject: @"r3"]), nil]];
++  [vehicles setSelectionIndexes: [NSIndexSet indexSet]];
++  both = [NSIndexSet indexSetWithIndexesInRange: NSMakeRange(0, 2)];
++
++  bySet = AUTORELEASE([[NSArrayController alloc] init]);
++  byArray = AUTORELEASE([[NSArrayController alloc] init]);
++  byObject = AUTORELEASE([[NSObjectController alloc] init]);
++  withOptions = AUTORELEASE([[NSArrayController alloc] init]);
++  popup = AUTORELEASE([[NSPopUpButton alloc]
++    initWithFrame: NSMakeRect(0, 0, 100, 20) pullsDown: NO]);
++  table = AUTORELEASE([[NSTableView alloc]
++    initWithFrame: NSMakeRect(0, 0, 100, 100)]);
++  [table addTableColumn: AUTORELEASE([[NSTableColumn alloc]
++    initWithIdentifier: @"record"])];
++  field = AUTORELEASE([[NSTextField alloc]
++    initWithFrame: NSMakeRect(0, 0, 100, 20)]);
++
++  NS_DURING
++    {
++      [bySet bind: NSContentSetBinding toObject: vehicles
++      withKeyPath: @"selection.records" options: nil];
++      [byArray bind: NSContentArrayBinding toObject: vehicles
++	withKeyPath: @"selection.list" options: nil];
++      [byObject bind: NSContentObjectBinding toObject: vehicles
++	 withKeyPath: @"selection.owner" options: nil];
++      [withOptions bind: NSContentArrayBinding toObject: vehicles
++	    withKeyPath: @"selection.list"
++		options: [NSDictionary dictionaryWithObjectsAndKeys:
++	several, NSMultipleValuesPlaceholderBindingOption,
++	none, NSNoSelectionPlaceholderBindingOption, nil]];
++      [popup bind: NSContentBinding toObject: vehicles
++      withKeyPath: @"selection.list" options: nil];
++      [table bind: NSContentBinding toObject: vehicles
++      withKeyPath: @"selection.list" options: nil];
++      [field bind: NSValueBinding toObject: vehicles
++      withKeyPath: @"selection.name" options: nil];
++      PASS(YES, "content binds through a selection with nothing selected")
++    }
++  NS_HANDLER
++    PASS(NO, "content binds through a selection with nothing selected")
++  NS_ENDHANDLER
++
++  PASS([[bySet arrangedObjects] count] == 0,
++    "contentSet through no selection is empty")
++  PASS([[byArray arrangedObjects] count] == 0,
++    "contentArray through no selection is empty")
++  PASS([byObject content] == nil,
++    "contentObject through no selection is nil")
++  PASS_EQUAL([withOptions content], none,
++    "contentArray through no selection is its no-selection placeholder")
++  PASS([popup numberOfItems] == 0, "a popup's content through no selection is empty")
++  PASS([table numberOfRows] == 0, "a table's content through no selection is empty")
++  PASS_EQUAL([[field cell] placeholderString], @"No Selection",
++    "a text field shows No Selection")
++
++  [vehicles setSelectionIndexes: [NSIndexSet indexSetWithIndex: 0]];
++  PASS([[bySet arrangedObjects] count] == 2,
++    "contentSet through one selected is its records")
++  PASS([[byArray arrangedObjects] count] == 2,
++    "contentArray through one selected is its records")
++  PASS_EQUAL([byObject valueForKeyPath: @"content.name"], @"car",
++    "contentObject through one selected is its owner")
++  PASS([popup numberOfItems] == 2, "a popup's content through one selected")
++  PASS([table numberOfRows] == 2, "a table's content through one selected")
++
++  [vehicles setSelectionIndexes: both];
++  PASS([[bySet arrangedObjects] count] == 0,
++    "contentSet through multiple values is empty")
++  PASS([[byArray arrangedObjects] count] == 0,
++    "contentArray through multiple values is empty")
++  PASS([byObject content] == nil,
++    "contentObject through multiple values is nil")
++  PASS_EQUAL([withOptions content], several,
++    "contentArray through multiple values is its multiple-values placeholder")
++  PASS([popup numberOfItems] == 0, "a popup's content through multiple values is empty")
++  PASS([table numberOfRows] == 0, "a table's content through multiple values is empty")
++  PASS_EQUAL([[field cell] placeholderString], @"Multiple Values",
++    "a text field shows Multiple Values")
++
++  [vehicles setSelectionIndexes: [NSIndexSet indexSet]];
++  PASS([[bySet arrangedObjects] count] == 0,
++    "contentSet is empty again when nothing is selected")
++
++  END_SET("NSObjectController marker placeholders")
++
++  START_SET("NSObjectController default placeholders")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  PASS([NSObject defaultPlaceholderForMarker: NSNoSelectionMarker
++				 withBinding: NSValueBinding] == nil,
++    "an object has no default placeholder")
++  PASS([NSArrayController defaultPlaceholderForMarker: NSMultipleValuesMarker
++				  withBinding: NSContentArrayBinding] == nil,
++    "an array controller's content has no default placeholder")
++  placeholder = [NSTextField defaultPlaceholderForMarker: NSNoSelectionMarker
++					     withBinding: NSValueBinding];
++  PASS_EQUAL(placeholder, @"No Selection",
++    "a text field's value shows No Selection")
++  placeholder = [NSTextField defaultPlaceholderForMarker: NSMultipleValuesMarker
++					     withBinding: NSValueBinding];
++  PASS_EQUAL(placeholder, @"Multiple Values",
++    "a text field's value shows Multiple Values")
++  placeholder = [NSTextField defaultPlaceholderForMarker: NSNotApplicableMarker
++					     withBinding: NSValueBinding];
++  PASS_EQUAL(placeholder, @"Not Applicable",
++    "a text field's value shows Not Applicable")
++
++  none = [NSArray arrayWithObject: @"none"];
++  [DefaultingController setDefaultPlaceholder: none
++				    forMarker: NSNoSelectionMarker
++				  withBinding: NSContentArrayBinding];
++  vehicles = AUTORELEASE([[NSArrayController alloc] init]);
++  [vehicles setAvoidsEmptySelection: NO];
++  [vehicles setContent: [NSMutableArray arrayWithObjects:
++    vehicle(@"car", [NSArray arrayWithObject: @"r1"]),
++    vehicle(@"van", [NSArray arrayWithObject: @"r3"]), nil]];
++  [vehicles setSelectionIndexes: [NSIndexSet indexSet]];
++  defaulting = AUTORELEASE([[DefaultingController alloc] init]);
++  [defaulting bind: NSContentArrayBinding toObject: vehicles
++       withKeyPath: @"selection.list" options: nil];
++  PASS_EQUAL([defaulting content], none,
++    "contentArray through no selection is its class's default placeholder")
++  [vehicles setSelectionIndexes:
++    [NSIndexSet indexSetWithIndexesInRange: NSMakeRange(0, 2)]];
++  PASS([[defaulting arrangedObjects] count] == 0,
++    "a default placeholder is for its marker only")
++
++  END_SET("NSObjectController default placeholders")
++  return 0;
++}
 diff --git a/Tests/gui/NSObjectController/selectionMarkers.m b/Tests/gui/NSObjectController/selectionMarkers.m
 new file mode 100644
 index 000000000..bb2c47ff7

@@ -330,6 +330,68 @@ of its 17 checks without the fix and passes with it on libs-gui 5c43a947f;
 `NSArrayController/selectionKVO.m`, which checked the old answers, now
 checks these.
 
+Amended on 2026-10-20, two regressions of the 2026.10.20 release.
+`nsdateformatter-settings` made a formatter not lenient by default with
+ICU's strict parsing, which refuses what macOS's not-lenient parsing
+takes: ORMKit read NORMA's sample date "1900/01/01" with "yyyy-MM-dd".
+macOS calls udat_setLenient(false) (strict calendar, no
+UDAT_PARSE_ALLOW_WHITESPACE or UDAT_PARSE_ALLOW_NUMERIC) and leaves
+UDAT_PARSE_PARTIAL_LITERAL_MATCH and UDAT_PARSE_MULTIPLE_PATTERNS_FOR_MATCH
+on, as GNUstep did, but Apple's ICU then matches a separator of the
+pattern with any run of the separators ICU ignores before the next field
+(rdar://20692829 in its SimpleDateFormat::matchLiterals); ICU's does not.
+A strict parse that fails at a literal now gets it as Apple's ICU would
+match it and is tried again, and -dateFromString: no longer takes a
+string with text after the date (macOS allows white space other than line
+ends).  `NSDateFormatter/strictParsing.m`, macOS 15's answers for 159
+formats and strings, strict and lenient, fails 247 of its 318 checks
+without the patch and passes with it, on ICU 74 (Ubuntu 24.04) and 70
+(22.04).
+`controller-selection-markers` let markers reach bindings, which replaced
+each with a "No Selection", "Multiple Values" or "Not Applicable" string
+whatever the binding, so content bound through selection.<key> became a
+string and Logbook's main window failed to load ("NSConstantString does
+not recognize sortedArrayUsingDescriptors:").  The placeholder is now the
+binding's option, else +defaultPlaceholderForMarker:withBinding: of the
+bound object's class, implemented now, nil but for NSTextField's value, as
+on macOS 15; content is then empty.  `NSObjectController/markerPlaceholders.m`
+passes on macOS 15; without the patch 6 of its checks fail and its
+default-placeholder set stops at the missing method.
+Logbook's main window, as its working tree has it now, also binds pop-ups'
+contentValues through a to-many (`drivers.lbTitle`), which raised here
+("addObserver:forKeyPath:options:context: is not supported"): macOS
+observes the to-many and each member.  `popup-content-bindings` now does
+too; `NSPopUpButton/contentValuesKeyPath.m` passes on macOS 15 and fails
+all 6 checks without the patch.  The NSDateFormatter, NSObjectController,
+NSArrayController and NSPopUpButton tests pass, the whole base suite passes
+14665 checks (encoded-word-stack.m aborts, as on master) and the gui suite
+5199 with none failing, on libs-base d537eac and libs-gui 5c43a947f with every patch
+here.
+
+Added on 2026-10-20 for Logbook's main window, so that its self-test
+passes with every check: `controller-to-many-content` and
+`popup-selected-object`.  An array controller with content bound changed
+only its own content array, so a record added to a vehicle's records
+(bound through the vehicles' selection) got no vehicle and the binding
+arranged it twice.  On macOS 15 adding, inserting and removing set a
+changed copy of the bound to-many on the bound object (Core Data keeps
+the inverse), arrange as for unbound content (an object already in the
+to-many twice), insert into the content before the arranged object it goes
+before unless sorted or filtered, and clear the filter on insertion
+(`clearsFilterPredicateOnInsertion`, kept but unused here); all of that
+now holds.  `NSArrayController/boundContentMutation.m` passes on macOS 15
+and fails 16 of 23 checks without the patch.  A pop-up's selectedObject
+(and selectedIndex, Tag, Value) took the chosen item only from the cell's
+item action, and only once drawn; macOS takes it in -sendAction:to: and
+from the menu, not from -selectItemAtIndex: alone, and
+NSInsertsNullPlaceholderBindingOption on selectedObject adds the "No
+Value" item (ignoring that binding's null title).
+`NSPopUpButton/selectedObjectAction.m` passes on macOS 15 and fails 6 of
+13 checks without the patch.  With both, Logbook's `make -k check` ends
+"self-test done: 0 failed" on the 2026.10.20 image with every patch here;
+the gui suite then passes 5235 checks with none failing and the base suite
+14665 (encoded-word-stack.m aborts, as on master).
+
 Added on 2026-10-17 for [#26](https://github.com/ashalkhakov/gnustep-patches/issues/26):
 `tableview-prototype-copy`.  -makeViewWithIdentifier:owner: (and the
 view a column falls back on) made each view from its prototype with
@@ -559,7 +621,8 @@ below).
   macOS's (not lenient, two-digit years from 1950, missing fields from
   2000).  NSHTTPCookie relied on ICU's old leniency for Expires dates and
   now asks for it.  `NSDateFormatter/settings.m` fails 35 of 42 checks
-  without the fix.
+  without the fix.  Not lenient is macOS's, not ICU's strict parsing (see
+  the amendment of 2026-10-20 above).
 - `nsnumberformatter-settings` (libs-base, on `formatter-keyed-attributes`).
   nilSymbol did nothing and zeroSymbol replaced the zero digit; the
   infinity symbols were one; the five textAttributesFor... did nothing;
@@ -700,6 +763,8 @@ the two where a window comes in the same event fail.  On libs-gui 5c43a94.
 | `quick-click-order` | libs-back | test | not sent yet | (none: UDCodeKit and UDQuakeTools use it from here) |
 | `binding-to-many-mutation` | libs-gui | test | not sent yet | (none: UDQuakeTools uses it from here) |
 | `controller-selection-markers` | libs-gui | test | not sent yet | (none: bound controls show AppKit's placeholders from here) |
+| `controller-to-many-content` | libs-gui | test | not sent yet (after `controller-entity-mode`) | (none: Logbook adds records through it) |
+| `popup-selected-object` | libs-gui | test | not sent yet (after `popup-content-bindings`) | (none: Logbook's pop-ups set their objects through it) |
 | `cgrectunion-size` | libs-opal | none | [#71](https://github.com/gnustep/libs-opal/pull/71) | GSXFormsKit |
 | `freetype-advance-without-size` | libs-opal | test | [#72](https://github.com/gnustep/libs-opal/pull/72) | (none: XFormsKit uses it from here) |
 | `cfstring-overrelease` | libs-corebase | none | [#166](https://github.com/gnustep/libs-corebase/pull/166) | gnustep-build |
