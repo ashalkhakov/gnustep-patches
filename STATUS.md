@@ -488,6 +488,15 @@ counts the content, not the placeholder.  `NSPopUpButton/contentBindings.m`
 passes 28 of 28 with the fix and on AppKit (macOS 15); without it (the
 binding's name kept, so that it builds) 6 checks fail before the pop-up
 raises on -intValue and ends the set.  On libs-gui 5c43a94.
+Added on 2026-10-19 for Logbook, whose connect panel is an alert with a
+server field on macOS: `alert-accessory-view`.  NSAlert had no
+-accessoryView, -setAccessoryView: or -layout.  The accessory view is now
+shown between the informative text and the buttons at its own size, the
+panel grown to fit it, and -layout lays the panel out at once, so that its
+window can be adjusted (a field made first responder) before it is run;
+an alert laid out is run in that window.  `NSAlert/accessoryView.m` passes
+8 of 8 with the fix and on AppKit (macOS 15), and without it stops at the
+first check, NSAlert not recognising -layout.  On libs-gui 5c43a94.
 
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
@@ -515,6 +524,7 @@ raises on -intValue and ends the set.  On libs-gui 5c43a94.
 | `xib-segment-image` | libs-gui | test | not sent yet | (none: UDCode's navigator bar uses it from here) |
 | `xib-formatter-attributes` | libs-gui | test | not sent yet | (none: ORMKit's apps use it from here) |
 | `popup-content-bindings` | libs-gui | test | not sent yet | (none: Logbook will use it from here; its LBObjectPopUpButton goes) |
+| `alert-accessory-view` | libs-gui | test | not sent yet | (none: Logbook will use it from here; its ConnectPanel.xib can go) |
 | `tableview-column-autoresizing-style` | libs-gui | test | [#982](https://github.com/gnustep/libs-gui/pull/982) | gnustep-coredata |
 | `collectionview-make-item` | libs-gui | test | [#1001](https://github.com/gnustep/libs-gui/pull/1001) | (none: TopoText uses it from here) |
 | `collectionview-flow-layout` | libs-gui | test | [#1002](https://github.com/gnustep/libs-gui/pull/1002) | (none: TopoText uses it from here) |
