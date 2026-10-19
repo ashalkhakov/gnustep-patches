@@ -1,0 +1,323 @@
+From 1f317cb99eb56415273e6a0cab6255244025a193 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Mon, 19 Oct 2026 16:41:11 +0000
+Subject: [PATCH] NSApplication: ask about the last window once its event is
+ over
+
+-applicationShouldTerminateAfterLastWindowClosed: was asked 0.1 s after
+a window closed whenever, at the moment it closed, no other ordered
+window could become main, and nothing was checked again before asking.
+So an application that closes one window and opens another in the same
+event (a sign-in window giving way to the document window, or the other
+way round) was asked, and quit if its delegate said yes; on macOS it is
+not asked.  The windows were also taken from the window server's
+stacking list, which under a window manager is updated only once the
+manager has handled the change, so a window just ordered in was missed
+and one just closed still counted.
+
+What macOS does (checked on macOS 15, with the delegate recording each
+time it is asked):
+
+- the question is put at the end of the event in which the last window
+  went, before anything performed or timed later runs;
+- not if a window has been ordered in by then (closed, then another
+  ordered front or made key in the same event);
+- once, when several windows close in that event;
+- a panel left on screen does not keep it from being asked, and closing
+  a panel that was the last window asks too.
+
+The check is now made again when the time comes to ask, from the
+windows' own visibility rather than the server's list, and the question
+is put at the end of the event (performed after a delay of 0, with any
+earlier request cancelled) instead of 0.1 s later.  A window still has
+to be able to become main to count, as before, which leaves panels out.
+
+macOS also asks when the last window is ordered out without being
+closed; that is left as it was here, since GNUstep orders windows out
+for other reasons (hiding the application among them) and only closing
+was ever considered.
+
+Tests/gui/NSApplication/lastWindowClosed.m runs the application through
+six cases; it passes 6 of 6 with this and on AppKit, and without it
+fails the two where a window comes in the same event as the last one
+goes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/NSApplication.m                     |  51 +++---
+ Tests/gui/NSApplication/lastWindowClosed.m | 185 +++++++++++++++++++++
+ 2 files changed, 211 insertions(+), 25 deletions(-)
+ create mode 100644 Tests/gui/NSApplication/lastWindowClosed.m
+
+diff --git a/Source/NSApplication.m b/Source/NSApplication.m
+index 6006342fc..227ef5db2 100644
+--- a/Source/NSApplication.m
++++ b/Source/NSApplication.m
+@@ -4308,8 +4308,27 @@ struct _DelegateWrapper
+     }
+ }
+ 
++- (BOOL) _hasWindowThatCanBecomeMainExcept: (NSWindow *)win
++{
++  NSEnumerator *iter = [[self windows] objectEnumerator];
++  NSWindow *tmp;
++
++  while ((tmp = [iter nextObject]))
++    {
++      if (tmp != win && [tmp isVisible] && [tmp canBecomeMainWindow] == YES)
++        {
++          return YES;
++        }
++    }
++  return NO;
++}
++
+ - (void) _lastWindowClosed
+ {
++  if ([self _hasWindowThatCanBecomeMainExcept: nil])
++    {
++      return;
++    }
+   if ([_delegate respondsToSelector:
+     @selector(applicationShouldTerminateAfterLastWindowClosed:)])
+     {
+@@ -4332,38 +4351,20 @@ struct _DelegateWrapper
+ {
+   NSWindow *win = [notification object];
+ 
+-  if (_app_is_running)
++  if (_app_is_running && ![self _hasWindowThatCanBecomeMainExcept: win])
+     {
+-      /* FIXME Don't use GSOrderedWindows(), since it may not return all
+-	 windows when the application is hidden. E.g., given a hidden
+-	 application with a single window with canHide == NO, if the user
+-	 closes this window it would appear as if the last window was closed. */
+-      NSArray *windows_list = GSOrderedWindows();
+-      NSEnumerator *iter = [windows_list objectEnumerator];
+-      BOOL wasLast = YES;
+-      NSWindow *tmp;
+-
+-      while ((tmp = [iter nextObject]))
+-        {
+-          if (tmp != win && [tmp canBecomeMainWindow] == YES)
+-            {
+-              wasLast = NO;
+-	      break;
+-            }
+-        }
+-
+       /* Perform _lastWindowDidClose at the end of the event loop cycle so
+ 	 that all interested objects are notified before we terminate the
+ 	 application. In particular, this means that a modified document
+ 	 associated with the closed window has been closed before -terminate:
+ 	 is called and therefore the user isn't asked twice whether she wants
+ 	 to save that document's unsaved changes. */
+-      if (wasLast)
+-	{
+-	  [self performSelector: @selector(_lastWindowClosed)
+-		     withObject: nil
+-		     afterDelay: 0.1];
+-	}
++      [NSObject cancelPreviousPerformRequestsWithTarget: self
++					       selector: @selector(_lastWindowClosed)
++						 object: nil];
++      [self performSelector: @selector(_lastWindowClosed)
++		 withObject: nil
++		 afterDelay: 0.0];
+     }
+ }
+ 
+diff --git a/Tests/gui/NSApplication/lastWindowClosed.m b/Tests/gui/NSApplication/lastWindowClosed.m
+new file mode 100644
+index 000000000..ce256e932
+--- /dev/null
++++ b/Tests/gui/NSApplication/lastWindowClosed.m
+@@ -0,0 +1,185 @@
++/* -applicationShouldTerminateAfterLastWindowClosed: is asked once the
++   event in which the last window closed is over, and only if by then no
++   window that can be the main window has been ordered in: an application
++   that closes one window and opens another in the same event (a sign-in
++   panel giving way to the document window) is not asked.  A panel left
++   on screen does not count.  Checked against AppKit on macOS.
++*/
++#include "Testing.h"
++
++#include <Foundation/NSArray.h>
++#include <Foundation/NSAutoreleasePool.h>
++#include <Foundation/NSString.h>
++
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSEvent.h>
++#include <AppKit/NSPanel.h>
++#include <AppKit/NSWindow.h>
++
++static int asked[8];
++static int step = 0;
++static BOOL counting = NO;
++static NSMutableArray *windows;
++
++static NSWindow *
++newWindow(BOOL panel)
++{
++  NSRect r = NSMakeRect(-3000, -3000, 200, 100);
++  NSUInteger style = NSTitledWindowMask | NSClosableWindowMask;
++  NSWindow *w;
++
++  if (panel)
++    {
++      w = [[NSPanel alloc] initWithContentRect: r styleMask: style
++                                       backing: NSBackingStoreBuffered
++                                         defer: NO];
++    }
++  else
++    {
++      w = [[NSWindow alloc] initWithContentRect: r styleMask: style
++                                        backing: NSBackingStoreBuffered
++                                          defer: NO];
++    }
++  [w setReleasedWhenClosed: NO];
++  [windows addObject: w];
++  RELEASE(w);
++  return w;
++}
++
++@interface Delegate : NSObject
++@end
++
++@implementation Delegate
++
++- (BOOL) applicationShouldTerminateAfterLastWindowClosed: (NSApplication *)app
++{
++  if (counting)
++    {
++      asked[step]++;
++    }
++  return NO;
++}
++
++- (void) clear: (id)sender
++{
++  NSEnumerator *e = [windows objectEnumerator];
++  NSWindow *w;
++
++  counting = NO;
++  while ((w = [e nextObject]) != nil)
++    {
++      [w close];
++    }
++  [windows removeAllObjects];
++  [self performSelector: @selector(step:) withObject: nil afterDelay: 0.3];
++}
++
++- (void) step: (id)sender
++{
++  NSWindow *a;
++  NSWindow *b;
++
++  step++;
++  counting = YES;
++  switch (step)
++    {
++      case 1:
++        a = newWindow(NO);
++        [a orderFront: nil];
++        [a close];
++        break;
++      case 2:
++        a = newWindow(NO);
++        b = newWindow(NO);
++        [a orderFront: nil];
++        [a close];
++        [b orderFront: nil];
++        break;
++      case 3:
++        a = newWindow(NO);
++        b = newWindow(YES);
++        [a orderFront: nil];
++        [b orderFront: nil];
++        [a close];
++        break;
++      case 4:
++        a = newWindow(NO);
++        b = newWindow(NO);
++        [a orderFront: nil];
++        [b orderFront: nil];
++        [a close];
++        [b close];
++        break;
++      case 5:
++        a = newWindow(YES);
++        b = newWindow(NO);
++        [a orderFront: nil];
++        [a close];
++        [b makeKeyAndOrderFront: nil];
++        break;
++      case 6:
++        a = newWindow(NO);
++        b = newWindow(NO);
++        [a orderFront: nil];
++        [a close];
++        [b performSelector: @selector(orderFront:) withObject: nil
++                afterDelay: 0.05];
++        break;
++      default:
++        [NSApp stop: nil];
++        [NSApp postEvent: [NSEvent otherEventWithType: NSApplicationDefined
++                                             location: NSZeroPoint
++                                        modifierFlags: 0
++                                            timestamp: 0
++                                         windowNumber: 0
++                                              context: nil
++                                              subtype: 0
++                                                data1: 0
++                                                data2: 0]
++                 atStart: NO];
++        return;
++    }
++  [self performSelector: @selector(clear:) withObject: nil afterDelay: 0.3];
++}
++
++- (void) applicationDidFinishLaunching: (NSNotification *)n
++{
++  [self performSelector: @selector(step:) withObject: nil afterDelay: 0.3];
++}
++
++@end
++
++int
++main(int argc, char **argv)
++{
++  START_SET("NSApplication last window closed")
++
++  NS_DURING
++    {
++      [NSApplication sharedApplication];
++    }
++  NS_HANDLER
++    {
++      if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++        SKIP("It looks like GNUstep backend is not yet installed")
++    }
++  NS_ENDHANDLER
++
++  windows = [NSMutableArray new];
++  [NSApp setDelegate: (id)AUTORELEASE([Delegate new])];
++  [NSApp run];
++
++  PASS(asked[1] == 1, "closing the only window asks once");
++  PASS(asked[2] == 0,
++    "not when another window is ordered in in the same event");
++  PASS(asked[3] == 1, "a panel left on screen does not count");
++  PASS(asked[4] == 1, "closing two windows in one event asks once");
++  PASS(asked[5] == 0,
++    "a panel closed as the last window, a window then made key: not asked");
++  PASS(asked[6] == 1,
++    "a window ordered in after the event is too late");
++
++  END_SET("NSApplication last window closed")
++
++  return 0;
++}
+-- 
+2.43.0
+

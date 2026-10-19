@@ -510,6 +510,19 @@ takes its selected range for the range to replace.
 `NSTextView/insertTextReplacementRange.m` passes 18 of 18 with the fix and
 on AppKit (macOS 15); without it the conformance check fails and the set
 stops at the first -insertText:replacementRange:.  On libs-gui 5c43a94.
+Added on 2026-10-19 for Logbook, which quit when its connect window
+closed and its logbook window opened in the same event:
+`last-window-closed`.  -applicationShouldTerminateAfterLastWindowClosed:
+was asked 0.1 s after a window closed if, as it closed, no other window
+on the server's stacking list could become main, without looking again.
+macOS (checked on macOS 15) asks at the end of that event, and not if a
+window has come in by then; once for several windows closed together;
+and a panel on screen does not count.  The check is now made again when
+it is time to ask, from the windows' own visibility, at the end of the
+event.  macOS also asks when the last window is only ordered out; that is
+left alone.  `NSApplication/lastWindowClosed.m` runs the application
+through six cases and passes 6 of 6 with the fix and on AppKit; without it
+the two where a window comes in the same event fail.  On libs-gui 5c43a94.
 
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
@@ -539,6 +552,7 @@ stops at the first -insertText:replacementRange:.  On libs-gui 5c43a94.
 | `popup-content-bindings` | libs-gui | test | not sent yet | (none: Logbook will use it from here; its LBObjectPopUpButton goes) |
 | `alert-accessory-view` | libs-gui | test | not sent yet | (none: Logbook will use it from here; its ConnectPanel.xib can go) |
 | `textview-insert-replacement-range` | libs-gui | test | not sent yet | (none: Logbook will use it from here; its #ifdef in LBSelfTest.m goes) |
+| `last-window-closed` | libs-gui | test | not sent yet | (none: Logbook will use it from here; its terminate on the window's close can go) |
 | `tableview-column-autoresizing-style` | libs-gui | test | [#982](https://github.com/gnustep/libs-gui/pull/982) | gnustep-coredata |
 | `collectionview-make-item` | libs-gui | test | [#1001](https://github.com/gnustep/libs-gui/pull/1001) | (none: TopoText uses it from here) |
 | `collectionview-flow-layout` | libs-gui | test | [#1002](https://github.com/gnustep/libs-gui/pull/1002) | (none: TopoText uses it from here) |
