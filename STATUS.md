@@ -383,6 +383,16 @@ now looked up by name, by the decoder already registered for the key.
 the fix and passes with it on libs-gui 87c1129; the rest of the gui suite
 passes with it.
 
+Added on 2026-10-19 for Logbook's xib: `arraycontroller-decoded-defaults`.
+Interface Builder writes selectsInsertedObjects, avoidsEmptySelection,
+preservesSelection and clearsFilterPredicateOnInsertion into a xib only
+when NO, and NSArrayController's -initWithCoder: left each unset flag at
+zero, so a xib's array controller selected nothing it added (its Remove
+button stayed disabled after Add).  They now start at YES, what macOS 15
+gives a xib controller with no attributes.
+`NSArrayController/decodedDefaults.m` fails 4 of its 6 checks without the
+fix and passes with it on libs-gui 5c43a947f.
+
 On 2026-10-18 libs-gui merged #978 (0a4322d) as it was sent, and
 `graphicscontext-backend-recursion` left: on libs-gui master it
 reverse-applies whole, so `apply-patches.sh` was already skipping it.  The
@@ -591,6 +601,7 @@ the two where a window comes in the same event fail.  On libs-gui 5c43a94.
 | `tooltip-mouse-moved` | libs-gui | test | not sent yet | (none: UDCodeKit resets the flag itself) |
 | `arraycontroller-remove-action` | libs-gui | test | not sent yet | (none: Logbook's Remove buttons use it from here) |
 | `view-overlapping-siblings` | libs-gui | test | not sent yet | (none: UDCodeKit's jump-to-line box needs it, ashalkhakov/UDCodeKit#43) |
+| `arraycontroller-decoded-defaults` | libs-gui | test | not sent yet | (none: Logbook's xib uses it from here) |
 | `opengl-view-hidden` | libs-gui | test | not sent yet | (none: UDQuakeTools' GUI editor uses it from here; its workaround is gone) |
 | `xib-segment-image` | libs-gui | test | not sent yet | (none: UDCode's navigator bar uses it from here) |
 | `xib-formatter-attributes` | libs-gui | test | not sent yet | (none: ORMKit's apps use it from here) |

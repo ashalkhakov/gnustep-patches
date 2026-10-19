@@ -1,0 +1,134 @@
+From f42f8d7273df89ffcf50d5ca33115c710e46128a Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Mon, 19 Oct 2026 16:46:07 +0000
+Subject: [PATCH] Give a decoded array controller AppKit's defaults
+
+Interface Builder writes selectsInsertedObjects, avoidsEmptySelection,
+preservesSelection and clearsFilterPredicateOnInsertion into a xib only
+when they are NO. -initWithCoder: set each only when the coder had a value
+for it and otherwise left the flag zeroed, so every array controller from a
+xib that kept the defaults selected nothing it inserted, let its selection
+go empty and dropped it when its objects were rearranged: a Remove button
+bound to canRemove stayed disabled after Add, where on macOS the new row is
+selected.
+
+The flags now start at YES, which is what macOS gives such a controller
+(checked on macOS 15 with a xib whose array controller has no attributes),
+and what is written still overrides them.
+
+Tests/gui/NSArrayController/decodedDefaults.m loads DecodedDefaults.xib,
+one controller with no attributes and one with all four written NO; the
+four checks of the defaults fail without the change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/NSArrayController.m                    |  4 ++
+ .../gui/NSArrayController/DecodedDefaults.xib | 13 ++++
+ Tests/gui/NSArrayController/decodedDefaults.m | 60 +++++++++++++++++++
+ 3 files changed, 77 insertions(+)
+ create mode 100644 Tests/gui/NSArrayController/DecodedDefaults.xib
+ create mode 100644 Tests/gui/NSArrayController/decodedDefaults.m
+
+diff --git a/Source/NSArrayController.m b/Source/NSArrayController.m
+index 682b4a387..df31256fa 100644
+--- a/Source/NSArrayController.m
++++ b/Source/NSArrayController.m
+@@ -679,6 +679,10 @@ atArrangedObjectIndexes: (NSIndexSet*)idx
+ 
+   if ([coder allowsKeyedCoding])
+     {
++      [self setSelectsInsertedObjects: YES];
++      [self setAvoidsEmptySelection: YES];
++      [self setPreservesSelection: YES];
++      [self setClearsFilterPredicateOnInsertion: YES];
+       if ([coder containsValueForKey: @"NSAvoidsEmptySelection"])
+ 	{
+ 	  [self setAvoidsEmptySelection:
+diff --git a/Tests/gui/NSArrayController/DecodedDefaults.xib b/Tests/gui/NSArrayController/DecodedDefaults.xib
+new file mode 100644
+index 000000000..15a9e267e
+--- /dev/null
++++ b/Tests/gui/NSArrayController/DecodedDefaults.xib
+@@ -0,0 +1,13 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<document type="com.apple.InterfaceBuilder3.Cocoa.XIB" version="3.0" toolsVersion="22505" targetRuntime="MacOSX.Cocoa" propertyAccessControl="none" useAutolayout="NO">
++    <dependencies>
++        <plugIn identifier="com.apple.InterfaceBuilder.CocoaPlugin" version="22505"/>
++    </dependencies>
++    <objects>
++        <customObject id="-2" userLabel="File's Owner" customClass="NSObject"/>
++        <customObject id="-1" userLabel="First Responder" customClass="FirstResponder"/>
++        <customObject id="-3" userLabel="Application" customClass="NSObject"/>
++        <arrayController id="plain"/>
++        <arrayController objectClassName="NSMutableArray" selectsInsertedObjects="NO" avoidsEmptySelection="NO" preservesSelection="NO" clearsFilterPredicateOnInsertion="NO" id="changed"/>
++    </objects>
++</document>
+diff --git a/Tests/gui/NSArrayController/decodedDefaults.m b/Tests/gui/NSArrayController/decodedDefaults.m
+new file mode 100644
+index 000000000..1ed961ef9
+--- /dev/null
++++ b/Tests/gui/NSArrayController/decodedDefaults.m
+@@ -0,0 +1,60 @@
++/* An array controller in a xib has the defaults Interface Builder leaves
++   unwritten: it selects inserted objects, avoids an empty selection,
++   preserves the selection and clears its filter predicate on insertion,
++   unless the xib says otherwise. */
++#include "Testing.h"
++
++#include <Foundation/NSArray.h>
++#include <Foundation/NSAutoreleasePool.h>
++#include <Foundation/NSData.h>
++
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSArrayController.h>
++#include <AppKit/NSNib.h>
++
++int
++main(int argc, const char **argv)
++{
++  NSNib			*nib;
++  NSArray		*objects = nil;
++  NSArrayController	*plain = nil;
++  NSArrayController	*changed = nil;
++  NSEnumerator		*e;
++  id			object;
++
++  START_SET("NSArrayController decoded defaults")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  nib = AUTORELEASE([[NSNib alloc] initWithNibData:
++    [NSData dataWithContentsOfFile: @"DecodedDefaults.xib"] bundle: nil]);
++  PASS(([nib instantiateWithOwner: NSApp topLevelObjects: &objects]),
++    "the xib loads")
++  e = [objects objectEnumerator];
++  while ((object = [e nextObject]) != nil)
++    {
++      if ([object isKindOfClass: [NSArrayController class]])
++	{
++	  if ([object objectClass] == [NSMutableArray class])
++	    changed = object;
++	  else
++	    plain = object;
++	}
++    }
++  PASS([plain selectsInsertedObjects], "selectsInsertedObjects is YES unless written")
++  PASS([plain avoidsEmptySelection], "avoidsEmptySelection is YES unless written")
++  PASS([plain preservesSelection], "preservesSelection is YES unless written")
++  PASS([plain clearsFilterPredicateOnInsertion],
++    "clearsFilterPredicateOnInsertion is YES unless written")
++  PASS(changed != nil && [changed clearsFilterPredicateOnInsertion] == NO,
++    "what the xib writes is kept")
++
++  END_SET("NSArrayController decoded defaults")
++
++  return 0;
++}
+-- 
+2.43.0
+
