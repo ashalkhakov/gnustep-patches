@@ -1,0 +1,121 @@
+From 1d98cbaf0789372c9ef1a389b795cbe548f22027 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Mon, 19 Oct 2026 00:56:19 +0000
+Subject: [PATCH] NSPredicate: ANY, ALL and NONE of nil evaluate as of an empty
+ collection
+
+A comparison with the ANY or ALL modifier (NONE is parsed as NOT ANY)
+raised NSInvalidArgumentException whenever its left hand side was not a
+collection, and nil is not one, so a key path that ended in nil raised:
+ANY owner.vehicles.odometer > 5 for an object without an owner, or with
+an owner without vehicles.  A missing to-one is a common sight there;
+Core Data's in-memory evaluation of a fetch request is one place that
+meets it.
+
+macOS takes nil as an empty collection: ANY is false, and ALL and NONE
+are true (checked on macOS 15 with dictionaries, over a nil to-one, a
+nil to-many and a missing key, with > and with == nil).  A left hand
+side that is neither nil nor a collection still raises there, and still
+raises here.
+
+Tests/base/NSPredicate/aggregateOfNil.m fails 9 of its 11 checks
+without the change.
+---
+ Source/NSPredicate.m                    |  3 +-
+ Tests/base/NSPredicate/aggregateOfNil.m | 70 +++++++++++++++++++++++++
+ 2 files changed, 72 insertions(+), 1 deletion(-)
+ create mode 100644 Tests/base/NSPredicate/aggregateOfNil.m
+
+diff --git a/Source/NSPredicate.m b/Source/NSPredicate.m
+index 5dbb60b..f90ac6f 100644
+--- a/Source/NSPredicate.m
++++ b/Source/NSPredicate.m
+@@ -1751,7 +1751,8 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
+       NSEnumerator *e;
+       id value;
+ 
+-      if (![leftValue respondsToSelector: @selector(objectEnumerator)])
++      if (leftValue != nil
++        && ![leftValue respondsToSelector: @selector(objectEnumerator)])
+         {
+           [NSException raise: NSInvalidArgumentException 
+                       format: @"The left hand side for an ALL or ANY operator must be a collection"];
+diff --git a/Tests/base/NSPredicate/aggregateOfNil.m b/Tests/base/NSPredicate/aggregateOfNil.m
+new file mode 100644
+index 0000000..c3a6776
+--- /dev/null
++++ b/Tests/base/NSPredicate/aggregateOfNil.m
+@@ -0,0 +1,70 @@
++#import <Foundation/NSArray.h>
++#import <Foundation/NSAutoreleasePool.h>
++#import <Foundation/NSDictionary.h>
++#import <Foundation/NSException.h>
++#import <Foundation/NSPredicate.h>
++#import <Foundation/NSValue.h>
++#import "ObjectTesting.h"
++
++static BOOL
++eval(NSString *format, id object)
++{
++  return [[NSPredicate predicateWithFormat: format]
++	   evaluateWithObject: object];
++}
++
++int
++main(int argc, char **argv)
++{
++  START_SET("ANY, ALL and NONE of nil")
++  NSDictionary	*noOwner;
++  NSDictionary	*noVehicles;
++  NSDictionary	*withOwner;
++  NSArray	*people;
++
++  noOwner = [NSDictionary dictionary];
++  noVehicles = [NSDictionary dictionaryWithObject: [NSDictionary dictionary]
++					   forKey: @"owner"];
++  withOwner = [NSDictionary dictionaryWithObject:
++    [NSDictionary dictionaryWithObject:
++      [NSArray arrayWithObject:
++	[NSDictionary dictionaryWithObject: [NSNumber numberWithInt: 10]
++				    forKey: @"odometer"]]
++				forKey: @"vehicles"]
++					  forKey: @"owner"];
++
++  PASS(!eval(@"ANY owner.vehicles.odometer > 5", noOwner),
++       "ANY through a nil to-one is false");
++  PASS(eval(@"ALL owner.vehicles.odometer > 5", noOwner),
++       "ALL through a nil to-one is true");
++  PASS(eval(@"NONE owner.vehicles.odometer > 5", noOwner),
++       "NONE through a nil to-one is true");
++  PASS(!eval(@"ANY owner.vehicles.odometer == nil", noOwner),
++       "ANY ... == nil through a nil to-one is false");
++  PASS(!eval(@"ANY owner.vehicles.odometer > 5", noVehicles),
++       "ANY of a nil to-many is false");
++  PASS(eval(@"ALL owner.vehicles.odometer > 5", noVehicles),
++       "ALL of a nil to-many is true");
++  PASS(eval(@"NONE owner.vehicles.odometer > 5", noVehicles),
++       "NONE of a nil to-many is true");
++  PASS(!eval(@"ANY vehicles == nil", noOwner),
++       "ANY of a missing key is false");
++  PASS(eval(@"ANY owner.vehicles.odometer > 5", withOwner),
++       "ANY of a collection is still evaluated");
++
++  people = [NSArray arrayWithObjects: noOwner, noVehicles, withOwner, nil];
++  PASS_EQUAL([people filteredArrayUsingPredicate:
++    [NSPredicate predicateWithFormat: @"ANY owner.vehicles.odometer > 5"]],
++    [NSArray arrayWithObject: withOwner],
++    "filtering keeps only the object whose collection matches");
++
++  PASS_EXCEPTION(eval(@"ANY odometer > 5",
++    [NSDictionary dictionaryWithObject: [NSNumber numberWithInt: 10]
++				forKey: @"odometer"]),
++    NSInvalidArgumentException,
++    "ANY of a value that is not a collection still raises");
++
++  END_SET("ANY, ALL and NONE of nil")
++
++  return 0;
++}
+-- 
+2.43.0
+

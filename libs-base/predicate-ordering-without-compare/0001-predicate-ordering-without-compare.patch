@@ -1,0 +1,132 @@
+From 9ebcae2cffb4673200ff9f9b9fa9921360d636d7 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Mon, 19 Oct 2026 05:04:21 +0000
+Subject: [PATCH] NSPredicate: ordering a value with no compare: of its own
+ raises
+
+<, <=, > and >= (and BETWEEN, which is parsed into >= and <=) compare
+with the left hand side's -compare:, and raise "Cannot compare objects"
+when it has none.  But every object has one here: NSObject's deprecated
+-compare: in NSObject+GNUstepBase, which orders by address.  So an
+array, a set, a dictionary, an NSValue or any object that does not
+implement -compare: was ordered against a number or a string by where
+it happened to lie in memory, and owner.vehicles.odometer > 5 (a direct
+comparison of an array) was true or false by chance.
+
+macOS raises NSInvalidArgumentException for all of these (checked on
+macOS 15: -compare: is an unrecognized selector there).  Take NSObject's
+own -compare: as no -compare:, so that they reach the existing raise.
+A class that implements -compare: is still ordered by it, and numbers,
+strings, dates and nil are compared as before.
+
+Tests/base/NSPredicate/orderingWithoutCompare.m fails 30 of its 36
+checks without the change.
+---
+ Source/NSPredicate.m                          |  4 +-
+ .../base/NSPredicate/orderingWithoutCompare.m | 79 +++++++++++++++++++
+ 2 files changed, 82 insertions(+), 1 deletion(-)
+ create mode 100644 Tests/base/NSPredicate/orderingWithoutCompare.m
+
+diff --git a/Source/NSPredicate.m b/Source/NSPredicate.m
+index 5dbb60b..204e96d 100644
+--- a/Source/NSPredicate.m
++++ b/Source/NSPredicate.m
+@@ -1559,7 +1559,9 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
+           comparisonResult = [leftResult compare:rightResult
+                                          options:compareOptions];
+         }
+-      else if ([leftResult respondsToSelector:@selector(compare:)])
++      else if ([leftResult respondsToSelector:@selector(compare:)]
++        && [leftResult methodForSelector: @selector(compare:)]
++          != [NSObject instanceMethodForSelector: @selector(compare:)])
+         {
+           // Attempt a comparison
+           comparisonResult = [leftResult compare:rightResult];
+diff --git a/Tests/base/NSPredicate/orderingWithoutCompare.m b/Tests/base/NSPredicate/orderingWithoutCompare.m
+new file mode 100644
+index 0000000..a305bf7
+--- /dev/null
++++ b/Tests/base/NSPredicate/orderingWithoutCompare.m
+@@ -0,0 +1,79 @@
++#import <Foundation/NSArray.h>
++#import <Foundation/NSAutoreleasePool.h>
++#import <Foundation/NSDictionary.h>
++#import <Foundation/NSException.h>
++#import <Foundation/NSPredicate.h>
++#import <Foundation/NSSet.h>
++#import <Foundation/NSValue.h>
++#import "ObjectTesting.h"
++
++@interface Ranked : NSObject
++@end
++@implementation Ranked
++- (NSComparisonResult) compare: (id)other
++{
++  return NSOrderedDescending;
++}
++@end
++
++static BOOL
++eval(NSString *format, id left)
++{
++  NSDictionary	*object = nil;
++
++  if (left != nil)
++    {
++      object = [NSDictionary dictionaryWithObject: left forKey: @"l"];
++    }
++  return [[NSPredicate predicateWithFormat: format]
++	   evaluateWithObject: object];
++}
++
++int
++main(int argc, char **argv)
++{
++  START_SET("Ordering a value that has no compare:")
++  NSNumber	*ten = [NSNumber numberWithInt: 10];
++  NSArray	*lefts;
++  NSArray	*formats;
++  NSUInteger	i;
++  NSUInteger	j;
++
++  lefts = [NSArray arrayWithObjects:
++    [NSArray arrayWithObject: ten],
++    [NSSet setWithObject: ten],
++    [NSDictionary dictionaryWithObject: ten forKey: @"k"],
++    [[NSObject new] autorelease],
++    [NSValue valueWithRange: NSMakeRange(1, 2)],
++    nil];
++  formats = [NSArray arrayWithObjects:
++    @"l < 5", @"l <= 5", @"l > 5", @"l >= 5", @"l > 'b'",
++    @"l BETWEEN {1, 20}", nil];
++
++  for (i = 0; i < [lefts count]; i++)
++    {
++      id	left = [lefts objectAtIndex: i];
++
++      for (j = 0; j < [formats count]; j++)
++	{
++	  NSString	*format = [formats objectAtIndex: j];
++
++	  PASS_EXCEPTION(eval(format, left), NSInvalidArgumentException,
++	    "%s with l %s raises",
++	    [format UTF8String], [NSStringFromClass([left class]) UTF8String]);
++	}
++    }
++
++  PASS(eval(@"l > 5", ten), "a number is still ordered");
++  PASS(eval(@"l > 'a'", @"b"), "a string is still ordered");
++  PASS(eval(@"l > 5", [[Ranked new] autorelease]),
++       "a class with its own compare: is still ordered by it");
++  PASS(!eval(@"l > 5", nil), "nil is still not greater than a number");
++  PASS(eval(@"l <= nil", nil), "nil is still less than or equal to nil");
++  PASS(!eval(@"l == 5", [NSArray arrayWithObject: ten]),
++       "equality of a collection does not raise");
++
++  END_SET("Ordering a value that has no compare:")
++
++  return 0;
++}
+-- 
+2.43.0
+
