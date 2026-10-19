@@ -364,6 +364,14 @@ context current before giving it the view, which it now does first.
 `NSOpenGLView/hidden.m` fails 3 of its 6 checks without the fix and
 passes with it on libs-gui fdc5cfe, under Xvfb with Mesa's GLX.
 
+Added on 2026-10-19 for Logbook's Remove buttons:
+`arraycontroller-remove-action`.  NSArrayController had no remove: of its
+own, so the action went to NSObjectController's, which sent -removeObject:
+the content array itself: nothing was removed.  It now removes the
+selected objects through -removeObjectsAtArrangedObjectIndexes:, as macOS
+15 does.  `NSArrayController/removeAction.m` fails 3 of its 4 checks
+without the fix and passes with it on libs-gui 5c43a947f.
+
 Added on 2026-10-19 for UDCode's navigator bar: `xib-segment-image`.  A
 segment named its image in an attribute (`<segment image="name"/>`), and
 the xib unarchiver's key map turned the key NSSegmentItem decodes it under
@@ -581,6 +589,7 @@ the two where a window comes in the same event fail.  On libs-gui 5c43a94.
 | `tableview-prototype-copy` | libs-gui | test | not sent yet | (none: UDCodeKit's issues navigator is cell-based meanwhile) |
 | `arraycontroller-selection-kvo` | libs-gui | test | not sent yet | (none: Logbook's LBEntityController will drop its workaround) |
 | `tooltip-mouse-moved` | libs-gui | test | not sent yet | (none: UDCodeKit resets the flag itself) |
+| `arraycontroller-remove-action` | libs-gui | test | not sent yet | (none: Logbook's Remove buttons use it from here) |
 | `view-overlapping-siblings` | libs-gui | test | not sent yet | (none: UDCodeKit's jump-to-line box needs it, ashalkhakov/UDCodeKit#43) |
 | `opengl-view-hidden` | libs-gui | test | not sent yet | (none: UDQuakeTools' GUI editor uses it from here; its workaround is gone) |
 | `xib-segment-image` | libs-gui | test | not sent yet | (none: UDCode's navigator bar uses it from here) |
