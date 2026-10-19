@@ -1,0 +1,170 @@
+From cb5a826b887b57da282e6067c9e4277e67069caa Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Tue, 20 Oct 2026 01:49:46 +0500
+Subject: [PATCH] cairo: measure text unhinted by default, as macOS does
+
+With GSFontHinting unset the cairo backend made its fonts with
+CAIRO_HINT_METRICS_ON (the default value 33: metrics hinted, outlines
+not).  Hinted metrics round every advance, the ascender, the descender
+and the line height to whole device units, so the text system measured
+and laid out text with widths no other platform gives it: "line wraps
+here" in Arial at 10 points is 70.0 points wide here and 67.8 on macOS,
+whose text system uses the outlines' own advances and does not hint at
+all.  Text that fits a box on macOS wraps on GNUstep, a column of figures
+drifts by the rounding of each digit, and a document laid out for print
+(where nothing is snapped to the pixel grid) is laid out for the screen.
+
+Make the default 17, metrics and outlines unhinted, which is what the
+backend has already used since 2022 whenever GSScaleFactor is not 1,
+because hinted advances do not scale.  They do not scale at a factor of 1
+either: an advance hinted at 10 points is not a tenth of the one at 100.
+GSFontHinting still selects any other combination.
+
+The comment kept above the switch says that unhinted metrics once cut
+menus off on the right; a menu sized to fit with long titles and key
+equivalents is drawn whole with this change, as it already was with a
+scale factor.
+
+The test measures a string in the system font at 10 and at 100 points,
+with -widthOfString: and through the text system, and the ascender: each
+is a tenth as large at the small size.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/cairo/CairoFontInfo.m  | 17 ++-----
+ Tests/cairo/unhintedmetrics.m | 86 +++++++++++++++++++++++++++++++++++
+ 2 files changed, 89 insertions(+), 14 deletions(-)
+ create mode 100644 Tests/cairo/unhintedmetrics.m
+
+diff --git a/Source/cairo/CairoFontInfo.m b/Source/cairo/CairoFontInfo.m
+index 34733f3..382da5d 100644
+--- a/Source/cairo/CairoFontInfo.m
++++ b/Source/cairo/CairoFontInfo.m
+@@ -48,29 +48,18 @@ void set_font_options(cairo_font_options_t *options)
+   cairo_hint_metrics_t metrics = CAIRO_HINT_METRICS_ON;
+   cairo_hint_style_t   style = CAIRO_HINT_STYLE_NONE;
+   int hinting = [ud integerForKey: @"GSFontHinting"];
+-  float scale = [ud floatForKey: @"GSScaleFactor"];
+   int subpixel = 0;
+ 
+   if (hinting == 0) 
+     {
+       /*
+        * This could be on purpose or a missing value.
+-       * In the later case use the defaults.
++       * In the later case use the defaults: no hinting, of the outlines or
++       * of the metrics.
+        */
+       if (nil == [ud objectForKey: @"GSFontHinting"])
+         {
+-          /*
+-           * Default hinting to off if scale is set to something other than 1.0. As
+-           * hinting + scaling breaks assumptions about glyph advancement made in gui.
+-           */
+-          if (scale == 0.0f || scale == 1.0f)
+-            {
+-              hinting = 33;
+-            }
+-          else
+-            {
+-              hinting = 17;
+-            }
++          hinting = 17;
+         }
+     }
+   
+diff --git a/Tests/cairo/unhintedmetrics.m b/Tests/cairo/unhintedmetrics.m
+new file mode 100644
+index 0000000..ff15181
+--- /dev/null
++++ b/Tests/cairo/unhintedmetrics.m
+@@ -0,0 +1,86 @@
++/* Text is measured with the outlines' own advances, as macOS measures it,
++ * not with advances rounded to whole pixels: "line wraps here" in Arial at
++ * 10 points is 67.8 points wide on macOS, and a layout that rounds each
++ * advance makes it 70 and wraps lines where macOS does not.
++ *
++ * An unhinted advance scales with the point size, so a string set at ten
++ * points is a tenth as wide as at a hundred.  Rounded advances do not: each
++ * one is off by up to half a point at the small size, which a tenth of the
++ * large size does not repeat.  The font is whichever the system font is.
++ *
++ * It needs a running window server to load the backend at all, so it skips
++ * cleanly when there is none, and it guards on the cairo graphics backend.
++ */
++#import <Foundation/NSObject.h>
++#import "Testing.h"
++#include "config.h"
++
++#if defined(BUILD_GRAPHICS) && defined(GRAPHICS_cairo) \
++  && BUILD_GRAPHICS == GRAPHICS_cairo
++
++#import <AppKit/AppKit.h>
++#import <GNUstepGUI/GSDisplayServer.h>
++#include <math.h>
++
++int
++main(int argc, const char **argv)
++{
++  START_SET("unhinted metrics")
++
++  NSString *s = @"line wraps here";
++  NSFont *small, *large;
++  CGFloat ws, wl;
++  NSSize ss, sl;
++
++  NS_DURING
++    {
++      [NSApplication sharedApplication];
++      if (nil == GSCurrentServer())
++	{
++	  SKIP("no window server available")
++	}
++    }
++  NS_HANDLER
++    {
++      SKIP("It looks like the GNUstep backend is not installed")
++    }
++  NS_ENDHANDLER
++
++  small = [NSFont systemFontOfSize: 10];
++  large = [NSFont fontWithName: [small fontName] size: 100];
++  if (small == nil || large == nil)
++    {
++      SKIP("no system font")
++    }
++
++  ws = [small widthOfString: s];
++  wl = [large widthOfString: s];
++  PASS(ws > 0 && fabs(ws * 10 - wl) < 0.1,
++    "a string is a tenth as wide at ten points as at a hundred");
++
++  ss = [s sizeWithAttributes:
++    [NSDictionary dictionaryWithObject: small forKey: NSFontAttributeName]];
++  sl = [s sizeWithAttributes:
++    [NSDictionary dictionaryWithObject: large forKey: NSFontAttributeName]];
++  PASS(ss.width > 0 && fabs(ss.width * 10 - sl.width) < 0.1,
++    "laid out text is a tenth as wide at ten points as at a hundred");
++
++  PASS(fabs([small ascender] * 10 - [large ascender]) < 0.1,
++    "the ascender is a tenth as tall at ten points as at a hundred");
++
++  END_SET("unhinted metrics")
++  return 0;
++}
++
++#else
++
++int
++main(int argc, const char **argv)
++{
++  START_SET("unhinted metrics")
++    SKIP("back is not built with the cairo graphics backend")
++  END_SET("unhinted metrics")
++  return 0;
++}
++
++#endif
+-- 
+2.50.1 (Apple Git-155)
+
