@@ -335,6 +335,26 @@ fail; with it they pass, on libs-gui fdc5cfe.  The issue's third point,
 that a popover takes the keyboard, did not reproduce here: the panel cannot
 become key, and under Xvfb with no window manager the parent stays key.
 
+Added on 2026-10-19 for Logbook's controllers:
+`arraycontroller-arrange-eagerly`.  Unless it rearranged automatically,
+NSArrayController dropped its arranged objects on each addition and
+removal and arranged them again inside -arrangedObjects, which the first
+observer to ask called from within the content's change notification; so
+observers of arrangedObjects heard of each change twice, with the new
+value as the old, and observers of arrangedObjects.<key> were left on
+removed objects, which raised when those were deallocated.  The selection
+did not follow either: -addObject: selected the first row whatever it
+added, and -setContent: kept indexes past the end of shorter content (an
+observer of selection.<key> then raised NSRangeException).  The arranged
+objects are now updated inside the content change, and the selection
+follows the objects, as on macOS 15: added objects are appended (arranged
+again when rearranging automatically) and become the selection with
+selectsInsertedObjects; removed ones are taken out; selected objects stay
+selected with preservesSelection; avoidsEmptySelection picks the object at
+the old index, or the last; -setSortDescriptors: and -setFilterPredicate:
+rearrange.  `NSArrayController/arrangeOnChange.m` fails 11 of its 14
+checks without the fix and passes with it on libs-gui 5c43a947f.
+
 Added on 2026-10-17 for UDQuakeTools' GUI editor: `opengl-view-hidden`.
 On X an NSOpenGLView draws into an X window of its own over the view's,
 and hiding the view (or a view it is in) left that window up, over what
@@ -557,6 +577,7 @@ the two where a window comes in the same event fail.  On libs-gui 5c43a94.
 | `nsdateformatter-settings` | libs-base | test | not sent yet (needs `formatter-keyed-attributes`) | (none: ORMKit's apps use it from here) |
 | `nsnumberformatter-settings` | libs-base | test | not sent yet (needs `formatter-keyed-attributes`) | (none: ORMKit's apps use it from here) |
 | `popover-placement` | libs-gui | test | not sent yet | (none: UDCodeKit places its own child windows meanwhile) |
+| `arraycontroller-arrange-eagerly` | libs-gui | test | not sent yet | (none: Logbook's LBEntityController will drop its workaround) |
 | `tableview-prototype-copy` | libs-gui | test | not sent yet | (none: UDCodeKit's issues navigator is cell-based meanwhile) |
 | `arraycontroller-selection-kvo` | libs-gui | test | not sent yet | (none: Logbook's LBEntityController will drop its workaround) |
 | `tooltip-mouse-moved` | libs-gui | test | not sent yet | (none: UDCodeKit resets the flag itself) |
