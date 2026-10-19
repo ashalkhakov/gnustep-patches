@@ -1,0 +1,189 @@
+From 17705f95e9ecfe2581bdd74d13467634ae5bea96 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Tue, 20 Oct 2026 02:12:12 +0500
+Subject: [PATCH] Keep -setPosition:ofDividerAtIndex: within the divider's
+ range
+
+Moving a divider past the end of its range gives the subview after it a
+negative size, and the subview before it more room than the split view
+has:
+
+  File NSView.m: 1291. In -[NSView setFrame:] given negative height
+
+which is what an application gets when it collapses its last pane with
+[split setPosition: NSHeight([split bounds]) ofDividerAtIndex: 0].
+
+The method moved both subviews by the distance asked for and then
+floored the first at one point - twice for a horizontal split, where
+the check meant for the second subview tested the first one's height
+again, so the second was never floored at all. Moving a divider
+further than the subviews on either side of it can give is
+meaningless; AppKit stops at the end, leaving the subview on that side
+empty and the other with all the room (checked on macOS 15, both
+orientations, positions at, past and before the ends). Limit the move
+to what the two subviews hold, so neither goes below zero nor past
+the other's far edge.
+
+Tests/gui/NSSplitView/setPositionBounds.m moves the divider of a
+two-pane split view to the end, past it and before the start, both
+ways; its six checks pass on macOS 15. Without the change all six fail
+here (the first pane grows to 397 points in a split view 300 high and
+the second is given a negative height); with it they pass. The other
+NSSplitView tests still pass.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/NSSplitView.m                      | 41 ++++--------
+ Tests/gui/NSSplitView/setPositionBounds.m | 76 +++++++++++++++++++++++
+ 2 files changed, 87 insertions(+), 30 deletions(-)
+ create mode 100644 Tests/gui/NSSplitView/setPositionBounds.m
+
+diff --git a/Source/NSSplitView.m b/Source/NSSplitView.m
+index a66e9a8b7..a58d1af3c 100644
+--- a/Source/NSSplitView.m
++++ b/Source/NSSplitView.m
+@@ -1202,6 +1202,7 @@ - (void) setPosition: (CGFloat)position
+   NSArray *subs = [self subviews];
+   NSUInteger count = [subs count];
+   CGFloat old_position;
++  CGFloat delta;
+   NSView *prev;
+   NSView *next;
+   NSRect r, r1;
+@@ -1245,41 +1246,21 @@ - (void) setPosition: (CGFloat)position
+       old_position = (NSMaxX(r) + NSMinX(r1)) / 2;
+     }
+ 
+-  // Compute new rectangles
++  // Compute new rectangles, keeping both subviews within the pair's span
++  delta = position - old_position;
+   if (_isVertical == NO)
+     {
+-      r.size.height += position - old_position;
+-      if (NSHeight(r) < 1.)
+-        {
+-          r.size.height = 1.;
+-        }
++      delta = MIN(MAX(delta, -NSHeight(r)), NSHeight(r1));
++      r.size.height += delta;
++      r1.origin.y += delta;
++      r1.size.height -= delta;
+     }
+   else
+     {
+-      r.size.width += position - old_position;
+-      if (NSWidth(r) < 1.)
+-        {
+-          r.size.width = 1.;
+-        }
+-    }
+-
+-  if (_isVertical == NO)
+-    {
+-      r1.origin.y += position - old_position;
+-      r1.size.height -= position - old_position;
+-      if (NSHeight(r) < 1.)
+-        {
+-          r.size.height = 1.;
+-        }
+-    }
+-  else
+-    {
+-      r1.origin.x += position - old_position;
+-      r1.size.width -= position - old_position;
+-      if (NSWidth(r1) < 1.)
+-        {
+-          r1.size.width = 1.;
+-        }
++      delta = MIN(MAX(delta, -NSWidth(r)), NSWidth(r1));
++      r.size.width += delta;
++      r1.origin.x += delta;
++      r1.size.width -= delta;
+     }
+ 
+   /* resize the subviews accordingly */
+diff --git a/Tests/gui/NSSplitView/setPositionBounds.m b/Tests/gui/NSSplitView/setPositionBounds.m
+new file mode 100644
+index 000000000..080601972
+--- /dev/null
++++ b/Tests/gui/NSSplitView/setPositionBounds.m
+@@ -0,0 +1,76 @@
++/* -setPosition:ofDividerAtIndex: past either end of a divider's range leaves
++   the subview on that side empty and the other with the room, rather than
++   giving one a negative size or growing one past the split view.  Checked
++   against AppKit, for both orientations. */
++#include "Testing.h"
++
++#include <Foundation/NSAutoreleasePool.h>
++
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSView.h>
++#include <AppKit/NSSplitView.h>
++
++static CGFloat
++span(NSSplitView *sv, NSView *v)
++{
++  return [sv isVertical] ? NSWidth([v frame]) : NSHeight([v frame]);
++}
++
++static void
++check(BOOL vertical)
++{
++  NSSplitView *sv;
++  NSView *a, *b;
++  CGFloat total, room;
++  const char *o = vertical ? "vertical" : "horizontal";
++
++  sv = AUTORELEASE([[NSSplitView alloc]
++    initWithFrame: NSMakeRect(0, 0, 300, 300)]);
++  [sv setVertical: vertical];
++  a = AUTORELEASE([[NSView alloc] initWithFrame: NSMakeRect(0, 0, 150, 150)]);
++  b = AUTORELEASE([[NSView alloc] initWithFrame: NSMakeRect(0, 0, 150, 150)]);
++  [sv addSubview: a];
++  [sv addSubview: b];
++  [sv adjustSubviews];
++  total = 300;
++  room = total - [sv dividerThickness];
++
++  [sv setPosition: total ofDividerAtIndex: 0];
++  PASS(span(sv, b) == 0 && span(sv, a) == room,
++    "%s: a divider moved to the end empties the second subview", o);
++
++  [sv setPosition: total + 100 ofDividerAtIndex: 0];
++  PASS(span(sv, b) == 0 && span(sv, a) == room,
++    "%s: a divider moved past the end empties the second subview", o);
++
++  [sv setPosition: -50 ofDividerAtIndex: 0];
++  PASS(span(sv, a) == 0 && span(sv, b) == room,
++    "%s: a divider moved before the start empties the first subview", o);
++}
++
++int main()
++{
++  START_SET("NSSplitView setPosition bounds")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  NS_DURING
++    {
++      check(NO);
++      check(YES);
++    }
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException]
++      || [[localException name] isEqualToString: @"NSWindowServerCommunicationException"])
++      SKIP("No display available")
++  NS_ENDHANDLER
++
++  END_SET("NSSplitView setPosition bounds")
++
++  return 0;
++}
+-- 
+2.50.1 (Apple Git-155)
+
