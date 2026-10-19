@@ -1,0 +1,287 @@
+From 39be07512244782ba2681b092df318b59175f91d Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Mon, 19 Oct 2026 20:53:35 +0000
+Subject: [PATCH] NSPopUpButton: selectedObject from the pop-up's action
+
+A pop-up's selection bindings (selectedObject, selectedIndex, selectedTag,
+selectedValue) took the chosen item only in the cell's item action, and
+only once the cell had a control view, which it gets when first drawn.
+On macOS 15 they take it whenever the pop-up sends its action:
+-sendAction:to: (with no action too), or an item's action through the
+menu; selecting an item alone (-selectItemAtIndex:, -selectItem:) sets
+nothing. NSPopUpButton now reverse-sets them in -sendAction:to:, its cell
+sends an item's action through it, and the pop-up gives its cell itself
+as control view when it is set.
+
+NSInsertsNullPlaceholderBindingOption given on selectedObject adds the
+null item too on macOS, titled "No Value" whatever that binding's
+NSNullPlaceholderBindingOption (a title alone adds nothing); the content
+bindings' placeholder title wins when they ask for one as well. It was
+read from the content bindings only, and the items are now rebuilt when
+selectedObject, bound after the content, asks for it.
+
+Tests/gui/NSPopUpButton/selectedObjectAction.m passes on macOS 15; 6 of
+its 13 checks fail without the change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/NSPopUpButton.m                        |  49 ++++++-
+ Source/NSPopUpButtonCell.m                    |  24 +--
+ .../gui/NSPopUpButton/selectedObjectAction.m  | 138 ++++++++++++++++++
+ 3 files changed, 193 insertions(+), 18 deletions(-)
+ create mode 100644 Tests/gui/NSPopUpButton/selectedObjectAction.m
+
+diff --git a/Source/NSPopUpButton.m b/Source/NSPopUpButton.m
+index 46ff5f325..529c75eca 100644
+--- a/Source/NSPopUpButton.m
++++ b/Source/NSPopUpButton.m
+@@ -797,9 +797,43 @@ this to return nil to indicate that we have no context menu.
+           return title != nil ? title : _(@"No Value");
+         }
+     }
++  /* On selectedObject it adds the item too, but its title is not taken. */
++  if ([[[[self infoForBinding: NSSelectedObjectBinding]
++    objectForKey: NSOptionsKey]
++    objectForKey: NSInsertsNullPlaceholderBindingOption] boolValue])
++    {
++      return _(@"No Value");
++    }
+   return nil;
+ }
+ 
++- (BOOL) sendAction: (SEL)theAction to: (id)theTarget
++{
++  NSString *bindings[] = {NSSelectedIndexBinding, NSSelectedTagBinding,
++                          NSSelectedObjectBinding, NSSelectedValueBinding};
++  int i;
++
++  for (i = 0; i < 4; i++)
++    {
++      GSKeyValueBinding *theBinding;
++
++      theBinding = [GSKeyValueBinding getBinding: bindings[i] forObject: self];
++      if (theBinding != nil)
++        {
++          [theBinding reverseSetValueFor: bindings[i]];
++        }
++    }
++  return [super sendAction: theAction to: theTarget];
++}
++
++/* The cell sends its items' actions through its pop-up, even before it
++ * has been drawn. */
++- (void) setCell: (NSCell *)aCell
++{
++  [super setCell: aCell];
++  [aCell setControlView: self];
++}
++
+ - (void) _addContentItemWithTitle: (NSString *)title
+                 representedObject: (id)object
+ {
+@@ -981,7 +1015,20 @@ this to return nil to indicate that we have no context menu.
+     }
+   else if ([aKey isEqual: NSSelectedObjectBinding])
+     {
+-      [self _selectObject: anObject];
++      NSString *placeholder = [self _nullPlaceholderTitle];
++
++      /* Bound after the content, with a null placeholder of its own. */
++      if (placeholder != nil && [self _hasContentBinding]
++        && ([self numberOfItems] == 0
++          || [[self itemAtIndex: 0] representedObject] != nil
++          || ![[[self itemAtIndex: 0] title] isEqual: placeholder]))
++        {
++          [self _rebuildContent];
++        }
++      else
++        {
++          [self _selectObject: anObject];
++        }
+     }
+   else if ([aKey isEqual: NSSelectedValueBinding])
+     {
+diff --git a/Source/NSPopUpButtonCell.m b/Source/NSPopUpButtonCell.m
+index a8481e4b4..1059e07d8 100644
+--- a/Source/NSPopUpButtonCell.m
++++ b/Source/NSPopUpButtonCell.m
+@@ -1420,25 +1420,15 @@ static NSImage *_pbc_image[5];
+       [(NSPopUpButton *)_control_view _removeNoValueItemUnlessSelected];
+     }
+ 
+-  if (_control_view)
++  if ([_control_view isKindOfClass: [NSPopUpButton class]])
+     {
+-      NSString *bindings[] = {NSSelectedIndexBinding, NSSelectedTagBinding,
+-                              NSSelectedObjectBinding, NSSelectedValueBinding};
+-      int i;
+-
+-      for (i = 0; i < 4; i++)
+-        {
+-          NSString *binding = bindings[i];
+-          GSKeyValueBinding *theBinding;
+-
+-          theBinding = [GSKeyValueBinding getBinding: binding 
+-                                           forObject: _control_view];
+-          if (theBinding != nil)
+-            [theBinding reverseSetValueFor: binding];
+-        }
++      [(NSPopUpButton *)_control_view sendAction: [self action]
++                                              to: [self target]];
++    }
++  else
++    {
++      [NSApp sendAction: [self action] to: [self target] from: _control_view];
+     }
+-
+-  [NSApp sendAction: [self action] to: [self target] from: _control_view];
+ }
+ 
+ @end
+diff --git a/Tests/gui/NSPopUpButton/selectedObjectAction.m b/Tests/gui/NSPopUpButton/selectedObjectAction.m
+new file mode 100644
+index 000000000..d9f2306bf
+--- /dev/null
++++ b/Tests/gui/NSPopUpButton/selectedObjectAction.m
+@@ -0,0 +1,138 @@
++/* A pop-up's selectedObject binding takes the chosen object when the
++   pop-up sends its action (-sendAction:to:, with or without an action, or
++   an item's action through its menu), not when an item is only selected,
++   as on AppKit.  NSInsertsNullPlaceholderBindingOption on selectedObject
++   adds the "No Value" item, whatever its NSNullPlaceholderBindingOption;
++   the content's own null placeholder title wins. */
++#include "Testing.h"
++
++#include <Foundation/NSArray.h>
++#include <Foundation/NSAutoreleasePool.h>
++#include <Foundation/NSDictionary.h>
++#include <Foundation/NSString.h>
++
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSArrayController.h>
++#include <AppKit/NSKeyValueBinding.h>
++#include <AppKit/NSMenu.h>
++#include <AppKit/NSObjectController.h>
++#include <AppKit/NSPopUpButton.h>
++
++@interface Target : NSObject
++{
++@public
++  int	sent;
++}
++@end
++
++@implementation Target
++- (void) chosen: (id)sender
++{
++  sent++;
++}
++@end
++
++static NSMutableDictionary	*km;
++static NSMutableDictionary	*mi;
++static NSMutableDictionary	*fillUp;
++
++static NSPopUpButton *
++popUp(NSDictionary *selectedOptions, NSDictionary *contentOptions, id target)
++{
++  NSArrayController	*units = AUTORELEASE([[NSArrayController alloc] init]);
++  NSObjectController	*form = AUTORELEASE([[NSObjectController alloc] init]);
++  NSPopUpButton		*p;
++
++  [units setContent: [NSMutableArray arrayWithObjects: km, mi, nil]];
++  fillUp = [NSMutableDictionary dictionaryWithObject: km forKey: @"unit"];
++  [form setContent: fillUp];
++  p = AUTORELEASE([[NSPopUpButton alloc]
++    initWithFrame: NSMakeRect(0, 0, 100, 20) pullsDown: NO]);
++  if (target != nil)
++    {
++      [p setTarget: target];
++      [p setAction: @selector(chosen:)];
++    }
++  [p bind: NSContentBinding toObject: units
++  withKeyPath: @"arrangedObjects" options: contentOptions];
++  [p bind: NSContentValuesBinding toObject: units
++  withKeyPath: @"arrangedObjects.name" options: nil];
++  [p bind: NSSelectedObjectBinding toObject: form
++  withKeyPath: @"selection.unit" options: selectedOptions];
++  return p;
++}
++
++static NSString *
++titles(NSPopUpButton *p)
++{
++  return [[p itemTitles] componentsJoinedByString: @","];
++}
++
++int
++main(int argc, const char **argv)
++{
++  NSPopUpButton	*p;
++  Target	*target;
++  NSDictionary	*inserts;
++
++  START_SET("NSPopUpButton selectedObject from its action")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  km = [NSMutableDictionary dictionaryWithObject: @"km" forKey: @"name"];
++  mi = [NSMutableDictionary dictionaryWithObject: @"mi" forKey: @"name"];
++  target = AUTORELEASE([[Target alloc] init]);
++
++  p = popUp(nil, nil, target);
++  [p selectItemAtIndex: 1];
++  PASS([fillUp objectForKey: @"unit"] == km, "selecting an item alone sets nothing")
++  [p sendAction: [p action] to: [p target]];
++  PASS([fillUp objectForKey: @"unit"] == mi, "sending the action sets it")
++  PASS(target->sent == 1, "and the action is sent")
++
++  p = popUp(nil, nil, nil);
++  [p selectItemAtIndex: 1];
++  [p sendAction: [p action] to: [p target]];
++  PASS([fillUp objectForKey: @"unit"] == mi, "so does sending no action")
++
++  p = popUp(nil, nil, target);
++  [[p menu] performActionForItemAtIndex: 1];
++  PASS([fillUp objectForKey: @"unit"] == mi, "choosing an item through the menu sets it")
++  PASS(target->sent == 2, "and sends the action")
++
++  inserts = [NSDictionary dictionaryWithObject: [NSNumber numberWithBool: YES]
++					forKey: NSInsertsNullPlaceholderBindingOption];
++  p = popUp(inserts, nil, target);
++  PASS_EQUAL(titles(p), @"No Value,km,mi",
++    "a null placeholder asked of selectedObject adds an item")
++  PASS_EQUAL([p titleOfSelectedItem], @"km", "the object stays chosen")
++  [p selectItemAtIndex: 0];
++  [p sendAction: [p action] to: [p target]];
++  PASS([fillUp objectForKey: @"unit"] == nil, "choosing it sets nil")
++
++  p = popUp([NSDictionary dictionaryWithObjectsAndKeys:
++    [NSNumber numberWithBool: YES], NSInsertsNullPlaceholderBindingOption,
++    @"(none)", NSNullPlaceholderBindingOption, nil], nil, target);
++  PASS_EQUAL(titles(p), @"No Value,km,mi",
++    "selectedObject's null placeholder title is not taken")
++
++  p = popUp([NSDictionary dictionaryWithObject: @"(none)"
++					forKey: NSNullPlaceholderBindingOption],
++    nil, target);
++  PASS_EQUAL(titles(p), @"km,mi", "a title alone adds no item")
++
++  p = popUp(inserts, [NSDictionary dictionaryWithObjectsAndKeys:
++    [NSNumber numberWithBool: YES], NSInsertsNullPlaceholderBindingOption,
++    @"Content", NSNullPlaceholderBindingOption, nil], target);
++  PASS_EQUAL(titles(p), @"Content,km,mi", "the content's title wins")
++  [fillUp removeObjectForKey: @"unit"];
++  PASS([p indexOfSelectedItem] == 0, "nil chooses the null item")
++
++  END_SET("NSPopUpButton selectedObject from its action")
++  return 0;
++}
+-- 
+2.43.0
+
