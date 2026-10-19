@@ -297,6 +297,22 @@ macOS.  `NSWindow/toolTipMouseMoved.m` fails its 3 checks without the fix
 and passes with it; NSWindow (37), NSView and the NSMatrix and NSTabView
 tooltip tests pass, on libs-gui fdc5cfe.
 
+Added on 2026-10-19: `controller-selection-markers`.  A controller's
+-selection was its content (NSObjectController) or the one selected object
+or nil (NSArrayController), so selection.<key> was nil with nothing or
+several selected and bound controls showed an empty value instead of the
+"No Selection" and "Multiple Values" placeholders.  -selection now answers
+a proxy, as on macOS 15: the selected objects' common value, else
+NSMultipleValuesMarker (always for several, with
+alwaysUsesMultipleValuesMarker), NSNoSelectionMarker with nothing selected,
+NSNotApplicableMarker for a key they do not have (macOS raises there and
+the binding substitutes it); setting through it sets every selected
+object; observers of selection.<key> hear of changes to the selection and
+to the selected objects.  `NSObjectController/selectionMarkers.m` fails 11
+of its 17 checks without the fix and passes with it on libs-gui 5c43a947f;
+`NSArrayController/selectionKVO.m`, which checked the old answers, now
+checks these.
+
 Added on 2026-10-17 for [#26](https://github.com/ashalkhakov/gnustep-patches/issues/26):
 `tableview-prototype-copy`.  -makeViewWithIdentifier:owner: (and the
 view a column falls back on) made each view from its prototype with
@@ -632,6 +648,7 @@ the two where a window comes in the same event fail.  On libs-gui 5c43a94.
 | `textfield-binding-placeholders` | libs-gui | test | not sent yet | (none: UDQuakeTools uses it from here) |
 | `quick-click-order` | libs-back | test | not sent yet | (none: UDCodeKit and UDQuakeTools use it from here) |
 | `binding-to-many-mutation` | libs-gui | test | not sent yet | (none: UDQuakeTools uses it from here) |
+| `controller-selection-markers` | libs-gui | test | not sent yet | (none: bound controls show AppKit's placeholders from here) |
 | `cgrectunion-size` | libs-opal | none | [#71](https://github.com/gnustep/libs-opal/pull/71) | GSXFormsKit |
 | `freetype-advance-without-size` | libs-opal | test | [#72](https://github.com/gnustep/libs-opal/pull/72) | (none: XFormsKit uses it from here) |
 | `cfstring-overrelease` | libs-corebase | none | [#166](https://github.com/gnustep/libs-corebase/pull/166) | gnustep-build |
