@@ -1,0 +1,411 @@
+From 56e5024dce1f79bb8c976a45833e67dc38483707 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Mon, 19 Oct 2026 16:34:41 +0000
+Subject: [PATCH] Arrange an array controller's objects as its content changes
+
+When automaticallyRearrangesObjects was NO, the default, -addObject:,
+-addObjects:, -removeObject: and -removeObjects: dropped the arranged
+objects and left -arrangedObjects to arrange them again when next asked.
+The next to ask is an observer of arrangedObjects, told of the change by
+the content's -didChangeValueForKey:, and -arrangedObjects then sent its
+own will- and didChange notifications from inside that one. Observers of
+arrangedObjects heard of each change twice, the old value they were given
+was the new one, and observers of arrangedObjects.<key> were left on
+objects the controller had removed, which raised when those objects were
+deallocated. Applications set automaticallyRearrangesObjects to get away
+from it.
+
+The selection did not follow the content either. -addObject: selected the
+inserted object by looking it up in the arranged objects it had just
+dropped, which selected the first row whatever was added; -setContent:
+kept selection indexes past the end of shorter content, so an observer of
+selection.<key> raised NSRangeException; and a selection was kept by
+index while the objects under it moved.
+
+The arranged objects are now brought up to date inside the content
+change, as macOS does, checked on macOS 15: what is added is appended to
+them (or they are arranged again when rearranging automatically), what
+is removed is taken out, and -setContent:, -setSortDescriptors: and
+-setFilterPredicate: arrange them again. The selection then follows the
+objects: what -addObject: and -addObjects: insert becomes the selection
+when selectsInsertedObjects is set; otherwise the objects that were
+selected stay selected where they are now, with preservesSelection; and
+when that leaves nothing selected after a removal or new content,
+avoidsEmptySelection selects the object now at the old index, or the
+last one. -arrangedObjects still arranges, silently, a controller that
+has never arranged anything.
+
+Tests/gui/NSArrayController/arrangeOnChange.m observes arrangedObjects
+and the selection through additions, removals, new content and sorting;
+eleven of its fourteen checks fail without the change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/NSArrayController.m                    | 139 ++++++++++------
+ Tests/gui/NSArrayController/arrangeOnChange.m | 149 ++++++++++++++++++
+ 2 files changed, 242 insertions(+), 46 deletions(-)
+ create mode 100644 Tests/gui/NSArrayController/arrangeOnChange.m
+
+diff --git a/Source/NSArrayController.m b/Source/NSArrayController.m
+index 682b4a387..ee18d6fcf 100644
+--- a/Source/NSArrayController.m
++++ b/Source/NSArrayController.m
+@@ -140,6 +140,15 @@
+ 
+ @end
+ 
++@interface NSArrayController (Private)
++- (NSIndexSet*) _indexSetForObjects: (NSArray*)objects;
++- (void) _setArrangedObjects: (NSArray*)arranged
++		   selecting: (NSArray*)objects
++	       avoidingEmpty: (BOOL)avoid;
++- (void) _arrangeAdding: (NSArray*)objects;
++- (void) _arrangeRemoving: (NSArray*)objects;
++@end
++
+ @implementation NSArrayController
+ 
+ + (void) initialize
+@@ -190,18 +199,7 @@
+ {
+   [self willChangeValueForKey: NSContentBinding];
+   [_content addObject: obj];
+-  if ([self automaticallyRearrangesObjects])
+-    {
+-      [self rearrangeObjects];
+-    }
+-  else
+-    {
+-      DESTROY(_arranged_objects);
+-    }
+-  if ([self selectsInsertedObjects])
+-    {
+-      [self addSelectedObjects: [NSArray arrayWithObject: obj]];
+-    }
++  [self _arrangeAdding: [NSArray arrayWithObject: obj]];
+   [self didChangeValueForKey: NSContentBinding];
+ }
+ 
+@@ -209,18 +207,7 @@
+ {
+   [self willChangeValueForKey: NSContentBinding];
+   [_content addObjectsFromArray: obj];
+-  if ([self automaticallyRearrangesObjects])
+-    {
+-      [self rearrangeObjects];
+-    }
+-  else
+-    {
+-      DESTROY(_arranged_objects);
+-    }
+-  if ([self selectsInsertedObjects])
+-    {
+-      [self addSelectedObjects: obj];
+-    }
++  [self _arrangeAdding: obj];
+   [self didChangeValueForKey: NSContentBinding];
+ }
+ 
+@@ -228,15 +215,7 @@
+ {
+   [self willChangeValueForKey: NSContentBinding];
+   [_content removeObject: obj];
+-  [self removeSelectedObjects: [NSArray arrayWithObject: obj]];
+-  if ([self automaticallyRearrangesObjects])
+-    {
+-      [self rearrangeObjects];
+-    }
+-  else
+-    {
+-      DESTROY(_arranged_objects);
+-    }
++  [self _arrangeRemoving: [NSArray arrayWithObject: obj]];
+   [self didChangeValueForKey: NSContentBinding];
+ }
+ 
+@@ -244,15 +223,7 @@
+ {
+   [self willChangeValueForKey: NSContentBinding];
+   [_content removeObjectsInArray: obj];
+-  [self removeSelectedObjects: obj];
+-  if ([self automaticallyRearrangesObjects])
+-    {
+-      [self rearrangeObjects];
+-    }
+-  else
+-    {
+-      DESTROY(_arranged_objects);
+-    }
++  [self _arrangeRemoving: obj];
+   [self didChangeValueForKey: NSContentBinding];
+ }
+ 
+@@ -528,23 +499,98 @@
+ {
+   if (_arranged_objects == nil)
+     {
+-      [self rearrangeObjects];
++      _arranged_objects = [[GSObservableArray alloc]
++			    initWithArray: [self arrangeObjects: _content]];
+     }
+   return _arranged_objects;
+ }
+ 
+ - (void) rearrangeObjects
+ {
++  [self _setArrangedObjects: [self arrangeObjects: _content]
++		  selecting: nil
++	      avoidingEmpty: [self preservesSelection]];
++}
++
++- (void) _setArrangedObjects: (NSArray*)arranged
++		   selecting: (NSArray*)objects
++	       avoidingEmpty: (BOOL)avoid
++{
++  NSUInteger first = [_selection_indexes firstIndex];
++  NSIndexSet *indexes;
++
++  if (_selection_indexes == nil)
++    {
++      ASSIGN(_arranged_objects, AUTORELEASE([[GSObservableArray alloc]
++	initWithArray: arranged]));
++      return;
++    }
++  if (objects == nil && [self preservesSelection])
++    {
++      NSMutableIndexSet *valid = AUTORELEASE([_selection_indexes mutableCopy]);
++      NSUInteger count = [_arranged_objects count];
++
++      [valid removeIndexesInRange: NSMakeRange(count, NSNotFound - count)];
++      objects = [_arranged_objects objectsAtIndexes: valid];
++    }
++
+   [self willChangeValueForKey: @"arrangedObjects"];
+-  DESTROY(_arranged_objects);
+-  _arranged_objects = [[GSObservableArray alloc]
+-			  initWithArray: [self arrangeObjects: _content]];
++  ASSIGN(_arranged_objects, AUTORELEASE([[GSObservableArray alloc]
++    initWithArray: arranged]));
+   [self didChangeValueForKey: @"arrangedObjects"];
++
++  indexes = [self _indexSetForObjects: objects];
++  if ([indexes count] == 0 && avoid && [self avoidsEmptySelection]
++    && [arranged count] > 0)
++    {
++      if (first == NSNotFound)
++	{
++	  first = 0;
++	}
++      indexes = [NSIndexSet indexSetWithIndex:
++	MIN(first, [arranged count] - 1)];
++    }
++  [self setSelectionIndexes: indexes];
++}
++
++- (void) _arrangeAdding: (NSArray*)objects
++{
++  NSMutableArray *arranged;
++
++  if ([self automaticallyRearrangesObjects] || _arranged_objects == nil)
++    {
++      arranged = (NSMutableArray*)[self arrangeObjects: _content];
++    }
++  else
++    {
++      arranged = [NSMutableArray arrayWithArray: _arranged_objects];
++      [arranged addObjectsFromArray: objects];
++    }
++  [self _setArrangedObjects: arranged
++		  selecting: [self selectsInsertedObjects] ? objects : nil
++	      avoidingEmpty: NO];
++}
++
++- (void) _arrangeRemoving: (NSArray*)objects
++{
++  NSMutableArray *arranged;
++
++  if ([self automaticallyRearrangesObjects] || _arranged_objects == nil)
++    {
++      arranged = (NSMutableArray*)[self arrangeObjects: _content];
++    }
++  else
++    {
++      arranged = [NSMutableArray arrayWithArray: _arranged_objects];
++      [arranged removeObjectsInArray: objects];
++    }
++  [self _setArrangedObjects: arranged selecting: nil avoidingEmpty: YES];
+ }
+ 
+ - (void) setSortDescriptors: (NSArray*)desc
+ {
+   ASSIGNCOPY(_sort_descriptors, desc);
++  [self rearrangeObjects];
+ }
+ 
+ - (NSArray*) sortDescriptors
+@@ -555,6 +601,7 @@
+ - (void) setFilterPredicate: (NSPredicate*)filterPredicate
+ {
+   ASSIGN(_filter_predicate, filterPredicate);
++  [self rearrangeObjects];
+ }
+ 
+ - (NSPredicate*) filterPredicate
+diff --git a/Tests/gui/NSArrayController/arrangeOnChange.m b/Tests/gui/NSArrayController/arrangeOnChange.m
+new file mode 100644
+index 000000000..7f5dd7100
+--- /dev/null
++++ b/Tests/gui/NSArrayController/arrangeOnChange.m
+@@ -0,0 +1,149 @@
++/* An array controller's arranged objects and selection follow its content
++   as it changes, inside the content change, so that observers of
++   arrangedObjects and of the selection see each change once, with the
++   values from before and after it, and never a selection past the end.
++   What the selection becomes is what macOS gives. */
++#include "Testing.h"
++
++#include <Foundation/NSArray.h>
++#include <Foundation/NSAutoreleasePool.h>
++#include <Foundation/NSDictionary.h>
++#include <Foundation/NSException.h>
++#include <Foundation/NSIndexSet.h>
++#include <Foundation/NSKeyValueObserving.h>
++#include <Foundation/NSSortDescriptor.h>
++#include <Foundation/NSString.h>
++
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSArrayController.h>
++
++@interface ArrangedRecorder : NSObject
++{
++@public
++  int		count;
++  NSArray	*old;
++}
++@end
++
++@implementation ArrangedRecorder
++- (void) observeValueForKeyPath: (NSString *)keyPath
++                       ofObject: (id)object
++                         change: (NSDictionary *)change
++                        context: (void *)context
++{
++  count++;
++  ASSIGN(old, [change objectForKey: NSKeyValueChangeOldKey]);
++  /* As a binding does. */
++  [object valueForKeyPath: keyPath];
++}
++@end
++
++static NSMutableDictionary *
++named(NSString *name)
++{
++  return [NSMutableDictionary dictionaryWithObject: name forKey: @"name"];
++}
++
++static NSString *
++names(NSArrayController *ac)
++{
++  return [[[ac arrangedObjects] valueForKey: @"name"]
++    componentsJoinedByString: @""];
++}
++
++int
++main(int argc, const char **argv)
++{
++  NSKeyValueObservingOptions	options = NSKeyValueObservingOptionOld;
++  ArrangedRecorder	*arranged;
++  ArrangedRecorder	*selection;
++  NSArrayController	*ac;
++  NSAutoreleasePool	*pool;
++  NSMutableDictionary	*a;
++  NSMutableDictionary	*b;
++  BOOL			raised;
++
++  START_SET("NSArrayController arranging as content changes")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  arranged = AUTORELEASE([[ArrangedRecorder alloc] init]);
++  ac = AUTORELEASE([[NSArrayController alloc] init]);
++  [ac setSelectsInsertedObjects: NO];
++  [ac addObserver: arranged forKeyPath: @"arrangedObjects"
++          options: options context: NULL];
++  pool = [NSAutoreleasePool new];
++  [ac addObject: named(@"a")];
++  [ac addObject: named(@"b")];
++  [ac removeObject: [[ac arrangedObjects] objectAtIndex: 0]];
++  PASS(arranged->count == 3,
++    "observers of arrangedObjects hear of each change once")
++  PASS_EQUAL([arranged->old valueForKey: @"name"],
++    ([NSArray arrayWithObjects: @"a", @"b", nil]),
++    "the old arrangedObjects is the one before the change")
++  PASS_EQUAL(names(ac), @"b", "the removed object is not arranged")
++  [ac removeObserver: arranged forKeyPath: @"arrangedObjects"];
++  DESTROY(arranged->old);
++  [pool release];
++
++  selection = AUTORELEASE([[ArrangedRecorder alloc] init]);
++  ac = AUTORELEASE([[NSArrayController alloc] init]);
++  [ac setContent: [NSMutableArray arrayWithObjects:
++    named(@"d"), named(@"b"), named(@"c"), nil]];
++  PASS_EQUAL([ac selectionIndexes], [NSIndexSet indexSetWithIndex: 0],
++    "new content is given a selection")
++  [ac setSortDescriptors: [NSArray arrayWithObject:
++    AUTORELEASE([[NSSortDescriptor alloc] initWithKey: @"name"
++					    ascending: YES])]];
++  PASS_EQUAL(names(ac), @"bcd", "-setSortDescriptors: arranges the objects")
++  PASS_EQUAL([[ac selection] valueForKey: @"name"], @"d",
++    "the selected object stays selected when it moves")
++  a = named(@"a");
++  [ac addObject: a];
++  PASS_EQUAL(names(ac), @"bcda", "-addObject: appends what it adds")
++  PASS_EQUAL([ac selectedObjects], [NSArray arrayWithObject: a],
++    "-addObject: selects only what it adds")
++  [ac setSelectionIndexes: [NSIndexSet indexSetWithIndex: 1]];
++  [ac removeObject: [[ac selectedObjects] objectAtIndex: 0]];
++  PASS_EQUAL([[ac selection] valueForKey: @"name"], @"d",
++    "removing the selected object selects the one after it")
++  [ac setSelectionIndexes: [NSIndexSet indexSetWithIndex: 2]];
++  [ac removeObject: [[ac selectedObjects] objectAtIndex: 0]];
++  PASS_EQUAL([[ac selection] valueForKey: @"name"], @"d",
++    "removing the last selected object selects the one before it")
++  [ac setAutomaticallyRearrangesObjects: YES];
++  [ac addObject: named(@"c")];
++  PASS_EQUAL(names(ac), @"bcd",
++    "-addObject: arranges what it adds when rearranging automatically")
++
++  b = named(@"x");
++  [ac setContent: [NSMutableArray arrayWithObjects:
++    named(@"b"), named(@"c"), b, nil]];
++  [ac setSelectionIndexes: [NSIndexSet indexSetWithIndex: 2]];
++  [ac addObserver: selection forKeyPath: @"selection.name"
++          options: options context: NULL];
++  raised = NO;
++  NS_DURING
++    [ac setContent: [NSMutableArray arrayWithObject: named(@"y")]];
++  NS_HANDLER
++    raised = YES;
++  NS_ENDHANDLER
++  PASS(raised == NO, "observers of the selection see shorter content")
++  PASS_EQUAL([ac selectionIndexes], [NSIndexSet indexSetWithIndex: 0],
++    "the selection stays within shorter content")
++  [ac setContent: [NSMutableArray arrayWithObjects: named(@"a"), b, nil]];
++  [ac setSelectedObjects: [NSArray arrayWithObject: b]];
++  [ac setContent: [NSMutableArray arrayWithObjects: b, named(@"z"), nil]];
++  PASS_EQUAL([ac selectedObjects], [NSArray arrayWithObject: b],
++    "the selected object stays selected in new content that has it")
++  [ac removeObserver: selection forKeyPath: @"selection.name"];
++
++  END_SET("NSArrayController arranging as content changes")
++
++  return 0;
++}
+-- 
+2.43.0
+
