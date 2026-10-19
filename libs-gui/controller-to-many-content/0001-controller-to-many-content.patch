@@ -1,0 +1,544 @@
+From 1dbda9943827ea55a8cd290f6372ea5e9b856699 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Mon, 19 Oct 2026 20:53:35 +0000
+Subject: [PATCH] NSArrayController: change bound content through the bound
+ to-many
+
+An array controller whose contentArray or contentSet is bound added and
+removed objects in its own content array only. With content bound to a
+Core Data to-many through another controller's selection (Logbook's
+records, bound to the vehicles' selection.records), an object added with
+-addObject: was never given its relationship's inverse, so the record had
+no vehicle and failed to save; and the binding, hearing of the change,
+reset the content, so the object was arranged twice.
+
+On macOS 15 (checked with Core Data and with plain objects):
+
+- -addObject:, -addObjects:, -insertObject:atArrangedObjectIndex:,
+  -insertObjects:atArrangedObjectIndexes:, -removeObject: and
+  -removeObjects: with content bound take a mutable copy of the bound
+  value, change it, and set it back on the bound object with
+  -setValue:forKeyPath: (so Core Data keeps the inverse; through a
+  controller's selection with nothing selected this raises). The content
+  is then the bound value again, and the arranged objects change as for
+  unbound content: an object already in the to-many (its inverse set
+  first) is arranged a second time, and removing it takes every one.
+- -addObject: is insertion at the end of the arranged objects. An
+  insertion goes into the arranged objects at its index (an index past
+  them raises NSRangeException) and, when they are neither sorted nor
+  filtered, into the content before the object it went before there;
+  otherwise at the end of the content.
+- With clearsFilterPredicateOnInsertion (the default) an insertion clears
+  the filter and everything is arranged again; without it, an object the
+  filter refuses raises NSInternalInconsistencyException and nothing is
+  inserted.
+
+insertObject:atArrangedObjectIndex: and insertObjects:atArrangedObjectIndexes:
+were -addObject: and -addObjects:, and clearsFilterPredicateOnInsertion was
+kept but never used.
+
+Tests/gui/NSArrayController/boundContentMutation.m checks each of these;
+it passes on macOS 15 and 16 of its 23 checks fail without the change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/NSArrayController.m                    | 185 +++++++++++++-
+ .../NSArrayController/boundContentMutation.m  | 239 ++++++++++++++++++
+ 2 files changed, 410 insertions(+), 14 deletions(-)
+ create mode 100644 Tests/gui/NSArrayController/boundContentMutation.m
+
+diff --git a/Source/NSArrayController.m b/Source/NSArrayController.m
+index 732221051..282e58064 100644
+--- a/Source/NSArrayController.m
++++ b/Source/NSArrayController.m
+@@ -31,8 +31,11 @@
+ #import <Foundation/NSArray.h>
+ #import <Foundation/NSDictionary.h>
+ #import <Foundation/NSIndexSet.h>
++#import <Foundation/NSKeyValueCoding.h>
+ #import <Foundation/NSKeyValueObserving.h>
++#import <Foundation/NSException.h>
+ #import <Foundation/NSPredicate.h>
++#import <Foundation/NSSet.h>
+ #import <Foundation/NSSortDescriptor.h>
+ #import <Foundation/NSString.h>
+ 
+@@ -155,6 +158,8 @@
+ - (void) _setArrangedObjects: (NSArray*)arranged
+ 		   selecting: (NSArray*)objects
+ 	       avoidingEmpty: (BOOL)avoid;
++- (id) _boundContent: (id)changed done: (BOOL)done;
++- (BOOL) _removeFromBoundContent: (NSArray*)removed;
+ - (void) _arrangeAdding: (NSArray*)objects;
+ - (void) _arrangeRemoving: (NSArray*)objects;
+ @end
+@@ -218,24 +223,24 @@
+ 
+ - (void) addObject: (id)obj
+ {
+-  [self willChangeValueForKey: NSContentBinding];
+-  [_content addObject: obj];
+-  [self _arrangeAdding: [NSArray arrayWithObject: obj]];
+-  [self didChangeValueForKey: NSContentBinding];
++  [self insertObject: obj
++    atArrangedObjectIndex: [_arranged_objects count]];
+ }
+ 
+ - (void) addObjects: (NSArray*)obj
+ {
+-  [self willChangeValueForKey: NSContentBinding];
+-  [_content addObjectsFromArray: obj];
+-  [self _arrangeAdding: obj];
+-  [self didChangeValueForKey: NSContentBinding];
++  [self insertObjects: obj atArrangedObjectIndexes:
++    [NSIndexSet indexSetWithIndexesInRange:
++      NSMakeRange([_arranged_objects count], [obj count])]];
+ }
+ 
+ - (void) removeObject: (id)obj
+ {
+   [self willChangeValueForKey: NSContentBinding];
+-  [_content removeObject: obj];
++  if (![self _removeFromBoundContent: [NSArray arrayWithObject: obj]])
++    {
++      [_content removeObject: obj];
++    }
+   [self _arrangeRemoving: [NSArray arrayWithObject: obj]];
+   [self didChangeValueForKey: NSContentBinding];
+   [self _deleteObjects: [NSArray arrayWithObject: obj]];
+@@ -244,7 +249,10 @@
+ - (void) removeObjects: (NSArray*)obj
+ {
+   [self willChangeValueForKey: NSContentBinding];
+-  [_content removeObjectsInArray: obj];
++  if (![self _removeFromBoundContent: obj])
++    {
++      [_content removeObjectsInArray: obj];
++    }
+   [self _arrangeRemoving: obj];
+   [self didChangeValueForKey: NSContentBinding];
+   [self _deleteObjects: obj];
+@@ -626,6 +634,80 @@
+   [self setSelectionIndexes: indexes];
+ }
+ 
++/* With content bound, a mutable copy of the bound to-many, nil otherwise.
++ * Changed and given back with done YES, it is set on the bound object, as
++ * AppKit does, so the model hears of it (Core Data keeps an inverse), and
++ * the content is read back.
++ */
++- (id) _boundContent: (id)changed done: (BOOL)done
++{
++  GSKeyValueBinding *binding;
++  NSString *keyPath;
++  id observed;
++  id value;
++
++  binding = [GSKeyValueBinding getBinding: NSContentArrayBinding forObject: self];
++  if (binding == nil)
++    {
++      binding = [GSKeyValueBinding getBinding: NSContentSetBinding
++				    forObject: self];
++    }
++  if (binding == nil)
++    {
++      return nil;
++    }
++  observed = [binding observedObject];
++  keyPath = [binding->info objectForKey: NSObservedKeyPathKey];
++  if (done)
++    {
++      binding->inReverseSet = YES;
++      NS_DURING
++	{
++	  [observed setValue: changed forKeyPath: keyPath];
++	}
++      NS_HANDLER
++	{
++	  binding->inReverseSet = NO;
++	  [localException raise];
++	}
++      NS_ENDHANDLER
++      binding->inReverseSet = NO;
++      ASSIGN(_content, [binding destinationValue]);
++      return nil;
++    }
++  value = [observed valueForKeyPath: keyPath];
++  if (value != nil)
++    {
++      return AUTORELEASE([value mutableCopy]);
++    }
++  if ([GSKeyValueBinding getBinding: NSContentArrayBinding forObject: self]
++    == binding)
++    {
++      return [NSMutableArray array];
++    }
++  return [NSMutableSet set];
++}
++
++- (BOOL) _removeFromBoundContent: (NSArray*)removed
++{
++  id from = [self _boundContent: nil done: NO];
++
++  if (from == nil)
++    {
++      return NO;
++    }
++  if ([from isKindOfClass: [NSArray class]])
++    {
++      [from removeObjectsInArray: removed];
++    }
++  else
++    {
++      [from minusSet: [NSSet setWithArray: removed]];
++    }
++  [self _boundContent: from done: YES];
++  return YES;
++}
++
+ - (void) _arrangeAdding: (NSArray*)objects
+ {
+   NSMutableArray *arranged;
+@@ -685,15 +767,90 @@
+ - (void) insertObject: (id)obj
+ atArrangedObjectIndex: (NSUInteger)idx
+ {
+-  // FIXME
+-  [self addObject: obj];
++  [self insertObjects: [NSArray arrayWithObject: obj]
++    atArrangedObjectIndexes: [NSIndexSet indexSetWithIndex: idx]];
+ }
+ 
+ - (void) insertObjects: (NSArray*)obj
+ atArrangedObjectIndexes: (NSIndexSet*)idx
+ {
+-  // FIXME
+-  [self addObjects: obj];
++  NSMutableArray *arranged;
++  id content;
++  id bound;
++  NSUInteger count = [obj count];
++  NSUInteger index = [idx firstIndex];
++  NSUInteger i;
++  BOOL clear;
++  BOOL filtered;
++
++  if ([idx count] != count || (count > 0
++    && [idx lastIndex] >= [_arranged_objects count] + count))
++    {
++      [NSException raise: NSRangeException
++		  format: @"Index %lu out of bounds of [0...%lu]",
++	(unsigned long)[idx lastIndex],
++	(unsigned long)[_arranged_objects count]];
++    }
++  clear = [self clearsFilterPredicateOnInsertion] && _filter_predicate != nil;
++  filtered = _filter_predicate != nil && !clear;
++  for (i = 0; filtered && i < count; i++)
++    {
++      if (![_filter_predicate evaluateWithObject: [obj objectAtIndex: i]])
++	{
++	  [NSException raise: NSInternalInconsistencyException
++		      format: @"Error inserting object at arranged object index %lu",
++	    (unsigned long)index];
++	}
++    }
++  [self willChangeValueForKey: NSContentBinding];
++  arranged = [NSMutableArray arrayWithArray: _arranged_objects];
++  bound = [self _boundContent: nil done: NO];
++  content = bound != nil ? bound : _content;
++  for (i = 0; i < count; i++, index = [idx indexGreaterThanIndex: index])
++    {
++      id o = [obj objectAtIndex: i];
++
++      /* Unsorted and unfiltered, the content takes it where the arranged
++	 object it goes before is; otherwise at the end. */
++      if ([content isKindOfClass: [NSArray class]])
++	{
++	  NSUInteger at = [content count];
++
++	  if ([_sort_descriptors count] == 0 && !filtered
++	    && index < [arranged count])
++	    {
++	      at = [content indexOfObjectIdenticalTo:
++		[arranged objectAtIndex: index]];
++	      if (at == NSNotFound)
++		{
++		  at = [content count];
++		}
++	    }
++	  [content insertObject: o atIndex: at];
++	}
++      else
++	{
++	  [content addObject: o];
++	}
++      [arranged insertObject: o atIndex: index];
++    }
++  if (bound != nil)
++    {
++      [self _boundContent: bound done: YES];
++    }
++  if (clear)
++    {
++      [self setFilterPredicate: nil];
++    }
++  if (clear || [self automaticallyRearrangesObjects]
++    || _arranged_objects == nil)
++    {
++      arranged = (NSMutableArray*)[self arrangeObjects: _content];
++    }
++  [self _setArrangedObjects: arranged
++		  selecting: [self selectsInsertedObjects] ? obj : nil
++	      avoidingEmpty: NO];
++  [self didChangeValueForKey: NSContentBinding];
+ }
+ 
+ - (void) removeObjectAtArrangedObjectIndex: (NSUInteger)idx
+diff --git a/Tests/gui/NSArrayController/boundContentMutation.m b/Tests/gui/NSArrayController/boundContentMutation.m
+new file mode 100644
+index 000000000..f546281bc
+--- /dev/null
++++ b/Tests/gui/NSArrayController/boundContentMutation.m
+@@ -0,0 +1,239 @@
++/* An array controller whose content is bound adds and removes through the
++   bound to-many, as AppKit does: it sets a changed copy, so the model
++   hears of it (here, the inverse of a relationship, kept by its setter); its arranged objects
++   change as for unbound content, and an object already in the to-many is
++   arranged again.  insertObject:atArrangedObjectIndex: puts the object in
++   the content where the arranged object it goes before is, unless the
++   content is sorted or filtered; a filter is cleared on insertion when
++   clearsFilterPredicateOnInsertion says so, and otherwise refuses an
++   object it does not take. */
++#include "Testing.h"
++
++#include <Foundation/NSArray.h>
++#include <Foundation/NSAutoreleasePool.h>
++#include <Foundation/NSDictionary.h>
++#include <Foundation/NSException.h>
++#include <Foundation/NSIndexSet.h>
++#include <Foundation/NSPredicate.h>
++#include <Foundation/NSSet.h>
++#include <Foundation/NSSortDescriptor.h>
++#include <Foundation/NSString.h>
++
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSArrayController.h>
++#include <AppKit/NSKeyValueBinding.h>
++
++@class Vehicle;
++
++@interface Record : NSObject
++{
++@public
++  NSString	*name;
++  Vehicle	*vehicle;
++}
++@end
++
++@implementation Record
++- (NSString *) name
++{
++  return name;
++}
++- (Vehicle *) vehicle
++{
++  return vehicle;
++}
++@end
++
++@interface Vehicle : NSObject
++{
++  NSMutableSet	*records;
++}
++@end
++
++@implementation Vehicle
++- (id) init
++{
++  if ((self = [super init]) != nil)
++    {
++      records = [NSMutableSet new];
++    }
++  return self;
++}
++- (NSSet *) records
++{
++  return records;
++}
++/* Keeps the inverse, as Core Data does. */
++- (void) setRecords: (NSSet *)s
++{
++  NSEnumerator	*e = [records objectEnumerator];
++  Record	*r;
++
++  while ((r = [e nextObject]) != nil)
++    {
++      r->vehicle = nil;
++    }
++  [records setSet: s];
++  e = [records objectEnumerator];
++  while ((r = [e nextObject]) != nil)
++    {
++      r->vehicle = self;
++    }
++}
++@end
++
++static Record *
++record(NSString *name)
++{
++  Record *r = AUTORELEASE([[Record alloc] init]);
++
++  r->name = name;
++  return r;
++}
++
++static NSString *
++names(NSArray *objects)
++{
++  return [[objects valueForKey: @"name"] componentsJoinedByString: @","];
++}
++
++static NSString *
++joined(id objects)
++{
++  return [objects componentsJoinedByString: @","];
++}
++
++int
++main(int argc, const char **argv)
++{
++  NSArrayController	*vehicles;
++  NSArrayController	*records;
++  NSArrayController	*list;
++  NSMutableDictionary	*owner;
++  Vehicle		*car;
++  Record		*a;
++  Record		*b;
++  Record		*d;
++  Record		*e;
++  BOOL			raised;
++
++  START_SET("NSArrayController bound content mutation")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  car = AUTORELEASE([[Vehicle alloc] init]);
++  a = record(@"a");
++  [[car mutableSetValueForKey: @"records"] addObject: a];
++  vehicles = AUTORELEASE([[NSArrayController alloc] init]);
++  [vehicles setContent: [NSMutableArray arrayWithObject: car]];
++  [vehicles setSelectionIndex: 0];
++  records = AUTORELEASE([[NSArrayController alloc] init]);
++  [records setSortDescriptors: [NSArray arrayWithObject: AUTORELEASE(
++    [[NSSortDescriptor alloc] initWithKey: @"name" ascending: YES])]];
++  [records bind: NSContentSetBinding toObject: vehicles
++    withKeyPath: @"selection.records" options: nil];
++
++  b = record(@"b");
++  [records addObject: b];
++  PASS(b->vehicle == car && [[car records] containsObject: b],
++    "an object added is added to the bound to-many")
++  PASS_EQUAL(names([records arrangedObjects]), @"a,b", "and arranged once")
++  PASS_EQUAL(names([records selectedObjects]), @"b", "and selected")
++
++  d = record(@"d");
++  [[car mutableSetValueForKey: @"records"] addObject: d];
++  PASS_EQUAL(names([records arrangedObjects]), @"a,b,d",
++    "an object the to-many gains is arranged, sorted")
++  [records addObject: d];
++  PASS([[car records] count] == 3, "adding it again leaves the to-many")
++  PASS_EQUAL(names([records arrangedObjects]), @"a,b,d,d",
++    "and arranges it again, as AppKit does")
++
++  e = record(@"e");
++  [records insertObject: e atArrangedObjectIndex: 0];
++  PASS(e->vehicle == car, "an object inserted is added to the to-many")
++  PASS_EQUAL(names([records arrangedObjects]), @"e,a,b,d,d",
++    "at the arranged index, sorted or not")
++
++  [records removeObject: b];
++  PASS(b->vehicle == nil && ![[car records] containsObject: b],
++    "an object removed is removed from the to-many")
++  PASS_EQUAL(names([records arrangedObjects]), @"e,a,d,d",
++    "and from the arranged objects")
++  [records removeObject: d];
++  PASS_EQUAL(names([records arrangedObjects]), @"e,a",
++    "every time it is arranged")
++
++  [vehicles setSelectionIndexes: [NSIndexSet indexSet]];
++  raised = NO;
++  NS_DURING
++    [records addObject: record(@"f")];
++  NS_HANDLER
++    raised = YES;
++  NS_ENDHANDLER
++  PASS(raised, "with nothing selected there is no to-many to add to")
++
++  owner = [NSMutableDictionary dictionaryWithObject:
++    [NSMutableArray arrayWithObjects: @"c", @"a", @"b", nil] forKey: @"list"];
++  list = AUTORELEASE([[NSArrayController alloc] init]);
++  [list bind: NSContentArrayBinding toObject: owner
++  withKeyPath: @"list" options: nil];
++  [list insertObject: @"x" atArrangedObjectIndex: 1];
++  PASS_EQUAL(joined([owner objectForKey: @"list"]), @"c,x,a,b",
++    "a bound array takes an insertion at its place")
++  [list setSortDescriptors: [NSArray arrayWithObject: AUTORELEASE(
++    [[NSSortDescriptor alloc] initWithKey: @"self" ascending: YES])]];
++  [list insertObject: @"y" atArrangedObjectIndex: 1];
++  PASS_EQUAL(joined([owner objectForKey: @"list"]), @"c,x,a,b,y",
++    "sorted, at the end")
++  PASS_EQUAL(joined([list arrangedObjects]), @"a,y,b,c,x",
++    "arranged where it was inserted")
++  [list removeObject: @"x"];
++  PASS_EQUAL(joined([owner objectForKey: @"list"]), @"c,a,b,y",
++    "a bound array loses an object removed")
++  raised = NO;
++  NS_DURING
++    [list insertObject: @"z" atArrangedObjectIndex: 6];
++  NS_HANDLER
++    raised = [[localException name] isEqualToString: NSRangeException];
++  NS_ENDHANDLER
++  PASS(raised, "an index past the arranged objects raises")
++
++  list = AUTORELEASE([[NSArrayController alloc] init]);
++  [list setContent: [NSMutableArray arrayWithObjects: @"c", @"a", @"b", nil]];
++  [list setFilterPredicate:
++    [NSPredicate predicateWithFormat: @"SELF != %@", @"c"]];
++  [list insertObject: @"w" atArrangedObjectIndex: 0];
++  PASS([list filterPredicate] == nil, "an insertion clears the filter")
++  PASS_EQUAL(joined([list content]), @"c,w,a,b",
++    "the content took it before the arranged object it went before")
++  PASS_EQUAL(joined([list arrangedObjects]), @"c,w,a,b",
++    "everything is arranged")
++
++  list = AUTORELEASE([[NSArrayController alloc] init]);
++  [list setContent: [NSMutableArray arrayWithObjects: @"c", @"a", @"b", nil]];
++  [list setFilterPredicate:
++    [NSPredicate predicateWithFormat: @"SELF != %@", @"c"]];
++  [list setClearsFilterPredicateOnInsertion: NO];
++  [list insertObject: @"x" atArrangedObjectIndex: 0];
++  PASS_EQUAL(joined([list content]), @"c,a,b,x",
++    "filtered, the content takes it at the end")
++  PASS_EQUAL(joined([list arrangedObjects]), @"x,a,b",
++    "arranged where it was inserted")
++  raised = NO;
++  NS_DURING
++    [list addObject: @"c"];
++  NS_HANDLER
++    raised = [[localException name]
++      isEqualToString: NSInternalInconsistencyException];
++  NS_ENDHANDLER
++  PASS(raised, "an object the filter refuses is not inserted")
++
++  END_SET("NSArrayController bound content mutation")
++  return 0;
++}
+-- 
+2.43.0
+
