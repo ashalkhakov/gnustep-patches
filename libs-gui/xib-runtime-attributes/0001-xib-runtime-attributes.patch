@@ -1,0 +1,155 @@
+From df89d1f5547906fd712ccfeb6a391accee2794da Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Mon, 19 Oct 2026 16:36:24 +0000
+Subject: [PATCH] Apply the user-defined runtime attributes of a xib's objects
+
+A xib's <userDefinedRuntimeAttributes> are read into flattened properties
+under "<id>.IBAttributePlaceholdersKey", the key the nib-loading code looks
+them up by when it awakens each object and sets each attribute's value
+for its key path.
+
+db57ab788 changed how the key is built, from the format
+@"%@.IBAttributePlaceholdersKey" to a postfix given to -getRefIDFor:postFix:,
+which puts in the dot itself, and the postfix kept the format's percent
+sign: "<id>.%IBAttributePlaceholdersKey". Nothing has been found under the
+key looked up since, so no runtime attribute of any object in a xib, a
+view's or a controller's, has been applied.
+
+Tests/gui/GSXib5KeyedUnarchiver/runtimeAttributes.m loads
+RuntimeAttributes.xib, whose array controller has a boolean and a string
+attribute and whose window holds a view with a string attribute; all three
+checks of the attributes fail without the change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/GSXib5KeyedUnarchiver.m                |  2 +-
+ .../RuntimeAttributes.xib                     | 33 ++++++++++
+ .../GSXib5KeyedUnarchiver/runtimeAttributes.m | 63 +++++++++++++++++++
+ 3 files changed, 97 insertions(+), 1 deletion(-)
+ create mode 100644 Tests/gui/GSXib5KeyedUnarchiver/RuntimeAttributes.xib
+ create mode 100644 Tests/gui/GSXib5KeyedUnarchiver/runtimeAttributes.m
+
+diff --git a/Source/GSXib5KeyedUnarchiver.m b/Source/GSXib5KeyedUnarchiver.m
+index 58582b7f2..eda3ddaa1 100644
+--- a/Source/GSXib5KeyedUnarchiver.m
++++ b/Source/GSXib5KeyedUnarchiver.m
+@@ -3295,7 +3295,7 @@ didStartElement: (NSString*)elementName
+     {
+       // Create the flattened property data for the runtime attributes in the OLD XIB format...
+       id runtimeAttributes = [element elementForKey: @"userDefinedRuntimeAttributes"];
+-      NSString *refID      = [self getRefIDFor: element postFix: @"%IBAttributePlaceholdersKey"];
++      NSString *refID      = [self getRefIDFor: element postFix: @"IBAttributePlaceholdersKey"];
+ 
+       [self addRuntimeAttributesForElement: runtimeAttributes forID: refID];
+     }
+diff --git a/Tests/gui/GSXib5KeyedUnarchiver/RuntimeAttributes.xib b/Tests/gui/GSXib5KeyedUnarchiver/RuntimeAttributes.xib
+new file mode 100644
+index 000000000..ecb8df8a8
+--- /dev/null
++++ b/Tests/gui/GSXib5KeyedUnarchiver/RuntimeAttributes.xib
+@@ -0,0 +1,33 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<document type="com.apple.InterfaceBuilder3.Cocoa.XIB" version="3.0" toolsVersion="22505" targetRuntime="MacOSX.Cocoa" propertyAccessControl="none" useAutolayout="NO">
++    <dependencies>
++        <plugIn identifier="com.apple.InterfaceBuilder.CocoaPlugin" version="22505"/>
++    </dependencies>
++    <objects>
++        <customObject id="-2" userLabel="File's Owner" customClass="NSObject"/>
++        <customObject id="-1" userLabel="First Responder" customClass="FirstResponder"/>
++        <customObject id="-3" userLabel="Application" customClass="NSObject"/>
++        <arrayController id="controller">
++            <userDefinedRuntimeAttributes>
++                <userDefinedRuntimeAttribute type="boolean" keyPath="automaticallyRearrangesObjects" value="YES"/>
++                <userDefinedRuntimeAttribute type="string" keyPath="entityName" value="Vehicle"/>
++            </userDefinedRuntimeAttributes>
++        </arrayController>
++        <window title="Window" allowsToolTipsWhenApplicationIsInactive="NO" autorecalculatesKeyViewLoop="NO" releasedWhenClosed="NO" visibleAtLaunch="NO" animationBehavior="default" id="window">
++            <windowStyleMask key="styleMask" titled="YES"/>
++            <rect key="contentRect" x="0.0" y="0.0" width="100" height="100"/>
++            <rect key="screenRect" x="0.0" y="0.0" width="1024" height="768"/>
++            <view key="contentView" id="content">
++                <rect key="frame" x="0.0" y="0.0" width="100" height="100"/>
++                <subviews>
++                    <customView id="view">
++                        <rect key="frame" x="0.0" y="0.0" width="10" height="10"/>
++                        <userDefinedRuntimeAttributes>
++                            <userDefinedRuntimeAttribute type="string" keyPath="toolTip" value="From the attribute"/>
++                        </userDefinedRuntimeAttributes>
++                    </customView>
++                </subviews>
++            </view>
++        </window>
++    </objects>
++</document>
+diff --git a/Tests/gui/GSXib5KeyedUnarchiver/runtimeAttributes.m b/Tests/gui/GSXib5KeyedUnarchiver/runtimeAttributes.m
+new file mode 100644
+index 000000000..5731a0e30
+--- /dev/null
++++ b/Tests/gui/GSXib5KeyedUnarchiver/runtimeAttributes.m
+@@ -0,0 +1,63 @@
++/* The user-defined runtime attributes of a xib's objects, top-level or
++   not, are set on them when the xib is loaded. */
++#import "ObjectTesting.h"
++
++#import <Foundation/NSArray.h>
++#import <Foundation/NSData.h>
++#import <AppKit/NSApplication.h>
++#import <AppKit/NSArrayController.h>
++#import <AppKit/NSNib.h>
++#import <AppKit/NSView.h>
++#import <AppKit/NSWindow.h>
++
++int main()
++{
++  START_SET("GSXib5KeyedUnarchiver user-defined runtime attributes")
++
++  NS_DURING
++    {
++      [NSApplication sharedApplication];
++    }
++  NS_HANDLER
++    {
++      if ([[localException name]
++	isEqualToString: NSInternalInconsistencyException ])
++	{
++	  SKIP("It looks like GNUstep backend is not yet installed")
++	}
++    }
++  NS_ENDHANDLER
++
++  NSData		*data;
++  NSNib			*nib;
++  NSArray		*objects = nil;
++  NSArrayController	*controller = nil;
++  NSWindow		*window = nil;
++  NSView		*view;
++  NSEnumerator		*e;
++  id			object;
++
++  data = [NSData dataWithContentsOfFile: @"RuntimeAttributes.xib"];
++  nib = AUTORELEASE([[NSNib alloc] initWithNibData: data bundle: nil]);
++  PASS([nib instantiateWithOwner: NSApp topLevelObjects: &objects],
++    "the xib loads")
++  e = [objects objectEnumerator];
++  while ((object = [e nextObject]) != nil)
++    {
++      if ([object isKindOfClass: [NSArrayController class]])
++	controller = object;
++      else if ([object isKindOfClass: [NSWindow class]])
++	window = object;
++    }
++  view = [[[window contentView] subviews] lastObject];
++
++  PASS(controller != nil && [controller automaticallyRearrangesObjects],
++    "a top-level object's boolean attribute is applied")
++  PASS_EQUAL([controller entityNameKey], @"Vehicle",
++    "a top-level object's string attribute is applied")
++  PASS_EQUAL([view toolTip], @"From the attribute",
++    "a view's string attribute is applied")
++
++  END_SET("GSXib5KeyedUnarchiver user-defined runtime attributes")
++  return 0;
++}
+-- 
+2.43.0
+

@@ -400,6 +400,15 @@ other eighteen libs-gui patches apply to master 87c1129.  RDLKit, which the tabl
 listed as carrying it, applies this repository at a pinned commit and holds
 no copy.
 
+Added on 2026-10-19: `xib-runtime-attributes`.  No user-defined runtime
+attribute in a xib was applied to anything, view or controller: the xib
+unarchiver stored them under "<id>.%IBAttributePlaceholdersKey" and the
+loader looked under "<id>.IBAttributePlaceholdersKey".  db57ab788 (2020)
+turned the format @"%@.IBAttributePlaceholdersKey" into a postfix and
+kept its percent sign.  `GSXib5KeyedUnarchiver/runtimeAttributes.m` fails
+3 of its 4 checks without the fix and passes with it on libs-gui
+5c43a947f.
+
 Added on 2026-10-19 for FreeCoreData's in-memory predicate evaluation:
 `predicate-aggregate-of-nil`.  A comparison with ANY, ALL or NONE raised
 when its left hand side was nil, so `ANY owner.vehicles.odometer > 5`
@@ -603,6 +612,7 @@ the two where a window comes in the same event fail.  On libs-gui 5c43a94.
 | `view-overlapping-siblings` | libs-gui | test | not sent yet | (none: UDCodeKit's jump-to-line box needs it, ashalkhakov/UDCodeKit#43) |
 | `arraycontroller-decoded-defaults` | libs-gui | test | not sent yet | (none: Logbook's xib uses it from here) |
 | `opengl-view-hidden` | libs-gui | test | not sent yet | (none: UDQuakeTools' GUI editor uses it from here; its workaround is gone) |
+| `xib-runtime-attributes` | libs-gui | test | not sent yet | (none: every xib with runtime attributes uses it from here) |
 | `xib-segment-image` | libs-gui | test | not sent yet | (none: UDCode's navigator bar uses it from here) |
 | `xib-formatter-attributes` | libs-gui | test | not sent yet | (none: ORMKit's apps use it from here) |
 | `popup-content-bindings` | libs-gui | test | not sent yet | (none: Logbook will use it from here; its LBObjectPopUpButton goes) |
