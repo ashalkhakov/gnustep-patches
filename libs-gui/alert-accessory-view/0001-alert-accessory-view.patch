@@ -1,0 +1,440 @@
+From 1ec70b755374821dd72a5a780b4ba06fd6b2fd6b Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Mon, 19 Oct 2026 16:33:46 +0000
+Subject: [PATCH] NSAlert: accessoryView and -layout
+
+NSAlert had no -accessoryView, -setAccessoryView: or -layout, which AppKit
+has had since 10.5, so an alert that asks for something (a server
+address, a name) could not be an NSAlert: an application had to build a
+panel of its own for it.
+
+The accessory view is now shown as on macOS, between the informative
+text and the buttons, at its own size: the panel grows to fit it, wider
+when the view is wider than the text, and the message is centred in what
+is left above it.  -layout lays the panel out at once instead of when the
+alert is run, as AppKit's does, so that its window can be adjusted first:
+the usual case is making a field in the accessory view the first
+responder.  An alert that has been laid out is run with that window
+rather than a new one; one that has not is laid out when it is run, as
+before.  The panel takes its accessory view out of its content view when
+it goes, so the same view can be shown by the next run.
+
+Tests/gui/NSAlert/accessoryView.m checks where the view ends up, against
+the buttons, the informative text and the panel's bounds; it passes 8 of
+8 with this and on AppKit (macOS 15), and without it stops at the first
+check, the alert not recognising -setAccessoryView:/-layout.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Headers/AppKit/NSAlert.h          |  22 +++++
+ Source/NSAlert.m                  |  99 +++++++++++++++++++--
+ Tests/gui/NSAlert/accessoryView.m | 137 ++++++++++++++++++++++++++++++
+ 3 files changed, 253 insertions(+), 5 deletions(-)
+ create mode 100644 Tests/gui/NSAlert/accessoryView.m
+
+diff --git a/Headers/AppKit/NSAlert.h b/Headers/AppKit/NSAlert.h
+index 45e508c48..0622479fa 100644
+--- a/Headers/AppKit/NSAlert.h
++++ b/Headers/AppKit/NSAlert.h
+@@ -93,6 +93,7 @@
+ @class NSButton;
+ @class NSImage;
+ @class NSWindow;
++@class NSView;
+ 
+ #if OS_API_VERSION(MAC_OS_X_VERSION_10_3, GS_API_LATEST)
+ 
+@@ -119,6 +120,7 @@ APPKIT_EXPORT_CLASS
+   id _modalDelegate;
+   SEL _didEndSelector;
+   NSInteger _result;
++  NSView *_accessory_view;
+ }
+ 
+ #if OS_API_VERSION(MAC_OS_X_VERSION_10_4, GS_API_LATEST)
+@@ -237,6 +239,26 @@ APPKIT_EXPORT_CLASS
+  */
+ - (id) window;
+ 
++#if OS_API_VERSION(MAC_OS_X_VERSION_10_5, GS_API_LATEST)
++/**
++ *  Returns the view shown between the informative text and the buttons.
++ */
++- (NSView *) accessoryView;
++
++/**
++ *  Sets a view to show between the informative text and the buttons;
++ *  the alert's panel is sized to fit it.
++ */
++- (void) setAccessoryView: (NSView *)view;
++
++/**
++ *  Lays the alert's panel out now rather than when it is shown, so that
++ *  its window can be adjusted (an initial first responder in the
++ *  accessory view, say) before the alert is run.
++ */
++- (void) layout;
++#endif
++
+ #if OS_API_VERSION(MAC_OS_X_VERSION_10_9, GS_API_LATEST)
+ /**
+  *  Presents the alert as a sheet using a completion handler.
+diff --git a/Source/NSAlert.m b/Source/NSAlert.m
+index 9c339ee21..70f8cf95f 100644
+--- a/Source/NSAlert.m
++++ b/Source/NSAlert.m
+@@ -199,6 +199,7 @@ static GSAlertPanel	*criticalAlertPanel = nil;
+   NSTextField	*titleField;
+   NSTextField	*messageField;
+   NSScrollView	*scroll;
++  NSView	*accessoryView;
+   NSInteger	result;
+   BOOL          isGreen;  // we were unarchived and not resized.
+ }
+@@ -217,6 +218,7 @@ static GSAlertPanel	*criticalAlertPanel = nil;
+ 		 alt: (NSString*)alternateButton
+ 	       other: (NSString*)otherButton;
+ - (void) setButtons: (NSArray *)buttons;
++- (void) setAccessoryView: (NSView *)view;
+ - (void) sizePanelToFit;
+ - (void) buttonAction: (id)sender;
+ - (NSInteger) result;
+@@ -292,6 +294,8 @@ static const float ButtonMinWidth = 72.0;
+   RELEASE(titleField);
+   RELEASE(messageField);
+   RELEASE(scroll);
++  [accessoryView removeFromSuperview];
++  RELEASE(accessoryView);
+   [super dealloc];
+ }
+ 
+@@ -529,6 +533,7 @@ setKeyEquivalent(NSButton *button)
+   float		position = 0.0;
+   int		numberOfButtons;
+   int		i;
++  float		aheight = 0.0;	// accessory view height with its margin.
+   BOOL		needsScroll;
+   BOOL		couldNeedScroll;
+   NSUInteger	mask = [self styleMask];
+@@ -643,6 +648,25 @@ setKeyEquivalent(NSButton *button)
+       wsize.height += MessageVertMargin;
+     }
+ 
++  if (accessoryView != nil)
++    {
++      NSSize	asize = [accessoryView frame].size;
++
++      if (wsize.width < asize.width + 2 * MessageHorzMargin)
++	{
++	  wsize.width = asize.width + 2 * MessageHorzMargin;
++	}
++      wsize.height += asize.height + MessageVertMargin;
++      if (numberOfButtons > 0)
++	{
++	  aheight = asize.height + MessageVertMargin;
++	}
++      else
++	{
++	  aheight = asize.height + 2 * MessageVertMargin;
++	}
++    }
++
+   // Strategically placed here, we resize the window.
+   if (ssize.height < wsize.height)
+     {
+@@ -694,6 +718,21 @@ setKeyEquivalent(NSButton *button)
+ 	}
+     }
+ 
++  // Then the accessory view, above the buttons.
++  if (accessoryView != nil)
++    {
++      NSRect	arect = [accessoryView frame];
++
++      arect.origin.x = bounds.origin.x
++	+ floor((bounds.size.width - arect.size.width) / 2);
++      arect.origin.y = bounds.origin.y + MessageVertMargin;
++      if (numberOfButtons > 0)
++	{
++	  arect.origin.y += ButtonBottom + bsize.height;
++	}
++      [accessoryView setFrame: arect];
++    }
++
+   // Finaly, place the message.
+   if (useControl(messageField))
+     {
+@@ -715,6 +754,7 @@ setKeyEquivalent(NSButton *button)
+ 	    {
+ 	      srect.origin.y = bounds.origin.y + MessageVertMargin;
+ 	    }
++	  srect.origin.y += aheight;
+ 	  srect.size.width = bounds.size.width - 2 * MessageHorzMargin;
+ 	  srect.size.height = bounds.origin.y + bounds.size.height
+ 	    + MessageTop - srect.origin.y;
+@@ -751,13 +791,14 @@ setKeyEquivalent(NSButton *button)
+ 	   * than expected.
+ 	   */
+ 	  mrect.origin.x = (wsize.width - mrect.size.width)/2;
+-	  vmargin = bounds.size.height + LineBottom-mrect.size.height;
++	  vmargin = bounds.size.height + LineBottom-mrect.size.height
++	    - aheight;
+ 	  if (numberOfButtons > 0)
+ 	    {
+ 	      vmargin -= ButtonBottom + bsize.height;
+ 	    }
+ 	  vmargin/= 2.0; // if negative, it'll bite up and down.
+-	  mrect.origin.y = bounds.origin.y + vmargin;
++	  mrect.origin.y = bounds.origin.y + vmargin + aheight;
+ 	  if (numberOfButtons > 0)
+ 	    {
+ 	      mrect.origin.y += ButtonBottom + bsize.height;
+@@ -988,6 +1029,21 @@ setKeyEquivalent(NSButton *button)
+   result = NSAlertErrorReturn; 	/* If no button was pressed	*/
+ }
+ 
++- (void) setAccessoryView: (NSView *)view
++{
++  if (view == accessoryView)
++    {
++      return;
++    }
++  [accessoryView removeFromSuperview];
++  ASSIGN(accessoryView, view);
++  if (view != nil)
++    {
++      [[self contentView] addSubview: view];
++    }
++  isGreen = YES;
++}
++
+ @end /* GSAlertPanel */
+ 
+ @implementation GSAlertPanel (GMArchiverMethods)
+@@ -1925,6 +1981,7 @@ NSRunAlertPanelRelativeToWindow(NSString *title,
+   RELEASE(_buttons);
+   RELEASE(_help_anchor);
+   RELEASE(_window);
++  RELEASE(_accessory_view);
+   [super dealloc];
+ }
+ 
+@@ -2020,6 +2077,28 @@ NSRunAlertPanelRelativeToWindow(NSString *title,
+   return _style;
+ }
+ 
++- (void) setAccessoryView: (NSView *)view
++{
++  ASSIGN(_accessory_view, view);
++}
++
++- (NSView *) accessoryView
++{
++  return _accessory_view;
++}
++
++- (void) layout
++{
++  if (_window == nil)
++    {
++      [self _setupPanel];
++    }
++  else
++    {
++      [(GSAlertPanel*)_window sizePanelToFit];
++    }
++}
++
+ - (void) setDelegate: (id)delegate
+ {
+   _delegate = delegate;
+@@ -2067,6 +2146,7 @@ NSRunAlertPanelRelativeToWindow(NSString *title,
+         {
+           [self addButtonWithTitle: @"OK"];
+         }
++      [panel setAccessoryView: _accessory_view];
+       [panel setButtons: _buttons];
+     }
+ }
+@@ -2082,7 +2162,10 @@ NSRunAlertPanelRelativeToWindow(NSString *title,
+     }
+   else
+     {
+-      [self _setupPanel];
++      if (_window == nil)
++        {
++          [self _setupPanel];
++        }
+       [NSApp runModalForWindow: _window];
+       [_window orderOut: self];
+       _result = [(GSAlertPanel*)_window result];
+@@ -2096,7 +2179,10 @@ NSRunAlertPanelRelativeToWindow(NSString *title,
+ 		   didEndSelector: (SEL)didEndSelector
+ 		      contextInfo: (void *)contextInfo
+ {
+-  [self _setupPanel];
++  if (_window == nil)
++    {
++      [self _setupPanel];
++    }
+   _modalDelegate = delegate;
+   _didEndSelector = didEndSelector;
+   [NSApp beginSheet: _window
+@@ -2110,7 +2196,10 @@ NSRunAlertPanelRelativeToWindow(NSString *title,
+ - (void) beginSheetModalForWindow:(NSWindow *)sheet
+                 completionHandler:(GSNSWindowDidEndSheetCallbackBlock)handler
+ {
+-  [self _setupPanel];
++  if (_window == nil)
++    {
++      [self _setupPanel];
++    }
+   [sheet beginSheet: _window
+   completionHandler: handler];
+   DESTROY(_window);
+diff --git a/Tests/gui/NSAlert/accessoryView.m b/Tests/gui/NSAlert/accessoryView.m
+new file mode 100644
+index 000000000..8b867ca6d
+--- /dev/null
++++ b/Tests/gui/NSAlert/accessoryView.m
+@@ -0,0 +1,137 @@
++/* An alert's accessory view is shown between the informative text and the
++   buttons, and the panel is sized to fit it; -layout lays the panel out at
++   once, so that its window can be adjusted before the alert is run.
++   Checked against AppKit on macOS.
++*/
++#include "Testing.h"
++
++#include <Foundation/NSArray.h>
++#include <Foundation/NSAutoreleasePool.h>
++#include <Foundation/NSString.h>
++
++#include <AppKit/NSAlert.h>
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSButton.h>
++#include <AppKit/NSTextField.h>
++#include <AppKit/NSView.h>
++#include <AppKit/NSWindow.h>
++
++static NSTextField *
++fieldShowing(NSView *view, NSString *text)
++{
++  NSEnumerator *e;
++  NSView *sub;
++
++  if ([view isKindOfClass: [NSTextField class]]
++    && [[(NSTextField *)view stringValue] isEqual: text])
++    {
++      return (NSTextField *)view;
++    }
++  e = [[view subviews] objectEnumerator];
++  while ((sub = [e nextObject]) != nil)
++    {
++      NSTextField *found = fieldShowing(sub, text);
++
++      if (found != nil)
++        {
++          return found;
++        }
++    }
++  return nil;
++}
++
++static NSRect
++inWindow(NSView *view)
++{
++  return [view convertRect: [view bounds] toView: nil];
++}
++
++static NSAlert *
++newAlert(NSView *accessory)
++{
++  NSAlert *alert = AUTORELEASE([[NSAlert alloc] init]);
++
++  [alert setMessageText: @"Connect"];
++  [alert setInformativeText: @"Where is the server?"];
++  [alert addButtonWithTitle: @"Connect"];
++  [alert addButtonWithTitle: @"Cancel"];
++  if (accessory != nil)
++    {
++      [alert setAccessoryView: accessory];
++    }
++  [alert layout];
++  return alert;
++}
++
++int
++main(int argc, char **argv)
++{
++  START_SET("NSAlert accessoryView")
++
++  NS_DURING
++    {
++      [NSApplication sharedApplication];
++    }
++  NS_HANDLER
++    {
++      if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++        SKIP("It looks like GNUstep backend is not yet installed")
++    }
++  NS_ENDHANDLER
++
++  NS_DURING
++    {
++      NSView *accessory;
++      NSAlert *plain;
++      NSAlert *alert;
++      NSRect a;
++      NSRect content;
++      NSTextField *text;
++      NSEnumerator *e;
++      NSButton *button;
++      BOOL above = YES;
++
++      accessory = AUTORELEASE([[NSView alloc]
++        initWithFrame: NSMakeRect(0, 0, 500, 120)]);
++      plain = newAlert(nil);
++      alert = newAlert(accessory);
++
++      PASS([alert accessoryView] == accessory, "the accessory view is kept");
++      PASS([alert window] != nil, "-layout makes the window");
++      PASS([accessory window] == [alert window],
++        "the accessory view is in the alert's window");
++      PASS(NSEqualSizes([accessory frame].size, NSMakeSize(500, 120)),
++        "and keeps its size");
++
++      a = inWindow(accessory);
++      content = [[[alert window] contentView] frame];
++      PASS(NSContainsRect(content, a), "the panel is sized to show all of it");
++      PASS(NSHeight(content) > NSHeight([[[plain window] contentView] frame])
++        && NSWidth(content) > NSWidth([[[plain window] contentView] frame]),
++        "the panel is larger than without it");
++
++      e = [[alert buttons] objectEnumerator];
++      while ((button = [e nextObject]) != nil)
++        {
++          if (NSMinY(a) < NSMaxY(inWindow(button)))
++            {
++              above = NO;
++            }
++        }
++      PASS(above, "it is above the buttons");
++
++      text = fieldShowing([[alert window] contentView], @"Where is the server?");
++      PASS(text != nil && NSMaxY(a) <= NSMinY(inWindow(text)),
++        "and below the informative text");
++    }
++  NS_HANDLER
++    {
++      PASS(0, "unexpected exception %s",
++        [[localException description] UTF8String]);
++    }
++  NS_ENDHANDLER
++
++  END_SET("NSAlert accessoryView")
++
++  return 0;
++}
+-- 
+2.43.0
+
