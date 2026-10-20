@@ -1,0 +1,380 @@
+From cecced96413ed60d9f9e014afb6a0f7caa21865c Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Tue, 20 Oct 2026 17:56:27 +0000
+Subject: [PATCH] NSObjectController: add: and insert: at the next turn of the
+ run loop
+
+-add: made the new object and added it at once, and -insert: did the
+same, appending it.  On macOS 15 both are done at the next turn of the
+run loop, in the default, modal panel and event tracking modes (not in
+another mode):
+
+- until then -newObject is not called, the content, the arranged objects
+  and the selection are unchanged, observers hear nothing, and -canAdd
+  is unchanged; two add: before the turn add two objects;
+- whether the controller can add (is editable) is asked when the add is
+  done: made not editable after add: and before the turn, nothing is
+  added;
+- the object is added to the content the controller has then, not the
+  content it had at add:;
+- -insert: inserts at the selection index, with
+  -insertObject:atArrangedObjectIndex:, or at the end when nothing is
+  selected; with selectsInsertedObjects the new object is selected.
+
+Code that clicks Add and reads the controller straight after behaves
+differently on the two (a self-test in Logbook spins the run loop after
+each click for this reason), and a controller that adds at once tells
+its observers while the action that sent add: is still running.
+
+So -add: and -insert: now queue -_addNow and -_insertNow on the current
+run loop in those three modes, and these do what they did before, with
+-_insertNow inserting at the selection.  The deferred perform retains
+the controller until it runs.
+
+Tests/gui/NSObjectController/deferredAdd.m checks each of these; it
+passes on macOS 15, and without the change 13 of its 29 checks fail.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/NSArrayController.m                 |  25 ++-
+ Source/NSObjectController.m                |  19 +-
+ Tests/gui/NSObjectController/deferredAdd.m | 238 +++++++++++++++++++++
+ 3 files changed, 277 insertions(+), 5 deletions(-)
+ create mode 100644 Tests/gui/NSObjectController/deferredAdd.m
+
+diff --git a/Source/NSArrayController.m b/Source/NSArrayController.m
+index 169882587..1590e9a23 100644
+--- a/Source/NSArrayController.m
++++ b/Source/NSArrayController.m
+@@ -149,6 +149,10 @@
+ - (void) _followAdding: (NSArray*)added removing: (NSArray*)removed;
+ @end
+ 
++@interface NSObjectController (GSDeferredActions)
++- (void) _performAtNextTurn: (SEL)action;
++@end
++
+ @protocol GSControllerFetchRequest
+ - (id) entity;
+ - (void) setSortDescriptors: (NSArray*)sortDescriptors;
+@@ -368,12 +372,25 @@ contentArray(id content)
+   [self rearrangeObjects];
+ }
+ 
+-- (void) insert: (id)sender
++- (void) _insertNow
+ {
+-  id new = [self newObject];
++  if ([self canInsert])
++    {
++      NSUInteger index = [self selectionIndex];
++      id new = [self newObject];
+ 
+-  [self addObject: new];
+-  RELEASE(new);
++      if (index == NSNotFound)
++	{
++	  index = [[self arrangedObjects] count];
++	}
++      [self insertObject: new atArrangedObjectIndex: index];
++      RELEASE(new);
++    }
++}
++
++- (void) insert: (id)sender
++{
++  [self _performAtNextTurn: @selector(_insertNow)];
+ }
+ 
+ - (NSIndexSet*) _indexSetForObjects: (NSArray*)objects
+diff --git a/Source/NSObjectController.m b/Source/NSObjectController.m
+index 3e222e181..1a219e9fb 100644
+--- a/Source/NSObjectController.m
++++ b/Source/NSObjectController.m
+@@ -38,6 +38,7 @@
+ #import <Foundation/NSNotification.h>
+ #import <Foundation/NSRunLoop.h>
+ #import <Foundation/NSValue.h>
++#import "AppKit/NSApplication.h"
+ #import "AppKit/NSObjectController.h"
+ #import "AppKit/NSKeyValueBinding.h"
+ #import "GSBindingHelpers.h"
+@@ -376,7 +377,18 @@ static NSString *GSObjectsChangedInManagingContextNotification
+   _automatically_prepares_content = flag;
+ }
+ 
+-- (void) add: (id)sender
++- (void) _performAtNextTurn: (SEL)action
++{
++  [[NSRunLoop currentRunLoop] performSelector: action
++				       target: self
++				     argument: nil
++					order: 0
++					modes: [NSArray arrayWithObjects:
++    NSDefaultRunLoopMode, NSModalPanelRunLoopMode,
++    NSEventTrackingRunLoopMode, nil]];
++}
++
++- (void) _addNow
+ {
+   if ([self canAdd])
+     {
+@@ -387,6 +399,11 @@ static NSString *GSObjectsChangedInManagingContextNotification
+     }
+ }
+ 
++- (void) add: (id)sender
++{
++  [self _performAtNextTurn: @selector(_addNow)];
++}
++
+ - (void) addObject: (id)obj
+ {
+   GSKeyValueBinding *theBinding;
+diff --git a/Tests/gui/NSObjectController/deferredAdd.m b/Tests/gui/NSObjectController/deferredAdd.m
+new file mode 100644
+index 000000000..2aeb0bdb8
+--- /dev/null
++++ b/Tests/gui/NSObjectController/deferredAdd.m
+@@ -0,0 +1,238 @@
++/* -add: and -insert: on an object or array controller make and add the new
++   object at the next turn of the run loop, in the default, modal panel and
++   event tracking modes, as on macOS: until then -newObject is not called, the content and
++   the selection are unchanged and observers hear nothing; whether the
++   controller can add is asked when it is done.  -insert: puts the object
++   at the selection, or at the end with none. */
++#include "Testing.h"
++
++#include <Foundation/NSArray.h>
++#include <Foundation/NSDate.h>
++#include <Foundation/NSDictionary.h>
++#include <Foundation/NSException.h>
++#include <Foundation/NSIndexSet.h>
++#include <Foundation/NSKeyValueObserving.h>
++#include <Foundation/NSRunLoop.h>
++#include <Foundation/NSString.h>
++#include <Foundation/NSTimer.h>
++
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSArrayController.h>
++#include <AppKit/NSObjectController.h>
++
++static int made;
++
++/* Objects that are equal only to themselves, as new empty dictionaries
++   are not. */
++@interface Item : NSObject
++@end
++
++@implementation Item
++@end
++
++@interface CountingObjectController : NSObjectController
++@end
++
++@implementation CountingObjectController
++- (id) newObject
++{
++  made++;
++  return [super newObject];
++}
++@end
++
++@interface CountingArrayController : NSArrayController
++@end
++
++@implementation CountingArrayController
++- (id) newObject
++{
++  made++;
++  return [super newObject];
++}
++@end
++
++@interface Heard : NSObject
++{
++@public
++  int	count;
++}
++@end
++
++@implementation Heard
++- (void) observeValueForKeyPath: (NSString *)keyPath
++                       ofObject: (id)object
++                         change: (NSDictionary *)change
++                        context: (void *)context
++{
++  count++;
++}
++@end
++
++/* The run loop turned in one mode, with a timer to keep it there. */
++static void
++turn(NSString *mode)
++{
++  NSTimer	*timer;
++  int		i;
++
++  timer = [NSTimer timerWithTimeInterval: 10.0
++				  target: [NSObject class]
++				selector: @selector(class)
++				userInfo: nil
++				 repeats: NO];
++  [[NSRunLoop currentRunLoop] addTimer: timer forMode: mode];
++  for (i = 0; i < 3; i++)
++    {
++      [[NSRunLoop currentRunLoop] runMode: mode beforeDate:
++	[NSDate dateWithTimeIntervalSinceNow: 0.02]];
++    }
++  [timer invalidate];
++}
++
++static void
++spin(void)
++{
++  [[NSRunLoop currentRunLoop] runUntilDate:
++    [NSDate dateWithTimeIntervalSinceNow: 0.05]];
++}
++
++
++int
++main(int argc, const char **argv)
++{
++  NSObjectController	*oc;
++  NSArrayController	*ac;
++  Heard			*heard;
++  Item			*first;
++  id			added;
++
++  START_SET("NSObjectController add: at the next turn")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  heard = AUTORELEASE([[Heard alloc] init]);
++  oc = AUTORELEASE([[CountingObjectController alloc] initWithContent: nil]);
++  [oc addObserver: heard forKeyPath: @"content" options: 0 context: NULL];
++  made = 0;
++  [oc add: nil];
++  PASS([oc content] == nil, "add: has not added before the run loop turns");
++  PASS(made == 0, "nor made the new object");
++  PASS(heard->count == 0, "and observers have heard nothing");
++  PASS([oc canAdd], "the controller can still add");
++  spin();
++  PASS([oc content] != nil, "the run loop turned, the new object is the content");
++  PASS(made == 1, "made then, once");
++  PASS(heard->count > 0, "and observers hear of it");
++  [oc removeObserver: heard forKeyPath: @"content"];
++
++  oc = AUTORELEASE([[CountingObjectController alloc] initWithContent: nil]);
++  [oc setEditable: NO];
++  [oc add: nil];
++  spin();
++  PASS([oc content] == nil, "a controller that is not editable adds nothing");
++  [oc setEditable: YES];
++  [oc add: nil];
++  [oc setEditable: NO];
++  made = 0;
++  spin();
++  PASS([oc content] == nil && made == 0,
++    "nor does one made not editable before the add is done");
++
++  oc = AUTORELEASE([[CountingObjectController alloc] initWithContent: nil]);
++  [oc add: nil];
++  turn(@"GSTestOtherMode");
++  PASS([oc content] == nil, "the add is not done in a mode of the program's own");
++  turn(NSModalPanelRunLoopMode);
++  PASS([oc content] != nil, "it is done in the modal panel mode");
++  oc = AUTORELEASE([[CountingObjectController alloc] initWithContent: nil]);
++  [oc add: nil];
++  turn(NSEventTrackingRunLoopMode);
++  PASS([oc content] != nil, "and in the event tracking mode");
++
++  END_SET("NSObjectController add: at the next turn")
++
++  START_SET("NSArrayController add: and insert: at the next turn")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  first = AUTORELEASE([[Item alloc] init]);
++  heard = AUTORELEASE([[Heard alloc] init]);
++  ac = AUTORELEASE([[CountingArrayController alloc] initWithContent:
++    [NSMutableArray arrayWithObject: first]]);
++  [ac setObjectClass: [Item class]];
++  [ac setSelectionIndex: 0];
++  [ac addObserver: heard forKeyPath: @"arrangedObjects" options: 0 context: NULL];
++  [ac addObserver: heard forKeyPath: @"selectionIndexes" options: 0 context: NULL];
++  made = 0;
++  [ac add: nil];
++  [ac add: nil];
++  PASS([[ac arrangedObjects] count] == 1 && [[ac content] count] == 1,
++    "add: has not added before the run loop turns");
++  PASS(made == 0, "nor made the new object");
++  PASS_EQUAL([ac selectionIndexes], [NSIndexSet indexSetWithIndex: 0],
++    "nor changed the selection");
++  PASS(heard->count == 0, "and observers have heard nothing");
++  spin();
++  PASS([[ac arrangedObjects] count] == 3 && [[ac content] count] == 3,
++    "the run loop turned, each add: has added an object");
++  PASS(made == 2, "made then");
++  PASS([[ac arrangedObjects] objectAtIndex: 0] == first,
++    "after the content there was");
++  PASS_EQUAL([ac selectionIndexes], [NSIndexSet indexSetWithIndex: 2],
++    "the object added last is selected");
++  PASS(heard->count > 0, "and observers hear of it");
++  [ac removeObserver: heard forKeyPath: @"arrangedObjects"];
++  [ac removeObserver: heard forKeyPath: @"selectionIndexes"];
++
++  [ac setSelectionIndex: 1];
++  added = [[ac arrangedObjects] objectAtIndex: 1];
++  made = 0;
++  [ac insert: nil];
++  PASS([[ac arrangedObjects] count] == 3 && made == 0,
++    "insert: has not inserted before the run loop turns");
++  spin();
++  PASS([[ac arrangedObjects] count] == 4 && made == 1,
++    "the run loop turned, it has");
++  PASS([[ac arrangedObjects] objectAtIndex: 2] == added
++    && [[ac arrangedObjects] objectAtIndex: 1] != added,
++    "at the selection");
++  PASS_EQUAL([ac selectionIndexes], [NSIndexSet indexSetWithIndex: 1],
++    "and the inserted object is selected");
++
++  [ac setSelectionIndexes: [NSIndexSet indexSet]];
++  [ac insert: nil];
++  spin();
++  PASS([[ac arrangedObjects] count] == 5, "with no selection insert: inserts");
++  PASS_EQUAL([ac selectionIndexes], [NSIndexSet indexSetWithIndex: 4],
++    "at the end");
++
++  [ac setSelectsInsertedObjects: NO];
++  [ac setSelectionIndex: 0];
++  [ac add: nil];
++  spin();
++  PASS([[ac arrangedObjects] count] == 6
++    && [[ac selectionIndexes] isEqual: [NSIndexSet indexSetWithIndex: 0]],
++    "not selecting inserted objects, the selection stays");
++
++  [ac add: nil];
++  [ac setContent: [NSMutableArray arrayWithObject:
++    AUTORELEASE([[Item alloc] init])]];
++  spin();
++  PASS([[ac arrangedObjects] count] == 2 && [[ac content] count] == 2,
++    "the object is added to the content there is when the add is done");
++
++  END_SET("NSArrayController add: and insert: at the next turn")
++
++  return 0;
++}
+-- 
+2.43.0
+
