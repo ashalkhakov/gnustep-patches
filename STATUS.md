@@ -865,8 +865,21 @@ set still changes the set; a mutable set given unbound is left alone.
 The controller now does the same.  `NSArrayController/setContent.m`
 passes its 23 checks on macOS 15; without the fix 3 of its first 6 fail
 and the set stops at the exception.  It applies after
-`controller-to-many-content`.  With every patch here the gui suite
-passes 5361 checks with none failing, on libs-gui cacd5cb08.
+`controller-to-many-content`.
+With it Logbook's self-test went on to its Done sheet, whose pop-up binds
+contentValues to doneEvents.lbTitle, a list the controller fills only in
+-awakeFromNib: `popup-content-bindings` decided whether a key path passes
+through a to-many from the values on it when the binding was made, and
+with doneEvents still nil it observed the whole key path, which libs-base
+refused once doneEvents became an array.  It now observes up to a nil
+too and decides again when that part changes, as macOS 15 does (with
+content bound as well).  The second set of
+`NSPopUpButton/contentValuesKeyPath.m` passes its 7 checks on macOS 15;
+with the choice made only when binding, 2 fail and the set stops at the
+exception.  With both, Logbook's `make clean; make -k check` passes
+(self-test done: 0 failed, 269 checks) on the 2026.10.20.4 image with
+every patch here, and the gui suite passes 5368 checks with none failing,
+on libs-gui cacd5cb08.
 
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
