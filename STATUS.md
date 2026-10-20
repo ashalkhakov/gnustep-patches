@@ -853,6 +853,33 @@ checks from macOS tables; without the fix both sets fail (161 failures).
 With every patch here, the base suite passes 15239 checks with none
 failing (`GSMime/encoded-word-stack.m` aborts as on master; `NSStream/socket.m`,
 which talks to google.com, aborted once and passed on three reruns).
+Added on 2026-10-20 for Logbook's records, a Core Data to-many bound
+through the vehicles' selection with contentSet and filtered:
+`controller-to-many-set`.  An array controller kept set content as the
+set and arranged it as an array, so a filter predicate raised
+("GSSet does not recognize filteredArrayUsingPredicate:").  On macOS 15
+a controller's content is always an array: a set given to -setContent:
+or through contentSet becomes a mutable array of its objects (arranged,
+unsorted, in -allObjects order), and adding or removing through a bound
+set still changes the set; a mutable set given unbound is left alone.
+The controller now does the same.  `NSArrayController/setContent.m`
+passes its 23 checks on macOS 15; without the fix 3 of its first 6 fail
+and the set stops at the exception.  It applies after
+`controller-to-many-content`.
+With it Logbook's self-test went on to its Done sheet, whose pop-up binds
+contentValues to doneEvents.lbTitle, a list the controller fills only in
+-awakeFromNib: `popup-content-bindings` decided whether a key path passes
+through a to-many from the values on it when the binding was made, and
+with doneEvents still nil it observed the whole key path, which libs-base
+refused once doneEvents became an array.  It now observes up to a nil
+too and decides again when that part changes, as macOS 15 does (with
+content bound as well).  The second set of
+`NSPopUpButton/contentValuesKeyPath.m` passes its 7 checks on macOS 15;
+with the choice made only when binding, 2 fail and the set stops at the
+exception.  With both, Logbook's `make clean; make -k check` passes
+(self-test done: 0 failed, 269 checks) on the 2026.10.20.4 image with
+every patch here, and the gui suite passes 5368 checks with none failing,
+on libs-gui cacd5cb08.
 
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
@@ -909,6 +936,7 @@ which talks to google.com, aborted once and passed on three reruns).
 | `binding-to-many-mutation` | libs-gui | test | not sent yet | (none: UDQuakeTools uses it from here) |
 | `controller-selection-markers` | libs-gui | test | not sent yet | (none: bound controls show AppKit's placeholders from here) |
 | `controller-to-many-content` | libs-gui | test | not sent yet (after `controller-entity-mode`) | (none: Logbook adds records through it) |
+| `controller-to-many-set` | libs-gui | test | not sent yet (after `controller-to-many-content`) | (none: Logbook filters records through it) |
 | `popup-selected-object` | libs-gui | test | not sent yet (after `popup-content-bindings`) | (none: Logbook's pop-ups set their objects through it) |
 | `font-family-names` | libs-gui | test | not sent yet | (none: RDLKit will use it from here) |
 | `cairo-unhinted-metrics` | libs-back | test | not sent yet | (none: RDLKit will use it from here) |
