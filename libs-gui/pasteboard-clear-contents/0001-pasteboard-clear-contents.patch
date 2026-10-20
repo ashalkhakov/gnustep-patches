@@ -1,0 +1,492 @@
+From 283a9c31626d8d1142e896c9489dbfaf4869a6b8 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Tue, 20 Oct 2026 09:37:13 +0500
+Subject: [PATCH] NSPasteboard: -clearContents and the object reading and
+ writing methods
+
+NSPasteboard had none of the methods macOS 10.6 added for writing and
+reading objects but -writeObjects:, which returned NO: -clearContents,
+which a program now calls before writing to the general pasteboard,
+raised, and so did -readObjectsForClasses:options:,
+-canReadObjectForClasses:options: and -pasteboardItems.
+
+On macOS 15, for a pasteboard with an owner and one declared type:
+-clearContents tells the owner it has lost the pasteboard, leaves it with
+no types and returns the new change count; -writeObjects: of strings, a
+pasteboard item or a URL writes the types each gives through
+NSPasteboardWriting, without changing the count; -readObjectsForClasses:
+makes the strings back from the string type, and nothing from an empty
+pasteboard; -canReadObjectForClasses:options: says whether it would; and
+-pasteboardItems has one item per object written, none when empty.
+
+-clearContents is -declareTypes:owner: with no types and no owner.
+-writeObjects: adds each object's types and writes the property list,
+string or data it gives for them (a pasteboard item's own data, as
+stored).  Reading takes the first class whose readable types the
+pasteboard has, gets the value as its reading options ask (string,
+property list, keyed archive or data) and makes the object with
+-initWithPasteboardPropertyList:ofType:.  NSString adopts both protocols
+for the string type, as on macOS.  GNUstep's pasteboard holds one item,
+so where macOS keeps an item per object written, a type two objects give
+is written once, by the first, and one object is read; -pasteboardItems
+is that item.  URLs, images and colours do not adopt the protocols yet.
+
+The test clears an owned pasteboard and checks the count, writes and
+reads a string, writes a pasteboard item with a string and HTML data, and
+reads from an empty pasteboard.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Headers/AppKit/NSPasteboard.h          |  14 ++
+ Source/NSPasteboard.m                  | 245 ++++++++++++++++++++++++-
+ Source/NSPasteboardItem.m              |   5 +
+ Tests/gui/NSPasteboard/clearContents.m | 117 ++++++++++++
+ 4 files changed, 379 insertions(+), 2 deletions(-)
+ create mode 100644 Tests/gui/NSPasteboard/clearContents.m
+
+diff --git a/Headers/AppKit/NSPasteboard.h b/Headers/AppKit/NSPasteboard.h
+index e34c12fca..2aac55ffa 100644
+--- a/Headers/AppKit/NSPasteboard.h
++++ b/Headers/AppKit/NSPasteboard.h
+@@ -247,6 +247,15 @@ APPKIT_EXPORT_CLASS
+ 	   forType: (NSString*)dataType;
+ - (BOOL) writeFileContents: (NSString*)filename;
+ - (BOOL) writeFileWrapper: (NSFileWrapper*)wrapper;
++#if OS_API_VERSION(MAC_OS_X_VERSION_10_6, GS_API_LATEST)
++- (NSInteger) clearContents;
++- (BOOL) writeObjects: (NSArray*)objects;
++- (NSArray*) readObjectsForClasses: (NSArray*)classArray
++                           options: (NSDictionary*)options;
++- (BOOL) canReadObjectForClasses: (NSArray*)classArray
++                         options: (NSDictionary*)options;
++- (NSArray*) pasteboardItems;
++#endif
+ 
+ //
+ // Determining Types 
+@@ -372,6 +381,11 @@ enum {
+ 				         pasteboard: (NSPasteboard *)pasteboard;
+ - (id)initWithPasteboardPropertyList: (id)propertyList ofType: (NSString *)type;
+ @end
++
++#import <Foundation/NSString.h>
++
++@interface NSString (NSPasteboardSupport) <NSPasteboardWriting, NSPasteboardReading>
++@end
+ #endif
+ 
+ #if defined(__cplusplus)
+diff --git a/Source/NSPasteboard.m b/Source/NSPasteboard.m
+index 556cfee1d..f5a9d3466 100644
+--- a/Source/NSPasteboard.m
++++ b/Source/NSPasteboard.m
+@@ -552,6 +552,12 @@ to a filter implemented using the standard method (of
+ #import "AppKit/NSFileWrapper.h"
+ #import "GNUstepGUI/GSServicesManager.h"
+ #import "GNUstepGUI/GSPasteboardServer.h"
++#import "AppKit/NSPasteboardItem.h"
++#import <Foundation/NSKeyedArchiver.h>
++
++@interface NSPasteboardItem (Private)
++- (id) _objectForType: (NSString*)type;
++@end
+ 
+ /*
+  * FIXME
+@@ -1560,10 +1566,210 @@ - (BOOL) setData: (NSData*)data
+   return ok;
+ }
+ 
++/**
++ * Clears the pasteboard, as -declareTypes:owner: with no types and no
++ * owner does, and returns the new change count.
++ */
++- (NSInteger) clearContents
++{
++  return [self declareTypes: [NSArray array] owner: nil];
++}
++
++/**
++ * Writes each object's types, as the NSPasteboardWriting protocol gives
++ * them, after what the pasteboard has.  The pasteboard holds one item: a
++ * type two objects give is written by the first.
++ */
+ - (BOOL) writeObjects: (NSArray*)objects
+ {
+-  // FIXME: not implemented
+-  return NO;
++  NSEnumerator *e = [objects objectEnumerator];
++  id object;
++  BOOL ok = YES;
++
++  while ((object = [e nextObject]) != nil)
++    {
++      NSArray *types;
++      NSEnumerator *te;
++      NSString *type;
++
++      if (![object respondsToSelector: @selector(writableTypesForPasteboard:)])
++        {
++          return NO;
++        }
++      types = [object writableTypesForPasteboard: self];
++      te = [types objectEnumerator];
++      while ((type = [te nextObject]) != nil)
++        {
++          id value;
++
++          if ([[self types] containsObject: type])
++            {
++              continue;
++            }
++          if ([object isKindOfClass: [NSPasteboardItem class]])
++            {
++              value = [object _objectForType: type];
++            }
++          else
++            {
++              value = [object pasteboardPropertyListForType: type];
++            }
++          if (value == nil)
++            {
++              continue;
++            }
++          [self addTypes: [NSArray arrayWithObject: type] owner: nil];
++          if ([value isKindOfClass: [NSData class]])
++            {
++              ok = [self setData: value forType: type] && ok;
++            }
++          else if ([value isKindOfClass: [NSString class]])
++            {
++              ok = [self setString: value forType: type] && ok;
++            }
++          else
++            {
++              ok = [self setPropertyList: value forType: type] && ok;
++            }
++        }
++    }
++  return ok;
++}
++
++/* The value for type the way a class that reads it wants it. */
++- (id) _valueForType: (NSString*)type readingClass: (Class)c
++{
++  NSPasteboardReadingOptions options = NSPasteboardReadingAsData;
++
++  if ([c respondsToSelector: @selector(readingOptionsForType:pasteboard:)])
++    {
++      options = [c readingOptionsForType: type pasteboard: self];
++    }
++  if (options & NSPasteboardReadingAsString)
++    {
++      return [self stringForType: type];
++    }
++  if (options & NSPasteboardReadingAsPropertyList)
++    {
++      return [self propertyListForType: type];
++    }
++  if (options & NSPasteboardReadingAsKeyedArchive)
++    {
++      NSData *data = [self dataForType: type];
++
++      return data ? [NSKeyedUnarchiver unarchiveObjectWithData: data] : nil;
++    }
++  return [self dataForType: type];
++}
++
++/* The first of the classes that reads a type the pasteboard has, and that
++   type. */
++- (Class) _readingClassFrom: (NSArray*)classArray type: (NSString**)type
++{
++  NSEnumerator *e = [classArray objectEnumerator];
++  Class c;
++
++  while ((c = [e nextObject]) != Nil)
++    {
++      NSString *t;
++
++      if (![c respondsToSelector: @selector(readableTypesForPasteboard:)])
++        {
++          continue;
++        }
++      t = [self availableTypeFromArray: [c readableTypesForPasteboard: self]];
++      if (t != nil)
++        {
++          *type = t;
++          return c;
++        }
++    }
++  return Nil;
++}
++
++/**
++ * Returns an object of the first of the classes that can read what the
++ * pasteboard holds, made from it, or an empty array.
++ */
++- (NSArray*) readObjectsForClasses: (NSArray*)classArray
++                           options: (NSDictionary*)options
++{
++  NSString *type = nil;
++  Class c = [self _readingClassFrom: classArray type: &type];
++  id value;
++  id object = nil;
++
++  if (c == Nil)
++    {
++      return [NSArray array];
++    }
++  value = [self _valueForType: type readingClass: c];
++  if (value != nil)
++    {
++      if ([c instancesRespondToSelector:
++        @selector(initWithPasteboardPropertyList:ofType:)])
++        {
++          object = AUTORELEASE([[c alloc] initWithPasteboardPropertyList: value
++                                                                  ofType: type]);
++        }
++      else if ([value isKindOfClass: c])
++        {
++          object = value;
++        }
++    }
++  return object ? [NSArray arrayWithObject: object] : [NSArray array];
++}
++
++/**
++ * Whether one of the classes can read what the pasteboard holds.
++ */
++- (BOOL) canReadObjectForClasses: (NSArray*)classArray
++                         options: (NSDictionary*)options
++{
++  NSString *type = nil;
++
++  return [self _readingClassFrom: classArray type: &type] != Nil;
++}
++
++/**
++ * The pasteboard's item, holding its types and their data, or an empty
++ * array when it holds nothing.
++ */
++- (NSArray*) pasteboardItems
++{
++  NSArray *types = [self types];
++  NSPasteboardItem *item;
++  NSEnumerator *e;
++  NSString *type;
++
++  if ([types count] == 0)
++    {
++      return [NSArray array];
++    }
++  item = AUTORELEASE([[NSPasteboardItem alloc] init]);
++  e = [types objectEnumerator];
++  while ((type = [e nextObject]) != nil)
++    {
++      if ([type isEqualToString: NSPasteboardTypeString])
++        {
++          NSString *string = [self stringForType: type];
++
++          if (string != nil)
++            {
++              [item setString: string forType: type];
++            }
++        }
++      else
++        {
++          NSData *data = [self dataForType: type];
++
++          if (data != nil)
++            {
++              [item setData: data forType: type];
++            }
++        }
++    }
++  return [NSArray arrayWithObject: item];
+ }
+ 
+ /**
+@@ -1912,6 +2118,41 @@ - (NSString*) stringForType: (NSString*)dataType
+ 
+ @end
+ 
++@implementation NSString (NSPasteboardSupport)
++
++- (NSArray*) writableTypesForPasteboard: (NSPasteboard*)pasteboard
++{
++  return [NSArray arrayWithObject: NSPasteboardTypeString];
++}
++
++- (id) pasteboardPropertyListForType: (NSString*)type
++{
++  return [type isEqualToString: NSPasteboardTypeString] ? self : nil;
++}
++
+++ (NSArray*) readableTypesForPasteboard: (NSPasteboard*)pasteboard
++{
++  return [NSArray arrayWithObject: NSPasteboardTypeString];
++}
++
+++ (NSPasteboardReadingOptions) readingOptionsForType: (NSString*)type
++                                          pasteboard: (NSPasteboard*)pasteboard
++{
++  return NSPasteboardReadingAsString;
++}
++
++- (id) initWithPasteboardPropertyList: (id)propertyList ofType: (NSString*)type
++{
++  if (![propertyList isKindOfClass: [NSString class]])
++    {
++      DESTROY(self);
++      return nil;
++    }
++  return [self initWithString: propertyList];
++}
++
++@end
++
+ @implementation NSPasteboard (Private)
+ 
+ /*
+diff --git a/Source/NSPasteboardItem.m b/Source/NSPasteboardItem.m
+index b347cfa12..7367ee2ff 100644
+--- a/Source/NSPasteboardItem.m
++++ b/Source/NSPasteboardItem.m
+@@ -144,6 +144,11 @@ - (NSString *)stringForType:(NSString *)type
+                                 encoding: NSUTF8StringEncoding] autorelease];
+ }
+ 
++- (id)_objectForType:(NSString *)type
++{
++  return [_dataMap objectForKey: type];
++}
++
+ - (id)propertyListForType:(NSString *)type
+ {
+   id object = [_dataMap objectForKey: type];
+diff --git a/Tests/gui/NSPasteboard/clearContents.m b/Tests/gui/NSPasteboard/clearContents.m
+new file mode 100644
+index 000000000..83c4b98e4
+--- /dev/null
++++ b/Tests/gui/NSPasteboard/clearContents.m
+@@ -0,0 +1,117 @@
++/* The pasteboard methods of macOS 10.6 and later, as macOS 15 has them:
++ *
++ * - -clearContents empties the pasteboard, tells its owner it has lost it,
++ *   and returns the new change count;
++ * - -writeObjects: writes what objects that adopt NSPasteboardWriting give,
++ *   strings and pasteboard items among them;
++ * - -readObjectsForClasses:options: makes objects of a class that adopts
++ *   NSPasteboardReading from what the pasteboard holds, and
++ *   -canReadObjectForClasses:options: says whether it can;
++ * - -pasteboardItems is an item with the pasteboard's types, or none when
++ *   it holds nothing.
++ *
++ * GNUstep's pasteboard holds one item, so only one object is written or
++ * read where macOS would keep several.
++ */
++#include "Testing.h"
++#include <Foundation/Foundation.h>
++#include <AppKit/NSPasteboard.h>
++#include <AppKit/NSPasteboardItem.h>
++
++@interface PBOwner : NSObject
++{
++@public
++  int lost;
++}
++@end
++
++@implementation PBOwner
++- (void) pasteboardChangedOwner: (NSPasteboard *)sender
++{
++  lost++;
++}
++@end
++
++int
++main(int argc, char **argv)
++{
++  CREATE_AUTORELEASE_POOL(arp);
++  NSPasteboard *pb;
++  PBOwner *owner;
++  NSInteger count;
++  NSArray *read;
++  NSPasteboardItem *item;
++  NSData *html = [@"<b>a</b>" dataUsingEncoding: NSUTF8StringEncoding];
++
++  START_SET("NSPasteboard writing and reading objects")
++
++  NS_DURING
++    {
++      pb = [NSPasteboard pasteboardWithUniqueName];
++    }
++  NS_HANDLER
++    {
++      pb = nil;
++    }
++  NS_ENDHANDLER
++  if (pb == nil)
++    {
++      SKIP("no pasteboard server")
++    }
++
++  owner = AUTORELEASE([PBOwner new]);
++  [pb declareTypes: [NSArray arrayWithObject: NSPasteboardTypeString]
++             owner: owner];
++  count = [pb changeCount];
++  PASS([pb respondsToSelector: @selector(clearContents)],
++    "a pasteboard can be cleared");
++  if ([pb respondsToSelector: @selector(clearContents)])
++    {
++      PASS([pb clearContents] == count + 1 && [pb changeCount] == count + 1,
++        "-clearContents returns the new change count");
++      PASS([[pb types] count] == 0, "a cleared pasteboard has no types");
++      PASS(owner->lost == 1, "its owner is told it has lost it");
++      PASS([[pb pasteboardItems] count] == 0, "nor any item");
++
++      PASS([pb writeObjects: [NSArray arrayWithObject: @"hello"]],
++        "a string can be written as an object");
++      PASS_EQUAL([pb stringForType: NSPasteboardTypeString], @"hello",
++        "it is the pasteboard's string");
++      PASS([pb changeCount] == count + 1, "writing does not change the count");
++      PASS([pb canReadObjectForClasses: [NSArray arrayWithObject: [NSString class]]
++                               options: nil],
++        "a string can be read back");
++      read = [pb readObjectsForClasses: [NSArray arrayWithObject: [NSString class]]
++                               options: nil];
++      PASS([read count] == 1 && [[read objectAtIndex: 0] isEqual: @"hello"],
++        "and it is read back as a string");
++      PASS([[pb pasteboardItems] count] == 1
++        && [[[[pb pasteboardItems] objectAtIndex: 0]
++          stringForType: NSPasteboardTypeString] isEqual: @"hello"],
++        "the pasteboard's item has the string");
++
++      [pb clearContents];
++      item = AUTORELEASE([[NSPasteboardItem alloc] init]);
++      [item setString: @"a" forType: NSPasteboardTypeString];
++      [item setData: html forType: NSPasteboardTypeHTML];
++      PASS([pb writeObjects: [NSArray arrayWithObject: item]],
++        "a pasteboard item can be written");
++      PASS([[pb types] containsObject: NSPasteboardTypeString]
++        && [[pb types] containsObject: NSPasteboardTypeHTML]
++        && [[pb stringForType: NSPasteboardTypeString] isEqual: @"a"]
++        && [[pb dataForType: NSPasteboardTypeHTML] isEqual: html],
++        "with its types and data");
++
++      [pb clearContents];
++      PASS(![pb canReadObjectForClasses: [NSArray arrayWithObject: [NSString class]]
++                                options: nil]
++        && [[pb readObjectsForClasses: [NSArray arrayWithObject: [NSString class]]
++                              options: nil] count] == 0,
++        "nothing is read from an empty pasteboard");
++    }
++
++  [pb releaseGlobally];
++  END_SET("NSPasteboard writing and reading objects")
++  DESTROY(arp);
++  return 0;
++}
+-- 
+2.50.1 (Apple Git-155)
+
