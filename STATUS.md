@@ -831,6 +831,28 @@ an empty string beyond about 5.8 million years (ICU); GNUstep's is the
 NSCalendarDate's.
 With every patch here, the base suite passes 14737 checks with none
 failing (`GSMime/encoded-word-stack.m` aborts, as on unpatched master).
+Added on 2026-10-20, found by LogBook (`-startOfDayForDate:` missing),
+checked against macOS 15 on libs-base d537eac97.  `nscalendar-modern-api`:
+NSCalendar had almost none of the 10.9 API (-startOfDayForDate:, the
+-isDateIn... and weekend methods, -dateByAddingUnit:..., -dateBySetting...,
+-nextDateAfterDate:..., -enumerateDatesStartingAfterDate:..., granularity
+comparison, -componentsInTimeZone:fromDate:, -dateWithEra:...,
+-components:fromDateComponents:..., -minimumRangeOfUnit:); all are added,
+the searches following Apple's rules for missing days, daylight saving
+gaps and repeated times.  On the way: NSCalendarIdentifierISO8601 was ""
+and three identifiers were not ICU's names (so those calendars were
+Gregorian); unknown identifiers now give nil; -copy returned the receiver;
+a day without or with two midnights had the wrong start or length;
+nanoseconds were milliseconds (and -getHour:... gave microseconds); the
+era difference was nil; -ordinalityOfUnit:... was 0; -isValidDate... was
+YES for 30 February; -valueForComponent: gave 0 for unset units;
+NSDateComponents had no -isEqual:.  Backward searches return the latest
+match before the date, where macOS is inconsistent (see the commit
+message).  `NSCalendar/features-10-9.m` and `NSCalendar/nextDate.m`, 503
+checks from macOS tables; without the fix both sets fail (161 failures).
+With every patch here, the base suite passes 15239 checks with none
+failing (`GSMime/encoded-word-stack.m` aborts as on master; `NSStream/socket.m`,
+which talks to google.com, aborted once and passed on three reruns).
 
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
@@ -854,6 +876,7 @@ failing (`GSMime/encoded-word-stack.m` aborts, as on unpatched master).
 | `nsdate-small-date-tag` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
 | `nsdate-equal-hash` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
 | `calendardate-distant-years` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
+| `nscalendar-modern-api` | libs-base | test | not sent yet | (none: LogBook uses it from here) |
 | `popover-placement` | libs-gui | test | not sent yet | (none: UDCodeKit places its own child windows meanwhile) |
 | `arraycontroller-arrange-eagerly` | libs-gui | test | not sent yet | (none: Logbook's LBEntityController will drop its workaround) |
 | `tableview-prototype-copy` | libs-gui | test | not sent yet | (none: UDCodeKit's issues navigator is cell-based meanwhile) |

@@ -1,0 +1,4484 @@
+From 8f4e51e853d055c4b1106fd8b8b0fd4ae4b76faa Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Tue, 20 Oct 2026 12:15:15 +0500
+Subject: [PATCH] NSCalendar: implement the 10.9 API
+
+NSCalendar had none of the methods macOS added in 10.9 apart from
+-component:fromDate: and the -getEra:... family: -startOfDayForDate:,
+-isDate:inSameDayAsDate:, -isDateInToday:/Yesterday:/Tomorrow:/Weekend:,
+-rangeOfWeekendStartDate:interval:containingDate:,
+-nextWeekendStartDate:interval:options:afterDate:,
+-components:fromDateComponents:toDateComponents:options:,
+-dateWithEra:year:month:day:hour:minute:second:nanosecond:,
+-dateWithEra:yearForWeekOfYear:weekOfYear:weekday:...,
+-dateByAddingUnit:value:toDate:options:,
+-dateBySettingUnit:value:ofDate:options:,
+-dateBySettingHour:minute:second:ofDate:options:,
+-date:matchesComponents:, -isDate:equalToDate:toUnitGranularity:,
+-compareDate:toDate:toUnitGranularity:, the three -nextDateAfterDate:...
+methods, -enumerateDatesStartingAfterDate:matchingComponents:options:
+usingBlock: and -componentsInTimeZone:fromDate: were all missing, as was
+-minimumRangeOfUnit: (only a misspelt -minimumRangeofUnit: existed, kept
+now as a cover for it).  Every one of them is added here.
+
+Writing them turned up faults in what was there:
+
+- NSCalendarIdentifierISO8601 (and NSISO8601Calendar) was the empty
+  string, and three other identifiers were not the names ICU and macOS
+  use: "ethiopic", "islamic-tbla" and "islamic-umalqura" were spelt
+  "ethiopic-amete-mihret", "islamic-tabular" and "islamic-umm-al-qura",
+  so ICU silently gave a Gregorian calendar for each.  The ISO 8601
+  calendar now has Monday weeks of at least four days.
+- +calendarWithIdentifier: and -initWithCalendarIdentifier: accepted any
+  string; an identifier ICU does not know now gives nil, as on macOS.
+- -copy of a calendar returned the receiver, although a calendar is
+  mutable, and a real copy lost the first weekday and minimum days.
+  -[NSDateComponents setCalendar:] now copies, as the property on macOS
+  does, so changing a calendar does not change components holding it.
+- -rangeOfUnit:startDate:interval:forDate: took the end of a day as the
+  start plus a day on the clock, so a day without a midnight (Sao Paulo,
+  2018-11-04) was 24 hours, and with two midnights (Havana, 2023-11-05)
+  it began at the second.  Units are now measured from the first moment
+  of one to the first moment of the next; a repeated wall time resolves
+  to its first instance everywhere, as on macOS.  Quarters and week-based
+  years are handled too.
+- Nanoseconds were milliseconds: -components:fromDate: truncated to the
+  millisecond, -getHour:minute:second:nanosecond:fromDate: multiplied
+  milliseconds by 1000, and adding or setting nanoseconds dropped the
+  part below a millisecond.
+- -components:fromDate: ignored NSCalendarUnitCalendar and
+  NSCalendarUnitTimeZone; -components:fromDate:toDate:options: returned
+  nil whenever NSCalendarUnitEra was asked for, since ICU cannot take a
+  difference of eras.
+- -ordinalityOfUnit:inUnit:forDate: always returned 0.
+- -isValidDate and -isValidDateInCalendar: were YES for anything that
+  made a date at all, 30 February and 24:00 included.  A date is now
+  valid when it has every component given.
+- -valueForComponent: answered 0 for a unit not stored rather than
+  NSDateComponentUndefined; NSDateComponents had no -isEqual:, -hash or
+  -isLeapMonth.
+- -dateFromComponents: used a calendar without the receiver's first
+  weekday and minimum days, so week-based components ignored them.
+
+The searches follow the rules in Apple's header, and their results were
+checked against macOS 15 case by case: units smaller than the largest one
+given take their smallest values; a missing day of the month gives the
+start of the next day (NSCalendarMatchNextTime), or the next or previous
+day at the starting date's time (the ...PreservingSmallerUnits options);
+a time skipped by daylight saving gives the moment the clock resumes, the
+time moved on by the gap, or the time moved back by it; of two instances
+of a repeated time the first is taken unless NSCalendarMatchLast is
+given; strict searches go on through the years up to a limit.  Searches
+backwards return the latest match before the date.  Here macOS is not
+consistent with itself and the patch does not follow it: going back from
+Friday the 15th at 10:45 it skips that day for "day 15" or "weekday 6"
+but not for "weekday 6, hour 9", and gives 2023-03-03 for "month 3".
+Equally, macOS compares dates to the granularity of a quarter as it does
+days; here a quarter is a quarter.
+
+Weekends come from ICU's data for the locale's region (Saturday and
+Sunday in the US, Friday and Saturday in Israel).
+
+Two new tests in Tests/base/NSCalendar hold the macOS results as tables:
+features-10-9.m (start of day in Sao Paulo, Havana, Apia and New York,
+weekends, components and nanoseconds, differences, granularity,
+ordinality, identifiers, NSDateComponents validity and equality) and
+nextDate.m (139 searches through daylight saving gaps and repeats, short
+months and leap days, forwards and backwards, with every matching
+option, and the enumeration, -dateBySetting... and -date:matches...
+methods).  Without this change they fail; with it the 503 new tests and
+the existing NSCalendar, NSCalendarDate, NSDateComponents, NSDate,
+NSDateFormatter, NSLocale, NSTimeZone and NSKeyedArchiver tests pass.
+
+Not done: the calendar's symbol properties (eraSymbols, monthSymbols and
+so on), NSCalendarDayChangedNotification, and macOS 15's
+NSCalendarUnitDayOfYear.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Headers/Foundation/NSCalendar.h       |  183 ++-
+ Source/NSCalendar.m                   | 1889 ++++++++++++++++++++-----
+ Source/externs.m                      |   10 +-
+ Tests/base/NSCalendar/features-10-9.m |  848 +++++++++++
+ Tests/base/NSCalendar/nextDate.m      | 1115 +++++++++++++++
+ 5 files changed, 3710 insertions(+), 335 deletions(-)
+ create mode 100644 Tests/base/NSCalendar/features-10-9.m
+ create mode 100644 Tests/base/NSCalendar/nextDate.m
+
+diff --git a/Headers/Foundation/NSCalendar.h b/Headers/Foundation/NSCalendar.h
+index 07951fa46..673e53be6 100644
+--- a/Headers/Foundation/NSCalendar.h
++++ b/Headers/Foundation/NSCalendar.h
+@@ -30,6 +30,7 @@
+ 
+ #include <Foundation/NSObject.h>
+ #include <Foundation/NSGeometry.h>
++#import <GNUstepBase/GSBlocks.h>
+ 
+ @class NSDate;
+ @class NSCalendar;
+@@ -63,7 +64,6 @@ GS_EXPORT NSString *const NSCalendarIdentifierIslamicUmmAlQura;
+ #endif
+ 
+ // NSCalendarOptions enum
+-// These values are currently NOT supported in this NSCalendar implementation.
+ #if OS_API_VERSION(MAC_OS_X_VERSION_10_9, GS_API_LATEST)
+ typedef NSUInteger NSCalendarOptions;
+ enum
+@@ -104,6 +104,8 @@ enum
+   NSWeekOfMonthCalendarUnit = (1UL << 12),
+   NSWeekOfYearCalendarUnit = (1UL << 13),
+   NSYearForWeekOfYearCalendarUnit = (1UL << 14),
++  NSCalendarCalendarUnit = (1UL << 20),
++  NSTimeZoneCalendarUnit = (1UL << 21),
+ #endif
+ };
+ 
+@@ -129,8 +131,8 @@ enum
+   NSCalendarUnitWeekOfYear = (1UL << 13),
+   NSCalendarUnitYearForWeekOfYear = (1UL << 14),
+   NSCalendarUnitNanosecond = (1 << 15),
+-  NSCalendarUnitCalendar = (1 << 20), // FIXME: unimplemented
+-  NSCalendarUnitTimeZone = (1 << 21) // FIXME: unimplemented
++  NSCalendarUnitCalendar = (1 << 20),
++  NSCalendarUnitTimeZone = (1 << 21)
+ #endif
+ };
+ 
+@@ -233,6 +235,7 @@ GS_EXPORT_CLASS
+ #endif
+ 
+ #if OS_API_VERSION(MAC_OS_X_VERSION_10_8, GS_API_LATEST)
++- (BOOL) isLeapMonth;
+ - (BOOL) leapMonth;
+ - (void) setLeapMonth: (BOOL)v;
+ #endif
+@@ -248,6 +251,10 @@ GS_EXPORT_CLASS
+ 
+ 
+ 
++#if OS_API_VERSION(MAC_OS_X_VERSION_10_9, GS_API_LATEST)
++DEFINE_BLOCK_TYPE(GSCalendarEnumerationBlock, void, NSDate*, BOOL, BOOL*);
++#endif
++
+ GS_EXPORT_CLASS
+ @interface NSCalendar : NSObject <NSCoding, NSCopying>
+ {
+@@ -357,6 +364,11 @@ GS_EXPORT_CLASS
+ /**
+  * Returns the minimum range of unit.
+  */
++- (NSRange) minimumRangeOfUnit: (NSCalendarUnit)unit;
++
++/**
++ * Obsolete spelling of -minimumRangeOfUnit:.
++ */
+ - (NSRange) minimumRangeofUnit: (NSCalendarUnit)unit;
+ 
+ /**
+@@ -421,6 +433,171 @@ yearForWeekOfYear: (NSInteger *)yearValuePointer
+  */
+ - (NSInteger) component: (NSCalendarUnit)unit 
+                fromDate: (NSDate *)date;
++
++/** Returns the date made of the given components, as
++ * -dateFromComponents: would.
++ */
++- (NSDate *) dateWithEra: (NSInteger)eraValue
++                    year: (NSInteger)yearValue
++                   month: (NSInteger)monthValue
++                     day: (NSInteger)dayValue
++                    hour: (NSInteger)hourValue
++                  minute: (NSInteger)minuteValue
++                  second: (NSInteger)secondValue
++              nanosecond: (NSInteger)nanosecondValue;
++
++/** Returns the date made of the given week-based components, as
++ * -dateFromComponents: would.
++ */
++- (NSDate *) dateWithEra: (NSInteger)eraValue
++       yearForWeekOfYear: (NSInteger)yearValue
++              weekOfYear: (NSInteger)weekValue
++                 weekday: (NSInteger)weekdayValue
++                    hour: (NSInteger)hourValue
++                  minute: (NSInteger)minuteValue
++                  second: (NSInteger)secondValue
++              nanosecond: (NSInteger)nanosecondValue;
++
++/** Returns the first moment of the day containing date.  Where the day
++ * has no midnight, that is the first moment which exists; where it has
++ * two, the first of them.
++ */
++- (NSDate *) startOfDayForDate: (NSDate *)date;
++
++/** Returns all the components of date, as if the receiver were in the
++ * time zone timezone, with the calendar and time zone set.
++ */
++- (NSDateComponents *) componentsInTimeZone: (NSTimeZone *)timezone
++                                   fromDate: (NSDate *)date;
++
++/** Compares two dates down to the given unit; smaller units are ignored.
++ */
++- (NSComparisonResult) compareDate: (NSDate *)date1
++                            toDate: (NSDate *)date2
++                 toUnitGranularity: (NSCalendarUnit)unit;
++
++/** Returns YES when -compareDate:toDate:toUnitGranularity: returns
++ * NSOrderedSame.
++ */
++- (BOOL) isDate: (NSDate *)date1
++    equalToDate: (NSDate *)date2
++toUnitGranularity: (NSCalendarUnit)unit;
++
++/** Returns YES when the two dates fall on the same day.
++ */
++- (BOOL) isDate: (NSDate *)date1 inSameDayAsDate: (NSDate *)date2;
++
++/** Returns YES when date falls on the current day.
++ */
++- (BOOL) isDateInToday: (NSDate *)date;
++
++/** Returns YES when date falls on the day before the current day.
++ */
++- (BOOL) isDateInYesterday: (NSDate *)date;
++
++/** Returns YES when date falls on the day after the current day.
++ */
++- (BOOL) isDateInTomorrow: (NSDate *)date;
++
++/** Returns YES when date falls within a weekend of the receiver's locale.
++ */
++- (BOOL) isDateInWeekend: (NSDate *)date;
++
++/** Returns by reference the start and length of the weekend containing
++ * date, or NO when date is not in a weekend.
++ */
++- (BOOL) rangeOfWeekendStartDate: (NSDate **)datep
++                        interval: (NSTimeInterval *)tip
++                  containingDate: (NSDate *)date;
++
++/** Returns by reference the start and length of the next weekend after
++ * date (or the one before it with NSCalendarSearchBackwards).  A weekend
++ * containing date is not returned.
++ */
++- (BOOL) nextWeekendStartDate: (NSDate **)datep
++                     interval: (NSTimeInterval *)tip
++                      options: (NSCalendarOptions)options
++                    afterDate: (NSDate *)date;
++
++/** Returns the difference between the dates the two sets of components
++ * describe, in the given units.
++ */
++- (NSDateComponents *) components: (NSCalendarUnit)unitFlags
++               fromDateComponents: (NSDateComponents *)startingDateComp
++                 toDateComponents: (NSDateComponents *)resultDateComp
++                          options: (NSCalendarOptions)options;
++
++/** Returns date with value added to the given unit.
++ */
++- (NSDate *) dateByAddingUnit: (NSCalendarUnit)unit
++                        value: (NSInteger)value
++                       toDate: (NSDate *)date
++                      options: (NSCalendarOptions)options;
++
++/** Calls block with each date after start (or before it, with
++ * NSCalendarSearchBackwards) which matches comps, until the block sets
++ * its last argument to YES.  The options choose what is returned where
++ * no date matches exactly: see -nextDateAfterDate:matchingComponents:options:
++ */
++- (void) enumerateDatesStartingAfterDate: (NSDate *)start
++                      matchingComponents: (NSDateComponents *)comps
++                                 options: (NSCalendarOptions)opts
++                              usingBlock: (GSCalendarEnumerationBlock)block;
++
++/** Returns the first date after date (or before it, with
++ * NSCalendarSearchBackwards) which matches comps.  Units smaller than the
++ * largest one set in comps and not set themselves take their smallest
++ * value.<br />
++ * With NSCalendarMatchStrictly the search goes on until an exact match.
++ * Otherwise, where the match does not exist (a day of the month the month
++ * does not have, a time skipped by a daylight saving change), the result
++ * is the next moment which exists (NSCalendarMatchNextTime), or the next
++ * or previous existing value of the missing unit with the smaller units
++ * kept (NSCalendarMatchNextTimePreservingSmallerUnits,
++ * NSCalendarMatchPreviousTimePreservingSmallerUnits).  Of two matching
++ * times, the first is returned, or the last with NSCalendarMatchLast.
++ */
++- (NSDate *) nextDateAfterDate: (NSDate *)date
++            matchingComponents: (NSDateComponents *)comps
++                       options: (NSCalendarOptions)options;
++
++/** Returns the first date after date matching a single unit's value.
++ */
++- (NSDate *) nextDateAfterDate: (NSDate *)date
++                  matchingUnit: (NSCalendarUnit)unit
++                         value: (NSInteger)value
++                       options: (NSCalendarOptions)options;
++
++/** Returns the first date after date with the given time of day;
++ * NSDateComponentUndefined leaves a value unset.
++ */
++- (NSDate *) nextDateAfterDate: (NSDate *)date
++                  matchingHour: (NSInteger)hourValue
++                        minute: (NSInteger)minuteValue
++                        second: (NSInteger)secondValue
++                       options: (NSCalendarOptions)options;
++
++/** Returns date with the given unit set to v: date itself when the unit
++ * already has that value, otherwise the next date which has it.
++ */
++- (NSDate *) dateBySettingUnit: (NSCalendarUnit)unit
++                         value: (NSInteger)v
++                        ofDate: (NSDate *)date
++                       options: (NSCalendarOptions)opts;
++
++/** Returns the moment on the day of date with the given time of day, or
++ * the next one which exists.
++ */
++- (NSDate *) dateBySettingHour: (NSInteger)h
++                        minute: (NSInteger)m
++                        second: (NSInteger)s
++                        ofDate: (NSDate *)date
++                       options: (NSCalendarOptions)opts;
++
++/** Returns YES when every component set in components has the same value
++ * in date.
++ */
++- (BOOL) date: (NSDate *)date matchesComponents: (NSDateComponents *)components;
+ #endif
+ 
+ @end
+diff --git a/Source/NSCalendar.m b/Source/NSCalendar.m
+index 6c3d6bea4..a6be693c0 100644
+--- a/Source/NSCalendar.m
++++ b/Source/NSCalendar.m
+@@ -22,6 +22,7 @@
+ */
+ 
+ #import "common.h"
++#import "Foundation/NSAutoreleasePool.h"
+ #import "Foundation/NSCalendar.h"
+ #import "Foundation/NSCoder.h"
+ #import "Foundation/NSDate.h"
+@@ -30,6 +31,7 @@
+ #import "Foundation/NSLocale.h"
+ #import "Foundation/NSLock.h"
+ #import "Foundation/NSNotification.h"
++#import "Foundation/NSSet.h"
+ #import "Foundation/NSString.h"
+ #import "Foundation/NSTimeZone.h"
+ #import "Foundation/NSUserDefaults.h"
+@@ -150,11 +152,643 @@ - (void) _setLocaleIdentifier: (NSString*)identifier;
+ 
+ static NSCalendar *autoupdatingCalendar = nil;
+ static NSRecursiveLock *classLock = nil;
++static NSSet *knownIdentifiers = nil;
+ 
+ #define TZ_NAME_LENGTH 1024
+ #define SECOND_TO_MILLI 1000.0
+ #define MILLI_TO_NANO 1000000
+ 
++#if GS_USE_ICU == 1
++#define	UNDEF	NSDateComponentUndefined
++
++static inline UDate
++_udate(NSDate *date)
++{
++  return (UDate)floor([date timeIntervalSince1970] * SECOND_TO_MILLI);
++}
++
++static NSInteger
++_nanosecond(NSDate *date)
++{
++  NSTimeInterval	t = [date timeIntervalSinceReferenceDate];
++
++  return (NSInteger)((t - floor(t)) * 1000000000.0);
++}
++
++static NSDateComponents *
++_components(UCalendar *cal, NSUInteger unitFlags, NSDate *date,
++  NSCalendar *calendar, NSTimeZone *tz)
++{
++  NSDateComponents *comps;
++  UErrorCode err = U_ZERO_ERROR;
++
++  ucal_setMillis(cal, _udate(date), &err);
++  if (U_FAILURE(err))
++    {
++      return nil;
++    }
++
++  comps = [[NSDateComponents alloc] init];
++  if (unitFlags & NSCalendarUnitEra)
++    {
++      [comps setEra: ucal_get(cal, UCAL_ERA, &err)];
++    }
++  if (unitFlags & NSCalendarUnitYear)
++    {
++      [comps setYear: ucal_get(cal, UCAL_YEAR, &err)];
++    }
++  if (unitFlags & NSCalendarUnitMonth)
++    {
++      [comps setMonth: ucal_get(cal, UCAL_MONTH, &err) + 1];
++      [comps setLeapMonth: ucal_get(cal, UCAL_IS_LEAP_MONTH, &err) != 0];
++    }
++  if (unitFlags & NSCalendarUnitDay)
++    {
++      [comps setDay: ucal_get(cal, UCAL_DAY_OF_MONTH, &err)];
++    }
++  if (unitFlags & NSCalendarUnitHour)
++    {
++      [comps setHour: ucal_get(cal, UCAL_HOUR_OF_DAY, &err)];
++    }
++  if (unitFlags & NSCalendarUnitMinute)
++    {
++      [comps setMinute: ucal_get(cal, UCAL_MINUTE, &err)];
++    }
++  if (unitFlags & NSCalendarUnitSecond)
++    {
++      [comps setSecond: ucal_get(cal, UCAL_SECOND, &err)];
++    }
++  if (unitFlags & (NSWeekCalendarUnit | NSCalendarUnitWeekOfYear))
++    {
++      [comps setWeek: ucal_get(cal, UCAL_WEEK_OF_YEAR, &err)];
++    }
++  if (unitFlags & NSCalendarUnitWeekday)
++    {
++      [comps setWeekday: ucal_get(cal, UCAL_DAY_OF_WEEK, &err)];
++    }
++  if (unitFlags & NSCalendarUnitWeekdayOrdinal)
++    {
++      [comps setWeekdayOrdinal:
++               ucal_get(cal, UCAL_DAY_OF_WEEK_IN_MONTH, &err)];
++    }
++  if (unitFlags & NSCalendarUnitQuarter)
++    {
++      [comps setQuarter: (ucal_get(cal, UCAL_MONTH, &err) + 3) / 3];
++    }
++  if (unitFlags & NSCalendarUnitWeekOfMonth)
++    {
++      [comps setWeekOfMonth: ucal_get(cal, UCAL_WEEK_OF_MONTH, &err)];
++    }
++  if (unitFlags & NSCalendarUnitYearForWeekOfYear)
++    {
++      [comps setYearForWeekOfYear: ucal_get(cal, UCAL_YEAR_WOY, &err)];
++    }
++  if (unitFlags & NSCalendarUnitNanosecond)
++    {
++      [comps setNanosecond: _nanosecond(date)];
++    }
++  if (unitFlags & NSCalendarUnitCalendar)
++    {
++      [comps setCalendar: calendar];
++    }
++  if (unitFlags & NSCalendarUnitTimeZone)
++    {
++      [comps setTimeZone: tz];
++    }
++  if (U_FAILURE(err))
++    {
++      RELEASE(comps);
++      return nil;
++    }
++  return AUTORELEASE(comps);
++}
++
++/* The fields of one day, for the searches over days. */
++typedef struct {
++  int32_t	jd;
++  int32_t	era;
++  int32_t	year;
++  int32_t	month;		/* 1-based */
++  int32_t	day;
++  int32_t	weekday;
++  int32_t	weekdayOrdinal;
++  int32_t	weekOfMonth;
++  int32_t	weekOfYear;
++  int32_t	yearForWeekOfYear;
++  int32_t	dayOfYear;
++  int32_t	monthLength;
++  int32_t	yearLength;
++} GSDay;
++
++static void
++_day(UCalendar *cal, int32_t jd, GSDay *d)
++{
++  UErrorCode err = U_ZERO_ERROR;
++
++  ucal_clear(cal);
++  ucal_set(cal, UCAL_JULIAN_DAY, jd);
++  d->jd = jd;
++  d->era = ucal_get(cal, UCAL_ERA, &err);
++  d->year = ucal_get(cal, UCAL_YEAR, &err);
++  d->month = ucal_get(cal, UCAL_MONTH, &err) + 1;
++  d->day = ucal_get(cal, UCAL_DAY_OF_MONTH, &err);
++  d->weekday = ucal_get(cal, UCAL_DAY_OF_WEEK, &err);
++  d->weekdayOrdinal = ucal_get(cal, UCAL_DAY_OF_WEEK_IN_MONTH, &err);
++  d->weekOfMonth = ucal_get(cal, UCAL_WEEK_OF_MONTH, &err);
++  d->weekOfYear = ucal_get(cal, UCAL_WEEK_OF_YEAR, &err);
++  d->yearForWeekOfYear = ucal_get(cal, UCAL_YEAR_WOY, &err);
++  d->dayOfYear = ucal_get(cal, UCAL_DAY_OF_YEAR, &err);
++  d->monthLength = ucal_getLimit(cal, UCAL_DAY_OF_MONTH,
++    UCAL_ACTUAL_MAXIMUM, &err);
++  d->yearLength = ucal_getLimit(cal, UCAL_DAY_OF_YEAR,
++    UCAL_ACTUAL_MAXIMUM, &err);
++}
++
++/* The local day containing a moment, as a Julian day number. */
++static int32_t
++_julianDay(UCalendar *cal, UDate udate)
++{
++  UErrorCode err = U_ZERO_ERROR;
++
++  ucal_setMillis(cal, udate, &err);
++  return ucal_get(cal, UCAL_JULIAN_DAY, &err);
++}
++
++/* The wall time h:m:s on day jd; *exists says whether the clock shows it. */
++static UDate
++_wallTime(UCalendar *cal, int32_t jd, int32_t h, int32_t m, int32_t s,
++  UCalendarWallTimeOption skipped, UCalendarWallTimeOption repeated,
++  BOOL *exists)
++{
++  UErrorCode	err = U_ZERO_ERROR;
++  UDate		udate;
++
++  ucal_setAttribute(cal, UCAL_SKIPPED_WALL_TIME, skipped);
++  ucal_setAttribute(cal, UCAL_REPEATED_WALL_TIME, repeated);
++  ucal_clear(cal);
++  ucal_set(cal, UCAL_JULIAN_DAY, jd);
++  ucal_set(cal, UCAL_HOUR_OF_DAY, h);
++  ucal_set(cal, UCAL_MINUTE, m);
++  ucal_set(cal, UCAL_SECOND, s);
++  udate = ucal_getMillis(cal, &err);
++  ucal_setAttribute(cal, UCAL_SKIPPED_WALL_TIME, UCAL_WALLTIME_LAST);
++  ucal_setAttribute(cal, UCAL_REPEATED_WALL_TIME, UCAL_WALLTIME_FIRST);
++  if (exists != NULL)
++    {
++      ucal_setMillis(cal, udate, &err);
++      *exists = (ucal_get(cal, UCAL_JULIAN_DAY, &err) == jd
++        && ucal_get(cal, UCAL_HOUR_OF_DAY, &err) == h
++        && ucal_get(cal, UCAL_MINUTE, &err) == m
++        && ucal_get(cal, UCAL_SECOND, &err) == s);
++    }
++  return udate;
++}
++
++/* The first moment of day jd, which need not be midnight. */
++static UDate
++_startOfDay(UCalendar *cal, int32_t jd)
++{
++  return _wallTime(cal, jd, 0, 0, 0,
++    UCAL_WALLTIME_LAST, UCAL_WALLTIME_FIRST, NULL);
++}
++
++/* What a search for a date matching components looks for. */
++typedef struct {
++  NSInteger	era;
++  NSInteger	year;
++  NSInteger	quarter;
++  NSInteger	month;
++  NSInteger	day;
++  NSInteger	weekday;
++  NSInteger	weekdayOrdinal;
++  NSInteger	weekOfMonth;
++  NSInteger	weekOfYear;
++  NSInteger	yearForWeekOfYear;
++  NSInteger	hour;
++  NSInteger	minute;
++  NSInteger	second;
++  NSInteger	nanosecond;
++  BOOL		hasDay;
++  BOOL		hasTime;
++  BOOL		backwards;
++  BOOL		last;
++  enum { GSMatchStrictly, GSMatchNextTime, GSMatchNextPreserving,
++    GSMatchPreviousPreserving } policy;
++  int32_t	firstWeekday;
++  int32_t	keepHour;
++  int32_t	keepMinute;
++  int32_t	keepSecond;
++} GSMatch;
++
++static BOOL
++_inRange(NSInteger v, NSInteger lo, NSInteger hi)
++{
++  return v == UNDEF || (v >= lo && v <= hi);
++}
++
++static BOOL
++_setUpMatch(GSMatch *m, NSDateComponents *comps, NSCalendarOptions opts)
++{
++  m->era = [comps era];
++  m->year = [comps year];
++  m->quarter = [comps quarter];
++  m->month = [comps month];
++  m->day = [comps day];
++  m->weekday = [comps weekday];
++  m->weekdayOrdinal = [comps weekdayOrdinal];
++  m->weekOfMonth = [comps weekOfMonth];
++  m->weekOfYear = [comps weekOfYear];
++  m->yearForWeekOfYear = [comps yearForWeekOfYear];
++  m->hour = [comps hour];
++  m->minute = [comps minute];
++  m->second = [comps second];
++  m->nanosecond = [comps nanosecond];
++  m->hasDay = (m->era != UNDEF || m->year != UNDEF || m->quarter != UNDEF
++    || m->month != UNDEF || m->day != UNDEF || m->weekday != UNDEF
++    || m->weekdayOrdinal != UNDEF || m->weekOfMonth != UNDEF
++    || m->weekOfYear != UNDEF || m->yearForWeekOfYear != UNDEF);
++  m->hasTime = (m->hour != UNDEF || m->minute != UNDEF
++    || m->second != UNDEF || m->nanosecond != UNDEF);
++
++  if (opts & NSCalendarMatchStrictly)
++    m->policy = GSMatchStrictly;
++  else if (opts & NSCalendarMatchNextTimePreservingSmallerUnits)
++    m->policy = GSMatchNextPreserving;
++  else if (opts & NSCalendarMatchPreviousTimePreservingSmallerUnits)
++    m->policy = GSMatchPreviousPreserving;
++  else
++    m->policy = GSMatchNextTime;
++  m->backwards = (opts & NSCalendarSearchBackwards) ? YES : NO;
++  /* Searching backwards, the first of two matches met is the later. */
++  m->last = ((opts & NSCalendarMatchLast) ? YES : NO) != m->backwards;
++
++  return (m->hasDay || m->hasTime)
++    && _inRange(m->quarter, 1, 4) && _inRange(m->month, 1, 13)
++    && _inRange(m->day, 1, 31) && _inRange(m->weekday, 1, 7)
++    && _inRange(m->weekdayOrdinal, -6, 6) && _inRange(m->weekOfMonth, 0, 6)
++    && _inRange(m->weekOfYear, 1, 53) && _inRange(m->hour, 0, 23)
++    && _inRange(m->minute, 0, 59) && _inRange(m->second, 0, 59)
++    && _inRange(m->nanosecond, 0, 999999999);
++}
++
++#define	MISMATCH(f, v)	(m->f != UNDEF && m->f != (v))
++
++static BOOL
++_monthMatches(const GSMatch *m, const GSDay *d)
++{
++  return !MISMATCH(era, d->era) && !MISMATCH(year, d->year)
++    && !MISMATCH(month, d->month)
++    && !MISMATCH(quarter, (d->month + 2) / 3);
++}
++
++static BOOL
++_dayMatches(const GSMatch *m, const GSDay *d)
++{
++  return _monthMatches(m, d) && !MISMATCH(day, d->day)
++    && !MISMATCH(weekday, d->weekday)
++    && !MISMATCH(weekdayOrdinal, d->weekdayOrdinal)
++    && !MISMATCH(weekOfMonth, d->weekOfMonth)
++    && !MISMATCH(weekOfYear, d->weekOfYear)
++    && !MISMATCH(yearForWeekOfYear, d->yearForWeekOfYear);
++}
++
++/* The next day worth trying after d, which does not match. */
++static int32_t
++_skip(const GSMatch *m, const GSDay *d)
++{
++  int32_t	jd = d->jd;
++  int32_t	toWeek;
++
++  if (m->backwards)
++    {
++      if (MISMATCH(era, d->era) || MISMATCH(weekday, d->weekday)
++        || MISMATCH(weekdayOrdinal, d->weekdayOrdinal))
++        return jd - 1;
++      if (MISMATCH(year, d->year))
++        return jd - d->dayOfYear;
++      if (MISMATCH(month, d->month) || MISMATCH(quarter, (d->month + 2) / 3))
++        return jd - d->day;
++      if (MISMATCH(day, d->day))
++        return (d->day > m->day) ? jd - (d->day - m->day) : jd - d->day;
++      toWeek = (d->weekday - m->firstWeekday + 7) % 7 + 1;
++      if (MISMATCH(weekOfMonth, d->weekOfMonth))
++        return jd - ((toWeek < d->day) ? toWeek : d->day);
++      return jd - toWeek;
++    }
++  if (MISMATCH(era, d->era) || MISMATCH(weekday, d->weekday)
++    || MISMATCH(weekdayOrdinal, d->weekdayOrdinal))
++    return jd + 1;
++  if (MISMATCH(year, d->year))
++    return jd + d->yearLength - d->dayOfYear + 1;
++  if (MISMATCH(month, d->month) || MISMATCH(quarter, (d->month + 2) / 3))
++    return jd + d->monthLength - d->day + 1;
++  if (MISMATCH(day, d->day))
++    return (d->day < m->day && m->day <= d->monthLength)
++      ? jd + (m->day - d->day) : jd + d->monthLength - d->day + 1;
++  toWeek = (m->firstWeekday - d->weekday + 6) % 7 + 1;
++  if (MISMATCH(weekOfMonth, d->weekOfMonth)
++    && d->monthLength - d->day + 1 < toWeek)
++    return jd + d->monthLength - d->day + 1;
++  return jd + toWeek;
++}
++
++/* Whether t is on the searched side of the start. */
++static inline BOOL
++_beyond(const GSMatch *m, UDate t, UDate start)
++{
++  return m->backwards ? (t < start) : (t > start);
++}
++
++/* The match on day jd beyond start, if there is one. */
++static BOOL
++_matchOnDay(UCalendar *cal, const GSMatch *m, int32_t jd, UDate start,
++  UDate *result, BOOL *exact)
++{
++  double	ns = (m->nanosecond == UNDEF) ? 0.0 : m->nanosecond / 1.0e6;
++  UDate		udate;
++
++  if (m->hasDay || m->hour != UNDEF)
++    {
++      BOOL	exists = YES;
++
++      if (!m->hasTime)
++        {
++          udate = _startOfDay(cal, jd);
++        }
++      else
++        {
++          UCalendarWallTimeOption skipped;
++
++          switch (m->policy)
++            {
++              case GSMatchNextTime:
++                skipped = UCAL_WALLTIME_NEXT_VALID;
++                break;
++              case GSMatchPreviousPreserving:
++                skipped = UCAL_WALLTIME_FIRST;
++                break;
++              default:
++                skipped = UCAL_WALLTIME_LAST;
++                break;
++            }
++          udate = _wallTime(cal, jd,
++            (m->hour == UNDEF) ? 0 : m->hour,
++            (m->minute == UNDEF) ? 0 : m->minute,
++            (m->second == UNDEF) ? 0 : m->second, skipped,
++            m->last ? UCAL_WALLTIME_LAST : UCAL_WALLTIME_FIRST, &exists);
++          if (exists)
++            {
++              udate += ns;
++            }
++          else if (m->policy == GSMatchStrictly)
++            {
++              return NO;
++            }
++        }
++      if (!_beyond(m, udate, start))
++        {
++          return NO;
++        }
++      *result = udate;
++      *exact = exists;
++      return YES;
++    }
++  else
++    {
++      UErrorCode	err = U_ZERO_ERROR;
++      UDate		base = _startOfDay(cal, jd);
++      UDate		end = _startOfDay(cal, jd + 1);
++      double		step;
++      double		offset;
++      double		k;
++
++      if (m->minute != UNDEF)
++        {
++          step = 3600000.0;
++          offset = m->minute * 60000.0
++            + ((m->second == UNDEF) ? 0 : m->second * 1000.0) + ns;
++        }
++      else if (m->second != UNDEF)
++        {
++          step = 60000.0;
++          offset = m->second * 1000.0 + ns;
++        }
++      else
++        {
++          step = 1000.0;
++          offset = ns;
++        }
++      k = floor(((m->backwards ? ((start < end) ? start : end) : start)
++        - base - offset) / step);
++      if (k < 0)
++        {
++          k = m->backwards ? -1 : 0;
++        }
++      while (k >= 0)
++        {
++          udate = base + k * step + offset;
++          if (udate >= end)
++            {
++              if (!m->backwards)
++                {
++                  break;
++                }
++            }
++          else if (_beyond(m, udate, start))
++            {
++              ucal_setMillis(cal, floor(udate), &err);
++              if ((m->minute == UNDEF
++                || ucal_get(cal, UCAL_MINUTE, &err) == m->minute)
++                && (m->second == UNDEF
++                || ucal_get(cal, UCAL_SECOND, &err) == m->second))
++                {
++                  *result = udate;
++                  *exact = YES;
++                  return YES;
++                }
++            }
++          k += m->backwards ? -1 : 1;
++        }
++      return NO;
++    }
++}
++
++/* What stands in for a day of the month which month d has not got. */
++static UDate
++_missingDay(UCalendar *cal, const GSMatch *m, const GSDay *d)
++{
++  int32_t	jd;
++
++  if (m->policy == GSMatchNextTime)
++    {
++      return _startOfDay(cal, d->jd - d->day + d->monthLength + 1);
++    }
++  jd = d->jd - d->day + d->monthLength;
++  if (m->policy == GSMatchNextPreserving)
++    {
++      jd++;
++    }
++  return _wallTime(cal, jd,
++    (m->hour == UNDEF) ? m->keepHour : m->hour,
++    (m->minute == UNDEF) ? m->keepMinute : m->minute,
++    (m->second == UNDEF) ? m->keepSecond : m->second,
++    UCAL_WALLTIME_LAST, UCAL_WALLTIME_FIRST, NULL)
++    + ((m->nanosecond == UNDEF) ? 0.0 : m->nanosecond / 1.0e6);
++}
++
++#define	GS_SEARCH_LIMIT	20000
++
++/* The first date after (or before) start which matches m. */
++static BOOL
++_search(UCalendar *cal, const GSMatch *m, UDate start, UDate *result,
++  BOOL *exact)
++{
++  BOOL		mayMiss;
++  BOOL		pinned;
++  int32_t	jd;
++  int32_t	monthChecked = 0;
++  int32_t	eraMax;
++  UErrorCode	err = U_ZERO_ERROR;
++  GSDay		d;
++  GSDay		prev;
++  int		n;
++
++  mayMiss = (m->policy != GSMatchStrictly && m->day != UNDEF
++    && m->weekday == UNDEF && m->weekdayOrdinal == UNDEF
++    && m->weekOfMonth == UNDEF && m->weekOfYear == UNDEF
++    && m->yearForWeekOfYear == UNDEF);
++  pinned = (m->day != UNDEF || m->weekday != UNDEF);
++  eraMax = ucal_getLimit(cal, UCAL_ERA, UCAL_MAXIMUM, &err);
++  jd = _julianDay(cal, start);
++  for (n = 0; n < GS_SEARCH_LIMIT; n++)
++    {
++      if (!m->hasDay)
++        {
++          if (_matchOnDay(cal, m, jd, start, result, exact))
++            {
++              return YES;
++            }
++          jd += m->backwards ? -1 : 1;
++          continue;
++        }
++
++      _day(cal, jd, &d);
++      if (mayMiss && d.jd - d.day != monthChecked)
++        {
++          monthChecked = d.jd - d.day;
++          if (m->day > d.monthLength && _monthMatches(m, &d))
++            {
++              UDate	udate = _missingDay(cal, m, &d);
++
++              if (_beyond(m, udate, start))
++                {
++                  *result = udate;
++                  *exact = NO;
++                  return YES;
++                }
++            }
++        }
++      if (!_dayMatches(m, &d))
++        {
++          /* Years only go one way in a calendar of one era. */
++          if (m->year != UNDEF && eraMax <= 1 && d.era == 1
++            && !MISMATCH(era, 1)
++            && (m->backwards ? d.year < m->year : d.year > m->year))
++            {
++              return NO;
++            }
++          jd = _skip(m, &d);
++          continue;
++        }
++      if (!pinned)
++        {
++          _day(cal, jd - 1, &prev);
++          if (_dayMatches(m, &prev))
++            {
++              jd += m->backwards ? -1 : 1;
++              continue;
++            }
++        }
++      if (_matchOnDay(cal, m, jd, start, result, exact))
++        {
++          return YES;
++        }
++      jd += m->backwards ? -1 : 1;
++    }
++  return NO;
++}
++
++/* Whether the day jd is (at least partly) in a weekend. */
++static BOOL
++_isWeekendDay(UCalendar *cal, int32_t jd)
++{
++  UErrorCode	err = U_ZERO_ERROR;
++  GSDay		d;
++
++  _day(cal, jd, &d);
++  return ucal_getDayOfWeekType(cal, d.weekday, &err) != UCAL_WEEKDAY
++    && U_SUCCESS(err);
++}
++
++/* The first day of the unit containing d, and the first day after it. */
++static BOOL
++_unitDays(UCalendar *cal, NSCalendarUnit unit, const GSDay *d,
++  int32_t firstWeekday, int32_t *first, int32_t *next)
++{
++  GSDay		o;
++  int		i;
++
++  switch (unit)
++    {
++      case NSCalendarUnitDay:
++      case NSCalendarUnitWeekday:
++      case NSCalendarUnitWeekdayOrdinal:
++        *first = d->jd;
++        *next = d->jd + 1;
++        return YES;
++      case NSCalendarUnitWeekOfYear:
++      case NSCalendarUnitWeekOfMonth:
++        *first = d->jd - (d->weekday - firstWeekday + 7) % 7;
++        *next = *first + 7;
++        return YES;
++      case NSCalendarUnitMonth:
++        *first = d->jd - d->day + 1;
++        *next = *first + d->monthLength;
++        return YES;
++      case NSCalendarUnitQuarter:
++        *first = d->jd - d->day + 1;
++        for (i = (d->month - 1) % 3; i > 0; i--)
++          {
++            _day(cal, *first - 1, &o);
++            *first -= o.monthLength;
++          }
++        *next = *first;
++        for (i = 0; i < 3; i++)
++          {
++            _day(cal, *next, &o);
++            *next += o.monthLength;
++          }
++        return YES;
++      case NSCalendarUnitYear:
++        *first = d->jd - d->dayOfYear + 1;
++        *next = *first + d->yearLength;
++        return YES;
++      case NSCalendarUnitYearForWeekOfYear:
++        *first = d->jd - (d->weekday - firstWeekday + 7) % 7
++          - 7 * (d->weekOfYear - 1);
++        *next = *first + 7 * 52;
++        _day(cal, *next, &o);
++        if (o.yearForWeekOfYear == d->yearForWeekOfYear)
++          {
++            *next += 7;
++          }
++        return YES;
++      default:
++        return NO;
++    }
++}
++#endif /* GS_USE_ICU */
++
+ @implementation NSCalendar (PrivateMethods)
+ 
+ #if GS_USE_ICU == 1
+@@ -166,6 +800,7 @@ - (void*) _openCalendarFor: (NSTimeZone*)timeZone
+   const char *cLocaleId;
+   UErrorCode err = U_ZERO_ERROR;
+   UCalendarType type;
++  UCalendar *cal;
+ 
+   cLocaleId = [my->localeID UTF8String];
+   tzName = [timeZone name];
+@@ -195,7 +830,23 @@ - (void*) _openCalendarFor: (NSTimeZone*)timeZone
+       // as the calendar is already encoded in the locale id by _localeIDWithLocale:.
+     }
+ 
+-  return ucal_open((const UChar*)cTzId, tzLen, cLocaleId, type, &err);
++  cal = ucal_open((const UChar*)cTzId, tzLen, cLocaleId, type, &err);
++  if (U_FAILURE(err))
++    {
++      return NULL;
++    }
++  ucal_setAttribute(cal, UCAL_REPEATED_WALL_TIME, UCAL_WALLTIME_FIRST);
++  if (NSNotFound != my->firstWeekday)
++    {
++      ucal_setAttribute(cal, UCAL_FIRST_DAY_OF_WEEK,
++        (int32_t)my->firstWeekday);
++    }
++  if (NSNotFound != my->minimumDaysInFirstWeek)
++    {
++      ucal_setAttribute(cal, UCAL_MINIMAL_DAYS_IN_FIRST_WEEK,
++        (int32_t)my->minimumDaysInFirstWeek);
++    }
++  return cal;
+ }
+ #endif
+ 
+@@ -316,6 +967,21 @@ + (void) initialize
+ {
+   if (self == [NSCalendar class])
+     {
++#if GS_USE_ICU == 1
++      UErrorCode	err = U_ZERO_ERROR;
++      UEnumeration	*types;
++      NSMutableSet	*known = [NSMutableSet set];
++      const char	*type;
++
++      types = ucal_getKeywordValuesForLocale("calendar", "", 0, &err);
++      while (U_SUCCESS(err)
++        && (type = uenum_next(types, NULL, &err)) != NULL)
++        {
++          [known addObject: [NSString stringWithUTF8String: type]];
++        }
++      uenum_close(types);
++      knownIdentifiers = [known copy];
++#endif
+       classLock = [NSRecursiveLock new];
+     }
+ }
+@@ -363,6 +1029,12 @@ - (id) init
+ - (id) initWithCalendarIdentifier: (NSString*)identifier
+ {
+   NSAssert(0 == _NSCalendarInternal, NSInvalidArgumentException);
++  if (identifier != nil && knownIdentifiers != nil
++    && [knownIdentifiers containsObject: identifier] == NO)
++    {
++      DESTROY(self);
++      return nil;
++    }
+   _NSCalendarInternal = NSZoneCalloc([self zone], sizeof(Calendar), 1);
+ 
+   my->firstWeekday = NSNotFound;
+@@ -458,103 +1130,33 @@ - (NSDateComponents*) components: (NSUInteger) unitFlags
+                          fromDate: (NSDate*) date
+ {
+ #if GS_USE_ICU == 1
+-  NSDateComponents *comps;
+-  UErrorCode err = U_ZERO_ERROR;
+-  UDate udate;
++  return _components(my->cal, unitFlags, date, self, my->tz);
++#else
++  return nil;
++#endif
++}
+ 
+-  udate = (UDate)floor([date timeIntervalSince1970] * SECOND_TO_MILLI);
+-  ucal_setMillis(my->cal, udate, &err);
+-  if (U_FAILURE(err))
+-    {
+-      return nil;
+-    }
+-
+-  comps = [[NSDateComponents alloc] init];
+-  if (unitFlags & NSCalendarUnitEra)
+-    {
+-      [comps setEra: ucal_get(my->cal, UCAL_ERA, &err)];
+-    }
+-  if (unitFlags & NSCalendarUnitYear)
+-    {
+-      [comps setYear: ucal_get(my->cal, UCAL_YEAR, &err)];
+-    }
+-  if (unitFlags & NSCalendarUnitMonth)
+-    {
+-      [comps setMonth: ucal_get(my->cal, UCAL_MONTH, &err) + 1];
+-    }
+-  if (unitFlags & NSCalendarUnitDay)
+-    {
+-      [comps setDay: ucal_get(my->cal, UCAL_DAY_OF_MONTH, &err)];
+-    }
+-  if (unitFlags & NSCalendarUnitHour)
+-    {
+-      [comps setHour: ucal_get(my->cal, UCAL_HOUR_OF_DAY, &err)];
+-    }
+-  if (unitFlags & NSCalendarUnitMinute)
+-    {
+-      [comps setMinute: ucal_get(my->cal, UCAL_MINUTE, &err)];
+-    }
+-  if (unitFlags & NSCalendarUnitSecond)
+-    {
+-      [comps setSecond: ucal_get(my->cal, UCAL_SECOND, &err)];
+-    }
+-  if (unitFlags & (NSWeekCalendarUnit | NSCalendarUnitWeekOfYear))
+-    {
+-      [comps setWeek: ucal_get(my->cal, UCAL_WEEK_OF_YEAR, &err)];
+-    }
+-  if (unitFlags & NSCalendarUnitWeekday)
+-    {
+-      [comps setWeekday: ucal_get(my->cal, UCAL_DAY_OF_WEEK, &err)];
+-    }
+-  if (unitFlags & NSCalendarUnitWeekdayOrdinal)
+-    {
+-      [comps setWeekdayOrdinal:
+-               ucal_get(my->cal, UCAL_DAY_OF_WEEK_IN_MONTH, &err)];
+-    }
+-  if (unitFlags & NSCalendarUnitQuarter)
+-    {
+-      [comps setQuarter: (ucal_get(my->cal, UCAL_MONTH, &err) + 3) / 3];
+-    }
+-  if (unitFlags & NSCalendarUnitWeekOfMonth)
+-    {
+-      [comps setWeekOfMonth: ucal_get(my->cal, UCAL_WEEK_OF_MONTH, &err)];
+-    }
+-  if (unitFlags & NSCalendarUnitYearForWeekOfYear)
+-    {
+-      [comps setYearForWeekOfYear: ucal_get(my->cal, UCAL_YEAR_WOY, &err)];
+-    }
+-  if (unitFlags & NSCalendarUnitNanosecond)
+-    {
+-      [comps setNanosecond: ucal_get(my->cal, UCAL_MILLISECOND, &err) * MILLI_TO_NANO];
+-    }
+-
+-  return AUTORELEASE(comps);
+-#else
+-  return nil;
+-#endif
+-}
+-
+-/*
+- * Convenience macro for field extraction.
+- * TODO: We need to implement NSWrapCalendarComponents,
+- * but it is unclear how that actually works.
+- */
+-#define COMPONENT_DIFF( \
+-  cal, units, components, toDate, nsunit, setSel, uunit, err) \
+-do \
+-  { \
+-    if (nsunit == (units & nsunit)) \
+-      { \
+-        int32_t uunit ## Diff \
+-          = ucal_getFieldDifference(cal, toDate, uunit, &err); \
+-        if (U_FAILURE(err)) \
+-          { \
+-            RELEASE(components); \
+-            return nil; \
+-          } \
+-        [components setSel uunit ## Diff]; \
+-      } \
+-  } while (0)
++/*
++ * Convenience macro for field extraction.
++ * TODO: We need to implement NSWrapCalendarComponents,
++ * but it is unclear how that actually works.
++ */
++#define COMPONENT_DIFF( \
++  cal, units, components, toDate, nsunit, setSel, uunit, err) \
++do \
++  { \
++    if (nsunit == (units & nsunit)) \
++      { \
++        int32_t uunit ## Diff \
++          = ucal_getFieldDifference(cal, toDate, uunit, &err); \
++        if (U_FAILURE(err)) \
++          { \
++            RELEASE(components); \
++            return nil; \
++          } \
++        [components setSel uunit ## Diff]; \
++      } \
++  } while (0)
+ 
+ 
+ - (NSDateComponents*) components: (NSUInteger) unitFlags
+@@ -582,8 +1184,21 @@ - (NSDateComponents*) components: (NSUInteger) unitFlags
+    * the calendar as appropriate, we need to process the units from
+    * the largest to the smallest.
+    */
+-  COMPONENT_DIFF(my->cal, unitFlags, comps, udateTo,
+-    NSCalendarUnitEra, setEra:, UCAL_ERA, err);
++  if (unitFlags & NSCalendarUnitEra)
++    {
++      int32_t	era = ucal_get(my->cal, UCAL_ERA, &err);
++
++      /* ICU has no difference of eras: take the eras' numbers. */
++      ucal_setMillis(my->cal, udateTo, &err);
++      era = ucal_get(my->cal, UCAL_ERA, &err) - era;
++      ucal_setMillis(my->cal, udateFrom, &err);
++      if (U_FAILURE(err))
++        {
++          RELEASE(comps);
++          return nil;
++        }
++      [comps setEra: era];
++    }
+   COMPONENT_DIFF(my->cal, unitFlags, comps, udateTo,
+     NSCalendarUnitYear, setYear:, UCAL_YEAR, err);
+   COMPONENT_DIFF(my->cal, unitFlags, comps, udateTo,
+@@ -615,15 +1230,16 @@ - (NSDateComponents*) components: (NSUInteger) unitFlags
+     NSCalendarUnitSecond, setSecond:, UCAL_SECOND, err);
+   if (unitFlags & NSCalendarUnitNanosecond)
+     {
+-      int32_t ms;
++      UDate reached = ucal_getMillis(my->cal, &err);
+ 
+-      ms = ucal_getFieldDifference(my->cal, udateTo, UCAL_MILLISECOND, &err);
+-      if (U_FAILURE(err))
+-        {
+-          RELEASE(comps);
+-          return nil;
+-        }
+-      [comps setNanosecond: ms * MILLI_TO_NANO];
++      [comps setNanosecond: (NSInteger)round(1.0e9
++        * ([resultDate timeIntervalSince1970]
++        - [startingDate timeIntervalSince1970]
++        - (reached - udateFrom) / SECOND_TO_MILLI))];
++    }
++  if (unitFlags & NSCalendarUnitCalendar)
++    {
++      [comps setCalendar: self];
+     }
+ 
+   return AUTORELEASE(comps);
+@@ -702,16 +1318,16 @@ - (NSDate*) dateByAddingComponents: (NSDateComponents*) comps
+     {
+       _ADD_COMPONENT(UCAL_YEAR_WOY, (int32_t)amount);
+     }
+-  if ((amount = [comps nanosecond]) != NSDateComponentUndefined)
+-    {
+-      _ADD_COMPONENT(UCAL_MILLISECOND, (int32_t)(amount / MILLI_TO_NANO));
+-    }
+ 
+   udate = ucal_getMillis(my->cal, &err);
+   if (U_FAILURE(err))
+     {
+       return nil;
+     }
++  if ((amount = [comps nanosecond]) != NSDateComponentUndefined)
++    {
++      udate += amount / (double)MILLI_TO_NANO;
++    }
+ 
+   return [NSDate dateWithTimeIntervalSince1970: (udate / SECOND_TO_MILLI)];
+ #else
+@@ -790,9 +1406,9 @@ - (NSDate*) dateFromComponents: (NSDateComponents*) comps
+     {
+       ucal_set (cal, UCAL_YEAR_WOY, (int32_t)amount);
+     }
+-  if ((amount = [comps nanosecond]) != NSDateComponentUndefined)
++  if ([comps leapMonth])
+     {
+-      ucal_set (cal, UCAL_MILLISECOND, (int32_t)(amount / MILLI_TO_NANO));
++      ucal_set (cal, UCAL_IS_LEAP_MONTH, 1);
+     }
+ 
+   udate = ucal_getMillis(cal, &err);
+@@ -801,6 +1417,10 @@ - (NSDate*) dateFromComponents: (NSDateComponents*) comps
+     {
+       return nil;
+     }
++  if ((amount = [comps nanosecond]) != NSDateComponentUndefined)
++    {
++      udate += amount / (double)MILLI_TO_NANO;
++    }
+ 
+   return [NSDate dateWithTimeIntervalSince1970: (udate / SECOND_TO_MILLI)];
+ #else
+@@ -833,273 +1453,813 @@ - (void) setFirstWeekday: (NSUInteger)weekday
+ #endif
+ }
+ 
+-- (NSUInteger) minimumDaysInFirstWeek
++- (NSUInteger) minimumDaysInFirstWeek
++{
++  return my->minimumDaysInFirstWeek;
++}
++
++- (void) setMinimumDaysInFirstWeek: (NSUInteger)mdw
++{
++  my->minimumDaysInFirstWeek = (int32_t)mdw;
++#if GS_USE_ICU == 1
++  ucal_setAttribute(my->cal, UCAL_MINIMAL_DAYS_IN_FIRST_WEEK,
++    my->minimumDaysInFirstWeek);
++#endif
++}
++
++- (NSTimeZone*) timeZone
++{
++  return my->tz;
++}
++
++- (void) setTimeZone: (NSTimeZone*) tz
++{
++  if ([tz isEqual: my->tz])
++    {
++      return;
++    }
++
++  ASSIGN(my->tz, tz);
++  [self _resetCalendar];
++}
++
++- (NSRange) maximumRangeOfUnit: (NSCalendarUnit) unit
++{
++  NSRange result = NSMakeRange (0, 0);
++#if GS_USE_ICU == 1
++  UCalendarDateFields dateField;
++  UErrorCode err = U_ZERO_ERROR;
++
++  [self _resetCalendar];
++  dateField = _NSCalendarUnitToDateField(unit);
++  if (dateField != (UCalendarDateFields)-1)
++    {
++      // We really don't care if there are any errors...
++      result.location =
++        (NSUInteger)ucal_getLimit(my->cal, dateField, UCAL_MINIMUM, &err);
++      result.length =
++        (NSUInteger)ucal_getLimit(my->cal, dateField, UCAL_MAXIMUM, &err)
++        - result.location + 1;
++      // ICU's month is 0-based, while NSCalendar is 1-based
++      if (dateField == UCAL_MONTH)
++        {
++          result.location += 1;
++        }
++    }
++#endif
++
++  return result;
++}
++
++- (NSRange) minimumRangeofUnit: (NSCalendarUnit) unit
++{
++  return [self minimumRangeOfUnit: unit];
++}
++
++- (NSRange) minimumRangeOfUnit: (NSCalendarUnit) unit
++{
++  NSRange result = NSMakeRange (0, 0);
++#if GS_USE_ICU == 1
++  UCalendarDateFields dateField;
++  UErrorCode err = U_ZERO_ERROR;
++
++  [self _resetCalendar];
++  dateField = _NSCalendarUnitToDateField(unit);
++  if (dateField != (UCalendarDateFields)-1)
++    {
++      // We really don't care if there are any errors...
++      result.location =
++        (NSUInteger)ucal_getLimit(my->cal, dateField, UCAL_GREATEST_MINIMUM, &err);
++      result.length =
++        (NSUInteger)ucal_getLimit(my->cal, dateField, UCAL_LEAST_MAXIMUM, &err)
++        - result.location + 1;
++      // ICU's month is 0-based, while NSCalendar is 1-based
++      if (dateField == UCAL_MONTH)
++        {
++          result.location += 1;
++        }
++    }
++#endif
++  return result;
++}
++
++- (NSUInteger) ordinalityOfUnit: (NSCalendarUnit) smaller
++                         inUnit: (NSCalendarUnit) larger
++                        forDate: (NSDate*) date
++{
++#if GS_USE_ICU == 1
++  UErrorCode	err = U_ZERO_ERROR;
++  UDate		udate = _udate(date);
++  GSDay		d;
++  GSDay		s;
++  int32_t	first;
++  int32_t	next;
++  int32_t	days = 0;
++  int32_t	hour;
++  int32_t	minute;
++  int32_t	second;
++
++  _day(my->cal, _julianDay(my->cal, udate), &d);
++  ucal_setMillis(my->cal, udate, &err);
++  hour = ucal_get(my->cal, UCAL_HOUR_OF_DAY, &err);
++  minute = ucal_get(my->cal, UCAL_MINUTE, &err);
++  second = ucal_get(my->cal, UCAL_SECOND, &err);
++  if (U_FAILURE(err))
++    {
++      return NSNotFound;
++    }
++
++  switch (smaller)
++    {
++      case NSCalendarUnitYear:
++        return (larger == NSCalendarUnitEra) ? d.year : NSNotFound;
++      case NSCalendarUnitQuarter:
++        return (larger == NSCalendarUnitYear) ? (d.month + 2) / 3 : NSNotFound;
++      case NSCalendarUnitMonth:
++        if (larger == NSCalendarUnitYear)
++          return d.month;
++        if (larger == NSCalendarUnitQuarter)
++          return (d.month - 1) % 3 + 1;
++        return NSNotFound;
++      case NSCalendarUnitWeekdayOrdinal:
++        return (larger == NSCalendarUnitMonth)
++          ? (d.day - 1) / 7 + 1 : NSNotFound;
++      case NSCalendarUnitWeekOfYear:
++      case NSCalendarUnitWeekOfMonth:
++        if (larger != ((smaller == NSCalendarUnitWeekOfYear)
++          ? NSCalendarUnitYear : NSCalendarUnitMonth))
++          return NSNotFound;
++        _unitDays(my->cal, larger, &d, (int32_t)my->firstWeekday,
++          &first, &next);
++        _day(my->cal, first, &s);
++        return (d.jd - first + (s.weekday - (int32_t)my->firstWeekday + 7) % 7)
++          / 7 + 1;
++      case NSCalendarUnitDay:
++      case NSCalendarUnitWeekday:
++      case NSCalendarUnitHour:
++      case NSCalendarUnitMinute:
++      case NSCalendarUnitSecond:
++        if (larger == NSCalendarUnitMinute)
++          return (smaller == NSCalendarUnitSecond) ? second + 1 : NSNotFound;
++        if (larger == NSCalendarUnitHour)
++          {
++            if (smaller == NSCalendarUnitMinute)
++              return minute + 1;
++            if (smaller == NSCalendarUnitSecond)
++              return minute * 60 + second + 1;
++            return NSNotFound;
++          }
++        if (larger == NSCalendarUnitDay || larger == NSCalendarUnitWeekday)
++          {
++            if (smaller == NSCalendarUnitDay || smaller == NSCalendarUnitWeekday)
++              return NSNotFound;
++          }
++        else if (_unitDays(my->cal, larger, &d, (int32_t)my->firstWeekday,
++          &first, &next))
++          {
++            days = d.jd - first;
++          }
++        else
++          {
++            return NSNotFound;
++          }
++        switch (smaller)
++          {
++            case NSCalendarUnitDay:
++              return days + 1;
++            case NSCalendarUnitWeekday:
++              if (larger == NSCalendarUnitWeekOfYear
++                || larger == NSCalendarUnitWeekOfMonth)
++                return days + 1;
++              return days / 7 + 1;
++            case NSCalendarUnitHour:
++              return days * 24 + hour + 1;
++            case NSCalendarUnitMinute:
++              return (days * 24 + hour) * 60 + minute + 1;
++            default:
++              return ((days * 24 + hour) * 60 + minute) * 60 + second + 1;
++          }
++      default:
++        return NSNotFound;
++    }
++#else
++  return NSNotFound;
++#endif
++}
++
++- (NSRange) rangeOfUnit: (NSCalendarUnit) smaller
++                 inUnit: (NSCalendarUnit) larger
++                forDate: (NSDate*) date
++{
++  NSRange result = NSMakeRange (NSNotFound, NSNotFound);
++#if GS_USE_ICU == 1
++  UCalendarDateFields field = _NSRangeOfUnitField(smaller, larger);
++
++  if (field != (UCalendarDateFields)-1)
++    {
++      UErrorCode	err = U_ZERO_ERROR;
++      UDate		udate;
++
++      [self _resetCalendar];
++      udate = (UDate)floor([date timeIntervalSince1970] * 1000.0);
++      ucal_setMillis(my->cal, udate, &err);
++      result.location = (NSUInteger)
++        ucal_getLimit(my->cal, field, UCAL_ACTUAL_MINIMUM, &err);
++      result.length = (NSUInteger)
++        ucal_getLimit(my->cal, field, UCAL_ACTUAL_MAXIMUM, &err)
++        - result.location + 1;
++      // ICU's month is 0-based, while NSCalendar is 1-based
++      if (field == UCAL_MONTH)
++        {
++          result.location += 1;
++        }
++      if (U_FAILURE(err))
++        {
++          result = NSMakeRange (NSNotFound, NSNotFound);
++        }
++    }
++#endif
++  return result;
++}
++
++- (BOOL) rangeOfUnit: (NSCalendarUnit) unit
++           startDate: (NSDate **) datep
++            interval: (NSTimeInterval*)tip
++             forDate: (NSDate*)date
++{
++#if GS_USE_ICU == 1
++  UErrorCode	err = U_ZERO_ERROR;
++  UDate		udate, start, end;
++  GSDay		d;
++  int32_t	first, next;
++
++  udate = _udate(date);
++  switch (unit)
++    {
++      case NSCalendarUnitHour:
++      case NSCalendarUnitMinute:
++      case NSCalendarUnitSecond:
++        ucal_setMillis(my->cal, udate, &err);
++        start = udate - ucal_get(my->cal, UCAL_MILLISECOND, &err);
++        end = start + 1000.0;
++        if (unit != NSCalendarUnitSecond)
++          {
++            start -= ucal_get(my->cal, UCAL_SECOND, &err) * 1000.0;
++            end = start + 60000.0;
++          }
++        if (unit == NSCalendarUnitHour)
++          {
++            start -= ucal_get(my->cal, UCAL_MINUTE, &err) * 60000.0;
++            end = start + 3600000.0;
++          }
++        break;
++      default:
++        _day(my->cal, _julianDay(my->cal, udate), &d);
++        if (!_unitDays(my->cal, unit, &d, (int32_t)my->firstWeekday,
++          &first, &next))
++          {
++            return NO;	// Era and any composite units are not handled.
++          }
++        start = _startOfDay(my->cal, first);
++        end = _startOfDay(my->cal, next);
++        break;
++    }
++  if (U_FAILURE(err))
++    {
++      return NO;
++    }
++
++  if (datep != NULL)
++    {
++      *datep = [NSDate dateWithTimeIntervalSince1970: start / 1000.0];
++    }
++  if (tip != NULL)
++    {
++      *tip = (end - start) / 1000.0;
++    }
++  return YES;
++#else
++  return NO;
++#endif
++}
++
++- (BOOL) isEqual: (id) obj
++{
++#if GS_USE_ICU == 1
++  if ([obj isKindOfClass: [NSCalendar class]] == NO)
++    {
++      return NO;
++    }
++  return (BOOL)ucal_equivalentTo(my->cal, [obj _UCalendar]);
++#else
++  if ([obj isKindOfClass: [self class]])
++    {
++      if (![my->identifier isEqual: [obj calendarIdentifier]])
++        return NO;
++      if (![my->localeID isEqual: [obj localeIdentifier]])
++        return NO;
++      if (![my->tz isEqual: [obj timeZone]])
++        return NO;
++      if (my->firstWeekday != [obj firstWeekday])
++        return NO;
++      if (my->minimumDaysInFirstWeek != [obj minimumDaysInFirstWeek])
++        return NO;
++      return YES;
++    }
++
++  return NO;
++#endif
++}
++
++
++- (NSDate*) dateWithEra: (NSInteger)eraValue
++                   year: (NSInteger)yearValue
++                  month: (NSInteger)monthValue
++                    day: (NSInteger)dayValue
++                   hour: (NSInteger)hourValue
++                 minute: (NSInteger)minuteValue
++                 second: (NSInteger)secondValue
++             nanosecond: (NSInteger)nanosecondValue
++{
++  NSDateComponents	*comps = AUTORELEASE([NSDateComponents new]);
++
++  [comps setEra: eraValue];
++  [comps setYear: yearValue];
++  [comps setMonth: monthValue];
++  [comps setDay: dayValue];
++  [comps setHour: hourValue];
++  [comps setMinute: minuteValue];
++  [comps setSecond: secondValue];
++  [comps setNanosecond: nanosecondValue];
++  return [self dateFromComponents: comps];
++}
++
++- (NSDate*) dateWithEra: (NSInteger)eraValue
++      yearForWeekOfYear: (NSInteger)yearValue
++             weekOfYear: (NSInteger)weekValue
++                weekday: (NSInteger)weekdayValue
++                   hour: (NSInteger)hourValue
++                 minute: (NSInteger)minuteValue
++                 second: (NSInteger)secondValue
++             nanosecond: (NSInteger)nanosecondValue
++{
++  NSDateComponents	*comps = AUTORELEASE([NSDateComponents new]);
++
++  [comps setEra: eraValue];
++  [comps setYearForWeekOfYear: yearValue];
++  [comps setWeekOfYear: weekValue];
++  [comps setWeekday: weekdayValue];
++  [comps setHour: hourValue];
++  [comps setMinute: minuteValue];
++  [comps setSecond: secondValue];
++  [comps setNanosecond: nanosecondValue];
++  return [self dateFromComponents: comps];
++}
++
++- (NSDate*) startOfDayForDate: (NSDate*)date
++{
++  NSDate	*start = nil;
++
++  if ([self rangeOfUnit: NSCalendarUnitDay
++              startDate: &start
++               interval: NULL
++                forDate: date])
++    {
++      return start;
++    }
++  return nil;
++}
++
++- (NSDateComponents*) componentsInTimeZone: (NSTimeZone*)timezone
++                                  fromDate: (NSDate*)date
++{
++  NSCalendar	*cal = AUTORELEASE([self copy]);
++
++  [cal setTimeZone: timezone];
++  return [cal components: NSCalendarUnitEra | NSCalendarUnitYear
++    | NSCalendarUnitMonth | NSCalendarUnitDay | NSCalendarUnitHour
++    | NSCalendarUnitMinute | NSCalendarUnitSecond | NSCalendarUnitWeekday
++    | NSCalendarUnitWeekdayOrdinal | NSCalendarUnitQuarter
++    | NSCalendarUnitWeekOfMonth | NSCalendarUnitWeekOfYear
++    | NSCalendarUnitYearForWeekOfYear | NSCalendarUnitNanosecond
++    | NSCalendarUnitCalendar | NSCalendarUnitTimeZone
++                fromDate: date];
++}
++
++- (NSComparisonResult) compareDate: (NSDate*)date1
++                            toDate: (NSDate*)date2
++                 toUnitGranularity: (NSCalendarUnit)unit
++{
++  NSComparisonResult	order = [date1 compare: date2];
++  NSDate		*start1 = nil;
++  NSDate		*start2 = nil;
++  NSDateComponents	*c1;
++  NSDateComponents	*c2;
++  NSCalendarUnit	units;
++  NSCalendarUnit	u;
++
++  switch (unit)
++    {
++      case NSCalendarUnitNanosecond:
++        return order;
++      case NSCalendarUnitSecond:
++      case NSCalendarUnitMinute:
++      case NSCalendarUnitHour:
++        if ([self rangeOfUnit: unit startDate: &start1 interval: NULL
++                      forDate: date1]
++          && [self rangeOfUnit: unit startDate: &start2 interval: NULL
++                       forDate: date2]
++          && [start1 isEqualToDate: start2])
++          {
++            return NSOrderedSame;
++          }
++        return order;
++      case NSCalendarUnitEra:
++        units = NSCalendarUnitEra;
++        break;
++      case NSCalendarUnitYear:
++        units = NSCalendarUnitEra | NSCalendarUnitYear;
++        break;
++      case NSCalendarUnitYearForWeekOfYear:
++        units = NSCalendarUnitEra | NSCalendarUnitYearForWeekOfYear;
++        break;
++      case NSCalendarUnitQuarter:
++        units = NSCalendarUnitEra | NSCalendarUnitYear | NSCalendarUnitQuarter;
++        break;
++      case NSCalendarUnitMonth:
++        units = NSCalendarUnitEra | NSCalendarUnitYear | NSCalendarUnitMonth;
++        break;
++      case NSCalendarUnitWeekOfYear:
++        units = NSCalendarUnitEra | NSCalendarUnitYearForWeekOfYear
++          | NSCalendarUnitWeekOfYear;
++        break;
++      case NSCalendarUnitWeekOfMonth:
++      case NSCalendarUnitWeekdayOrdinal:
++        units = NSCalendarUnitEra | NSCalendarUnitYear
++          | NSCalendarUnitMonth | unit;
++        break;
++      case NSCalendarUnitDay:
++      case NSCalendarUnitWeekday:
++        units = NSCalendarUnitEra | NSCalendarUnitYear
++          | NSCalendarUnitMonth | NSCalendarUnitDay;
++        break;
++      default:
++        [NSException raise: NSInvalidArgumentException
++                    format: @"%@ unit %lu is not supported",
++          NSStringFromSelector(_cmd), (unsigned long)unit];
++        return NSOrderedSame;
++    }
++  c1 = [self components: units fromDate: date1];
++  c2 = [self components: units fromDate: date2];
++  for (u = 1; u <= units; u <<= 1)
++    {
++      if ((units & u) && [c1 valueForComponent: u] != [c2 valueForComponent: u])
++        {
++          return order;
++        }
++    }
++  if ([c1 leapMonth] != [c2 leapMonth])
++    {
++      return order;
++    }
++  return NSOrderedSame;
++}
++
++- (BOOL) isDate: (NSDate*)date1
++    equalToDate: (NSDate*)date2
++toUnitGranularity: (NSCalendarUnit)unit
++{
++  return [self compareDate: date1 toDate: date2 toUnitGranularity: unit]
++    == NSOrderedSame;
++}
++
++- (BOOL) isDate: (NSDate*)date1 inSameDayAsDate: (NSDate*)date2
++{
++  return [self compareDate: date1
++                    toDate: date2
++         toUnitGranularity: NSCalendarUnitDay] == NSOrderedSame;
++}
++
++- (BOOL) isDateInToday: (NSDate*)date
++{
++  return [self isDate: date inSameDayAsDate: [NSDate date]];
++}
++
++- (BOOL) isDateInYesterday: (NSDate*)date
++{
++  NSDate	*day = [self dateByAddingUnit: NSCalendarUnitDay
++					value: -1
++				       toDate: [NSDate date]
++				      options: 0];
++
++  return [self isDate: date inSameDayAsDate: day];
++}
++
++- (BOOL) isDateInTomorrow: (NSDate*)date
+ {
+-  return my->minimumDaysInFirstWeek;
++  NSDate	*day = [self dateByAddingUnit: NSCalendarUnitDay
++					value: 1
++				       toDate: [NSDate date]
++				      options: 0];
++
++  return [self isDate: date inSameDayAsDate: day];
+ }
+ 
+-- (void) setMinimumDaysInFirstWeek: (NSUInteger)mdw
++- (BOOL) isDateInWeekend: (NSDate*)date
+ {
+-  my->minimumDaysInFirstWeek = (int32_t)mdw;
+ #if GS_USE_ICU == 1
+-  ucal_setAttribute(my->cal, UCAL_MINIMAL_DAYS_IN_FIRST_WEEK,
+-    my->minimumDaysInFirstWeek);
++  UErrorCode	err = U_ZERO_ERROR;
++  UBool		result = ucal_isWeekend(my->cal, _udate(date), &err);
++
++  return U_SUCCESS(err) && result;
++#else
++  return NO;
+ #endif
+ }
+ 
+-- (NSTimeZone*) timeZone
++- (BOOL) rangeOfWeekendStartDate: (NSDate**)datep
++                        interval: (NSTimeInterval*)tip
++                  containingDate: (NSDate*)date
+ {
+-  return my->tz;
+-}
++#if GS_USE_ICU == 1
++  int32_t	jd;
++  int32_t	first;
++  int32_t	next;
++  UDate		start;
+ 
+-- (void) setTimeZone: (NSTimeZone*) tz
+-{
+-  if ([tz isEqual: my->tz])
++  if (![self isDateInWeekend: date])
+     {
+-      return;
++      return NO;
+     }
+-
+-  ASSIGN(my->tz, tz);
+-  [self _resetCalendar];
++  jd = _julianDay(my->cal, _udate(date));
++  for (first = jd; first > jd - 7 && _isWeekendDay(my->cal, first - 1);)
++    {
++      first--;
++    }
++  for (next = jd + 1; next < jd + 8 && _isWeekendDay(my->cal, next);)
++    {
++      next++;
++    }
++  start = _startOfDay(my->cal, first);
++  if (datep != NULL)
++    {
++      *datep = [NSDate dateWithTimeIntervalSince1970: start / 1000.0];
++    }
++  if (tip != NULL)
++    {
++      *tip = (_startOfDay(my->cal, next) - start) / 1000.0;
++    }
++  return YES;
++#else
++  return NO;
++#endif
+ }
+ 
+-- (NSRange) maximumRangeOfUnit: (NSCalendarUnit) unit
++- (BOOL) nextWeekendStartDate: (NSDate**)datep
++                     interval: (NSTimeInterval*)tip
++                      options: (NSCalendarOptions)options
++                    afterDate: (NSDate*)date
+ {
+-  NSRange result = NSMakeRange (0, 0);
+ #if GS_USE_ICU == 1
+-  UCalendarDateFields dateField;
+-  UErrorCode err = U_ZERO_ERROR;
++  BOOL		backwards = (options & NSCalendarSearchBackwards) ? YES : NO;
++  NSDate	*start = nil;
++  int32_t	jd;
++  int		n;
+ 
+-  [self _resetCalendar];
+-  dateField = _NSCalendarUnitToDateField(unit);
+-  if (dateField != (UCalendarDateFields)-1)
++  jd = _julianDay(my->cal, _udate(date));
++  if (backwards && [self rangeOfWeekendStartDate: &start
++					interval: NULL
++				  containingDate: date])
+     {
+-      // We really don't care if there are any errors...
+-      result.location =
+-        (NSUInteger)ucal_getLimit(my->cal, dateField, UCAL_MINIMUM, &err);
+-      result.length =
+-        (NSUInteger)ucal_getLimit(my->cal, dateField, UCAL_MAXIMUM, &err)
+-        - result.location + 1;
+-      // ICU's month is 0-based, while NSCalendar is 1-based
+-      if (dateField == UCAL_MONTH)
++      jd = _julianDay(my->cal, _udate(start)) - 1;
++    }
++  else if (!backwards)
++    {
++      jd++;
++    }
++  for (n = 0; n < 14; n++, jd += backwards ? -1 : 1)
++    {
++      if (_isWeekendDay(my->cal, jd) && !_isWeekendDay(my->cal, jd - 1))
+         {
+-          result.location += 1;
++          start = [NSDate dateWithTimeIntervalSince1970:
++            _startOfDay(my->cal, jd) / 1000.0];
++          return [self rangeOfWeekendStartDate: datep
++				      interval: tip
++				containingDate: start];
+         }
+     }
++  return NO;
++#else
++  return NO;
+ #endif
+-
+-  return result;
+ }
+ 
+-- (NSRange) minimumRangeofUnit: (NSCalendarUnit) unit
++- (NSDateComponents*) components: (NSCalendarUnit)unitFlags
++              fromDateComponents: (NSDateComponents*)startingDateComp
++                toDateComponents: (NSDateComponents*)resultDateComp
++                         options: (NSCalendarOptions)options
+ {
+-  NSRange result = NSMakeRange (0, 0);
+-#if GS_USE_ICU == 1
+-  UCalendarDateFields dateField;
+-  UErrorCode err = U_ZERO_ERROR;
++  NSDate	*from = [self dateFromComponents: startingDateComp];
++  NSDate	*to = [self dateFromComponents: resultDateComp];
+ 
+-  [self _resetCalendar];
+-  dateField = _NSCalendarUnitToDateField(unit);
+-  if (dateField != (UCalendarDateFields)-1)
++  if (from == nil || to == nil)
+     {
+-      // We really don't care if there are any errors...
+-      result.location =
+-        (NSUInteger)ucal_getLimit(my->cal, dateField, UCAL_GREATEST_MINIMUM, &err);
+-      result.length =
+-        (NSUInteger)ucal_getLimit(my->cal, dateField, UCAL_LEAST_MAXIMUM, &err)
+-        - result.location + 1;
+-      // ICU's month is 0-based, while NSCalendar is 1-based
+-      if (dateField == UCAL_MONTH)
+-        {
+-          result.location += 1;
+-        }
++      return nil;
+     }
+-#endif
+-  return result;
++  return [self components: unitFlags
++                 fromDate: from
++                   toDate: to
++                  options: options];
+ }
+ 
+-- (NSUInteger) ordinalityOfUnit: (NSCalendarUnit) smaller
+-                         inUnit: (NSCalendarUnit) larger
+-                        forDate: (NSDate*) date
++- (NSDate*) dateByAddingUnit: (NSCalendarUnit)unit
++                       value: (NSInteger)value
++                      toDate: (NSDate*)date
++                     options: (NSCalendarOptions)options
+ {
+-  return 0;
++  NSDateComponents	*comps = AUTORELEASE([NSDateComponents new]);
++
++  [comps setValue: value forComponent: unit];
++  return [self dateByAddingComponents: comps toDate: date options: options];
+ }
+ 
+-- (NSRange) rangeOfUnit: (NSCalendarUnit) smaller
+-                 inUnit: (NSCalendarUnit) larger
+-                forDate: (NSDate*) date
++- (NSDate*) _nextDateAfterDate: (NSDate*)date
++            matchingComponents: (NSDateComponents*)comps
++                       options: (NSCalendarOptions)options
++                          keep: (NSDate*)keep
++                         exact: (BOOL*)exact
+ {
+-  NSRange result = NSMakeRange (NSNotFound, NSNotFound);
+ #if GS_USE_ICU == 1
+-  UCalendarDateFields field = _NSRangeOfUnitField(smaller, larger);
++  UErrorCode	err = U_ZERO_ERROR;
++  UCalendar	*cal;
++  GSMatch	m;
++  UDate		result;
++  BOOL		found;
+ 
+-  if (field != (UCalendarDateFields)-1)
++  if (!_setUpMatch(&m, comps, options))
+     {
+-      UErrorCode	err = U_ZERO_ERROR;
+-      UDate		udate;
++      return nil;
++    }
++  m.firstWeekday = (int32_t)my->firstWeekday;
++  cal = ucal_clone(my->cal, &err);
++  if (U_FAILURE(err))
++    {
++      return nil;
++    }
++  ucal_setMillis(cal, _udate(keep), &err);
++  m.keepHour = ucal_get(cal, UCAL_HOUR_OF_DAY, &err);
++  m.keepMinute = ucal_get(cal, UCAL_MINUTE, &err);
++  m.keepSecond = ucal_get(cal, UCAL_SECOND, &err);
++  found = _search(cal, &m, [date timeIntervalSince1970] * SECOND_TO_MILLI,
++    &result, exact);
++  ucal_close(cal);
++  if (!found)
++    {
++      return nil;
++    }
++  return [NSDate dateWithTimeIntervalSince1970: result / SECOND_TO_MILLI];
++#else
++  return nil;
++#endif
++}
+ 
+-      [self _resetCalendar];
+-      udate = (UDate)floor([date timeIntervalSince1970] * 1000.0);
+-      ucal_setMillis(my->cal, udate, &err);
+-      result.location = (NSUInteger)
+-        ucal_getLimit(my->cal, field, UCAL_ACTUAL_MINIMUM, &err);
+-      result.length = (NSUInteger)
+-        ucal_getLimit(my->cal, field, UCAL_ACTUAL_MAXIMUM, &err)
+-        - result.location + 1;
+-      // ICU's month is 0-based, while NSCalendar is 1-based
+-      if (field == UCAL_MONTH)
++- (void) enumerateDatesStartingAfterDate: (NSDate*)start
++                      matchingComponents: (NSDateComponents*)comps
++                                 options: (NSCalendarOptions)opts
++                              usingBlock: (GSCalendarEnumerationBlock)block
++{
++  NSDate	*date = RETAIN(start);
++  BOOL		stop = NO;
++
++  while (stop == NO)
++    {
++      NSAutoreleasePool	*pool = [NSAutoreleasePool new];
++      BOOL		exact = NO;
++      NSDate		*next;
++
++      next = [self _nextDateAfterDate: date
++                   matchingComponents: comps
++                              options: opts
++                                 keep: start
++                                exact: &exact];
++      if (next == nil)
+         {
+-          result.location += 1;
++          stop = YES;
+         }
+-      if (U_FAILURE(err))
++      else
+         {
+-          result = NSMakeRange (NSNotFound, NSNotFound);
++          CALL_BLOCK(block, next, exact, &stop);
++          ASSIGN(date, next);
+         }
++      [pool drain];
+     }
+-#endif
+-  return result;
++  RELEASE(date);
+ }
+ 
+-- (BOOL) rangeOfUnit: (NSCalendarUnit) unit
+-           startDate: (NSDate **) datep
+-            interval: (NSTimeInterval*)tip
+-             forDate: (NSDate*)date
++- (NSDate*) nextDateAfterDate: (NSDate*)date
++           matchingComponents: (NSDateComponents*)comps
++                      options: (NSCalendarOptions)options
+ {
+-#if GS_USE_ICU == 1
+-  UErrorCode	err = U_ZERO_ERROR;
+-  UDate		udate, start, end;
+-  UCalendarDateFields	advance;
+-  BOOL		isWeek = NO;
+-  int32_t	era, year, month, day, hour, minute, second;
++  BOOL	exact;
+ 
+-  [self _resetCalendar];
+-  udate = (UDate)floor([date timeIntervalSince1970] * 1000.0);
+-  ucal_setMillis(my->cal, udate, &err);
++  return [self _nextDateAfterDate: date
++               matchingComponents: comps
++                          options: options
++                             keep: date
++                            exact: &exact];
++}
+ 
+-  era = ucal_get(my->cal, UCAL_ERA, &err);
+-  year = ucal_get(my->cal, UCAL_YEAR, &err);
+-  month = ucal_get(my->cal, UCAL_MONTH, &err);
+-  day = ucal_get(my->cal, UCAL_DAY_OF_MONTH, &err);
+-  hour = ucal_get(my->cal, UCAL_HOUR_OF_DAY, &err);
+-  minute = ucal_get(my->cal, UCAL_MINUTE, &err);
+-  second = ucal_get(my->cal, UCAL_SECOND, &err);
+-  if (U_FAILURE(err))
+-    {
+-      return NO;
+-    }
++- (NSDate*) nextDateAfterDate: (NSDate*)date
++                 matchingUnit: (NSCalendarUnit)unit
++                        value: (NSInteger)value
++                      options: (NSCalendarOptions)options
++{
++  NSDateComponents	*comps = AUTORELEASE([NSDateComponents new]);
+ 
+-  /* Rebuild the date from the requested unit downwards; the smaller fields
+-   * default to their minimum, giving the start of the unit. */
+-  ucal_clear(my->cal);
+-  ucal_set(my->cal, UCAL_ERA, era);
+-  ucal_set(my->cal, UCAL_YEAR, year);
+-  switch (unit)
+-    {
+-      case NSCalendarUnitYear:
+-        advance = UCAL_YEAR;
+-        break;
+-      case NSCalendarUnitMonth:
+-        ucal_set(my->cal, UCAL_MONTH, month);
+-        advance = UCAL_MONTH;
+-        break;
+-      case NSCalendarUnitWeekOfYear:
+-      case NSCalendarUnitWeekOfMonth:
+-        isWeek = YES;
+-        /* fall through to set the day, then roll back to the first weekday */
+-      case NSCalendarUnitDay:
+-      case NSCalendarUnitWeekday:
+-      case NSCalendarUnitWeekdayOrdinal:
+-        ucal_set(my->cal, UCAL_MONTH, month);
+-        ucal_set(my->cal, UCAL_DAY_OF_MONTH, day);
+-        advance = UCAL_DAY_OF_MONTH;
+-        break;
+-      case NSCalendarUnitHour:
+-        ucal_set(my->cal, UCAL_MONTH, month);
+-        ucal_set(my->cal, UCAL_DAY_OF_MONTH, day);
+-        ucal_set(my->cal, UCAL_HOUR_OF_DAY, hour);
+-        advance = UCAL_HOUR_OF_DAY;
+-        break;
+-      case NSCalendarUnitMinute:
+-        ucal_set(my->cal, UCAL_MONTH, month);
+-        ucal_set(my->cal, UCAL_DAY_OF_MONTH, day);
+-        ucal_set(my->cal, UCAL_HOUR_OF_DAY, hour);
+-        ucal_set(my->cal, UCAL_MINUTE, minute);
+-        advance = UCAL_MINUTE;
+-        break;
+-      case NSCalendarUnitSecond:
+-        ucal_set(my->cal, UCAL_MONTH, month);
+-        ucal_set(my->cal, UCAL_DAY_OF_MONTH, day);
+-        ucal_set(my->cal, UCAL_HOUR_OF_DAY, hour);
+-        ucal_set(my->cal, UCAL_MINUTE, minute);
+-        ucal_set(my->cal, UCAL_SECOND, second);
+-        advance = UCAL_SECOND;
+-        break;
+-      default:
+-        return NO;	// Era and any composite units are not handled.
+-    }
++  [comps setValue: value forComponent: unit];
++  return [self nextDateAfterDate: date
++              matchingComponents: comps
++                         options: options];
++}
+ 
+-  if (isWeek == YES)
+-    {
+-      int32_t	dow = ucal_get(my->cal, UCAL_DAY_OF_WEEK, &err);
+-      int32_t	back = (dow - (int32_t)my->firstWeekday + 7) % 7;
++- (NSDate*) nextDateAfterDate: (NSDate*)date
++                 matchingHour: (NSInteger)hourValue
++                       minute: (NSInteger)minuteValue
++                       second: (NSInteger)secondValue
++                      options: (NSCalendarOptions)options
++{
++  NSDateComponents	*comps = AUTORELEASE([NSDateComponents new]);
+ 
+-      ucal_add(my->cal, UCAL_DAY_OF_MONTH, -back, &err);
+-    }
++  [comps setHour: hourValue];
++  [comps setMinute: minuteValue];
++  [comps setSecond: secondValue];
++  return [self nextDateAfterDate: date
++              matchingComponents: comps
++                         options: options];
++}
+ 
+-  start = ucal_getMillis(my->cal, &err);
+-  if (isWeek == YES)
+-    {
+-      ucal_add(my->cal, UCAL_DAY_OF_MONTH, 7, &err);
+-    }
+-  else
+-    {
+-      ucal_add(my->cal, advance, 1, &err);
+-    }
+-  end = ucal_getMillis(my->cal, &err);
+-  if (U_FAILURE(err))
++- (NSDate*) dateBySettingUnit: (NSCalendarUnit)unit
++                        value: (NSInteger)v
++                       ofDate: (NSDate*)date
++                      options: (NSCalendarOptions)opts
++{
++  if ([self component: unit fromDate: date] == v)
+     {
+-      return NO;
++      return date;
+     }
++  return [self nextDateAfterDate: date
++                    matchingUnit: unit
++                           value: v
++                         options: opts];
++}
+ 
+-  if (datep != NULL)
+-    {
+-      *datep = [NSDate dateWithTimeIntervalSince1970: start / 1000.0];
+-    }
+-  if (tip != NULL)
++- (NSDate*) dateBySettingHour: (NSInteger)h
++                       minute: (NSInteger)m
++                       second: (NSInteger)s
++                       ofDate: (NSDate*)date
++                      options: (NSCalendarOptions)opts
++{
++  NSDate	*start = [self startOfDayForDate: date];
++
++  if (start == nil || h < 0 || h > 23 || m < 0 || m > 59 || s < 0 || s > 59)
+     {
+-      *tip = (end - start) / 1000.0;
++      return nil;
+     }
+-  return YES;
+-#else
+-  return NO;
+-#endif
++  opts = (opts & (NSCalendarMatchStrictly | NSCalendarMatchLast))
++    | (opts & NSCalendarMatchStrictly ? 0 : NSCalendarMatchNextTime);
++  return [self nextDateAfterDate: [start dateByAddingTimeInterval: -0.001]
++                    matchingHour: h
++                          minute: m
++                          second: s
++                         options: opts];
+ }
+ 
+-- (BOOL) isEqual: (id) obj
++- (BOOL) date: (NSDate*)date matchesComponents: (NSDateComponents*)components
+ {
+-#if GS_USE_ICU == 1
+-  return (BOOL)ucal_equivalentTo(my->cal, [obj _UCalendar]);
+-#else
+-  if ([obj isKindOfClass: [self class]])
++  NSCalendarUnit	units = NSCalendarUnitEra | NSCalendarUnitYear
++    | NSCalendarUnitMonth | NSCalendarUnitDay | NSCalendarUnitHour
++    | NSCalendarUnitMinute | NSCalendarUnitSecond | NSCalendarUnitWeekday
++    | NSCalendarUnitWeekdayOrdinal | NSCalendarUnitQuarter
++    | NSCalendarUnitWeekOfMonth | NSCalendarUnitWeekOfYear
++    | NSCalendarUnitYearForWeekOfYear | NSCalendarUnitNanosecond;
++  NSDateComponents	*comps = [self components: units fromDate: date];
++  NSCalendarUnit	u;
++
++  for (u = 1; u <= units; u <<= 1)
+     {
+-      if (![my->identifier isEqual: [obj calendarIdentifier]])
+-        return NO;
+-      if (![my->localeID isEqual: [obj localeIdentifier]])
+-        return NO;
+-      if (![my->tz isEqual: [obj timeZone]])
+-        return NO;
+-      if (my->firstWeekday != [obj firstWeekday])
+-        return NO;
+-      if (my->minimumDaysInFirstWeek != [obj minimumDaysInFirstWeek])
+-        return NO;
+-      return YES;
+-    }
++      if (units & u)
++        {
++          NSInteger	v = [components valueForComponent: u];
+ 
+-  return NO;
+-#endif
++          if (v != NSDateComponentUndefined && v != [comps valueForComponent: u])
++            {
++              return NO;
++            }
++        }
++    }
++  return YES;
+ }
+ 
+-
+ - (void) getEra: (NSInteger*)eraValuePointer
+            year: (NSInteger*)yearValuePointer
+           month: (NSInteger*)monthValuePointer
+@@ -1152,7 +2312,7 @@ - (void) getHour: (NSInteger*)hourValuePointer
+   if (secondValuePointer != NULL)
+     *secondValuePointer = ucal_get(my->cal, UCAL_SECOND, &err);
+   if (nanosecondValuePointer != NULL)
+-    *nanosecondValuePointer = ucal_get(my->cal, UCAL_MILLISECOND, &err) * 1000;
++    *nanosecondValuePointer = _nanosecond(date);
+ #endif
+ }
+ 
+@@ -1207,16 +2367,17 @@ - (id) copyWithZone: (NSZone*)zone
+ {
+   NSCalendar *result;
+ 
+-  if (NSShouldRetainWithZone(self, zone))
++  result = [[[self class] allocWithZone: zone]
++    initWithCalendarIdentifier: my->identifier];
++  [result _setLocaleIdentifier: my->localeID];
++  [result setTimeZone: my->tz];
++  if (my->firstWeekday != NSNotFound)
+     {
+-      return RETAIN(self);
++      [result setFirstWeekday: my->firstWeekday];
+     }
+-  else
++  if (my->minimumDaysInFirstWeek != NSNotFound)
+     {
+-      result = [[[self class] allocWithZone: zone]
+-        initWithCalendarIdentifier: my->identifier];
+-      [result _setLocaleIdentifier: my->localeID];
+-      [result setTimeZone: my->tz];
++      [result setMinimumDaysInFirstWeek: my->minimumDaysInFirstWeek];
+     }
+ 
+   return result;
+@@ -1365,6 +2526,11 @@ - (NSInteger) yearForWeekOfYear
+   return my->yearForWeekOfYear;
+ }
+ 
++- (BOOL) isLeapMonth
++{
++  return my->leapMonth;
++}
++
+ - (BOOL) leapMonth
+ {
+   return my->leapMonth;
+@@ -1470,7 +2636,7 @@ - (void) setLeapMonth: (BOOL) v
+ 
+ - (void) setCalendar: (NSCalendar*) cal
+ {
+-  ASSIGN(my->cal, cal);
++  ASSIGNCOPY(my->cal, cal);
+ }
+ 
+ - (void) setTimeZone: (NSTimeZone*) tz
+@@ -1489,7 +2655,43 @@ - (BOOL) isValidDate
+ 
+ - (BOOL) isValidDateInCalendar: (NSCalendar*) calendar
+ {
+-  return [calendar dateFromComponents: self] != nil;
++  NSCalendarUnit	units = NSCalendarUnitEra | NSCalendarUnitYear
++    | NSCalendarUnitMonth | NSCalendarUnitDay | NSCalendarUnitHour
++    | NSCalendarUnitMinute | NSCalendarUnitSecond | NSCalendarUnitWeekday
++    | NSCalendarUnitWeekdayOrdinal | NSCalendarUnitQuarter
++    | NSCalendarUnitWeekOfMonth | NSCalendarUnitWeekOfYear
++    | NSCalendarUnitYearForWeekOfYear;
++  NSDateComponents	*found;
++  NSDate		*date;
++  NSCalendarUnit	u;
++
++  if (my->nanosecond != NSDateComponentUndefined
++    && (my->nanosecond < 0 || my->nanosecond >= 1000000000))
++    {
++      return NO;
++    }
++  date = [calendar dateFromComponents: self];
++  if (date == nil)
++    {
++      return NO;
++    }
++  if (my->tz != nil)
++    {
++      found = [calendar componentsInTimeZone: my->tz fromDate: date];
++    }
++  else
++    {
++      found = [calendar components: units fromDate: date];
++    }
++  for (u = 1; u <= units; u <<= 1)
++    {
++      if ((units & u) && [self valueForComponent: u] != NSDateComponentUndefined
++        && [self valueForComponent: u] != [found valueForComponent: u])
++        {
++          return NO;
++        }
++    }
++  return my->leapMonth == [found leapMonth];
+ }
+ 
+ - (NSInteger) valueForComponent: (NSCalendarUnit) unit
+@@ -1511,7 +2713,7 @@ - (NSInteger) valueForComponent: (NSCalendarUnit) unit
+       case NSWeekCalendarUnit: return my->week;
+       case NSCalendarUnitYearForWeekOfYear: return my->yearForWeekOfYear;
+       case NSCalendarUnitNanosecond: return my->nanosecond;
+-      default: return 0;
++      default: return NSDateComponentUndefined;
+     }
+ }
+ 
+@@ -1570,6 +2772,39 @@ - (void) setValue: (NSInteger) value
+     }
+ }
+ 
++- (NSUInteger) hash
++{
++  return (NSUInteger)(my->year * 372 + my->month * 31 + my->day)
++    ^ (NSUInteger)((my->hour * 60 + my->minute) * 60 + my->second)
++    ^ (NSUInteger)my->nanosecond ^ (NSUInteger)my->weekday;
++}
++
++- (BOOL) isEqual: (id)other
++{
++  DateComp	*o;
++
++  if (other == self)
++    {
++      return YES;
++    }
++  if ([other isKindOfClass: [NSDateComponents class]] == NO)
++    {
++      return NO;
++    }
++  o = (DateComp*)((NSDateComponents*)other)->_NSDateComponentsInternal;
++  return my->era == o->era && my->year == o->year && my->month == o->month
++    && my->day == o->day && my->hour == o->hour && my->minute == o->minute
++    && my->second == o->second && my->nanosecond == o->nanosecond
++    && my->week == o->week && my->weekday == o->weekday
++    && my->weekdayOrdinal == o->weekdayOrdinal && my->quarter == o->quarter
++    && my->weekOfMonth == o->weekOfMonth
++    && my->yearForWeekOfYear == o->yearForWeekOfYear
++    && my->leapMonth == o->leapMonth
++    && (my->cal == o->cal
++      || (my->cal != nil && o->cal != nil && [my->cal isEqual: o->cal]))
++    && (my->tz == o->tz || [my->tz isEqual: o->tz]);
++}
++
+ - (id) copyWithZone: (NSZone*)zone
+ {
+   NSDateComponents  *c = [[NSDateComponents allocWithZone: zone] init];
+diff --git a/Source/externs.m b/Source/externs.m
+index 8a9f41fcd..f89a3e37d 100644
+--- a/Source/externs.m
++++ b/Source/externs.m
+@@ -484,25 +484,25 @@
+ GS_DECLARE NSString* const NSRepublicOfChinaCalendar = @"roc";
+ GS_DECLARE NSString* const NSPersianCalendar = @"persian";
+ GS_DECLARE NSString* const NSIndianCalendar = @"indian";
+-GS_DECLARE NSString* const NSISO8601Calendar = @"";
++GS_DECLARE NSString* const NSISO8601Calendar = @"iso8601";
+ 
+ /* NSLocale New Calendar ID Keys */
+ GS_DECLARE NSString* const NSCalendarIdentifierGregorian = @"gregorian";
+ GS_DECLARE NSString* const NSCalendarIdentifierBuddhist = @"buddhist";
+ GS_DECLARE NSString* const NSCalendarIdentifierChinese = @"chinese";
+ GS_DECLARE NSString* const NSCalendarIdentifierCoptic = @"coptic";
+-GS_DECLARE NSString* const NSCalendarIdentifierEthiopicAmeteMihret = @"ethiopic-amete-mihret";
++GS_DECLARE NSString* const NSCalendarIdentifierEthiopicAmeteMihret = @"ethiopic";
+ GS_DECLARE NSString* const NSCalendarIdentifierEthiopicAmeteAlem = @"ethiopic-amete-alem";
+ GS_DECLARE NSString* const NSCalendarIdentifierHebrew = @"hebrew";
+-GS_DECLARE NSString* const NSCalendarIdentifierISO8601 = @"";
++GS_DECLARE NSString* const NSCalendarIdentifierISO8601 = @"iso8601";
+ GS_DECLARE NSString* const NSCalendarIdentifierIndian = @"indian";
+ GS_DECLARE NSString* const NSCalendarIdentifierIslamic = @"islamic";
+ GS_DECLARE NSString* const NSCalendarIdentifierIslamicCivil = @"islamic-civil";
+ GS_DECLARE NSString* const NSCalendarIdentifierJapanese = @"japanese";
+ GS_DECLARE NSString* const NSCalendarIdentifierPersian = @"persian";
+ GS_DECLARE NSString* const NSCalendarIdentifierRepublicOfChina = @"roc";
+-GS_DECLARE NSString* const NSCalendarIdentifierIslamicTabular = @"islamic-tabular";
+-GS_DECLARE NSString* const NSCalendarIdentifierIslamicUmmAlQura = @"islamic-umm-al-qura";
++GS_DECLARE NSString* const NSCalendarIdentifierIslamicTabular = @"islamic-tbla";
++GS_DECLARE NSString* const NSCalendarIdentifierIslamicUmmAlQura = @"islamic-umalqura";
+ 
+ /* NSMetadata */
+ GS_DECLARE NSString* const NSMetadataQueryUserHomeScope = @"NSMetadataQueryUserHomeScope";
+diff --git a/Tests/base/NSCalendar/features-10-9.m b/Tests/base/NSCalendar/features-10-9.m
+new file mode 100644
+index 000000000..13619c9da
+--- /dev/null
++++ b/Tests/base/NSCalendar/features-10-9.m
+@@ -0,0 +1,848 @@
++/*
++ * features-10-9.m - the 10.9 additions to NSCalendar and NSDateComponents
++ * other than the searches (which are in nextDate.m).
++ *
++ * Every expected value is what macOS 15 returns for the same call, with the
++ * same calendar (Gregorian, first weekday Sunday, one day in the first
++ * week) and time zone.  Sao Paulo's clocks skipped midnight on 2017-10-15
++ * and 2018-11-04 and repeated 23:00 on 2018-02-17; Havana's repeated
++ * midnight on 2023-11-05; Apia skipped 2011-12-30 altogether; New York
++ * skipped 02:00-03:00 on 2024-03-10 and repeated 01:00-02:00 on 2024-11-03.
++ */
++#import <Foundation/Foundation.h>
++#import "Testing.h"
++
++#if	defined(GS_USE_ICU)
++#define	NSCALENDAR_SUPPORTED	GS_USE_ICU
++#else
++#define	NSCALENDAR_SUPPORTED	1 /* Assume Apple support */
++#endif
++
++#define	X	NSDateComponentUndefined
++#define	NONE	(-1.0e300)
++
++static NSCalendar	*cal = nil;
++
++static void
++setup(NSString *zone, NSString *locale)
++{
++  RELEASE(cal);
++  cal = [[NSCalendar alloc]
++    initWithCalendarIdentifier: NSCalendarIdentifierGregorian];
++  [cal setLocale: AUTORELEASE([[NSLocale alloc]
++    initWithLocaleIdentifier: locale])];
++  [cal setTimeZone: [NSTimeZone timeZoneWithName: zone]];
++  [cal setFirstWeekday: 1];
++  [cal setMinimumDaysInFirstWeek: 1];
++}
++
++static NSDate *
++D(NSTimeInterval t)
++{
++  return [NSDate dateWithTimeIntervalSince1970: t];
++}
++
++static BOOL
++is(NSDate *date, NSTimeInterval t)
++{
++  if (t == NONE)
++    {
++      return date == nil;
++    }
++  return date != nil && [date timeIntervalSince1970] == t;
++}
++
++static NSDateComponents *
++YMD(NSInteger y, NSInteger mo, NSInteger d, NSInteger h, NSInteger mi,
++  NSInteger s)
++{
++  NSDateComponents	*c = AUTORELEASE([NSDateComponents new]);
++
++  [c setYear: y];
++  [c setMonth: mo];
++  [c setDay: d];
++  [c setHour: h];
++  [c setMinute: mi];
++  [c setSecond: s];
++  return c;
++}
++
++/* Whether c has exactly the values given for units, and no others. */
++static BOOL
++has(NSDateComponents *c, NSCalendarUnit units, const NSInteger *values)
++{
++  NSCalendarUnit	u;
++  int			i = 0;
++
++  if (c == nil)
++    {
++      return NO;
++    }
++  for (u = NSCalendarUnitEra; u <= NSCalendarUnitNanosecond; u <<= 1)
++    {
++      if (u == NSWeekCalendarUnit)
++	{
++	  continue;
++	}
++      if (units & u)
++	{
++	  if ([c valueForComponent: u] != values[i++])
++	    {
++	      return NO;
++	    }
++	}
++      else if ([c valueForComponent: u] != X)
++	{
++	  return NO;
++	}
++    }
++  return YES;
++}
++
++typedef struct {
++  const char	*zone;
++  double	date;
++  double	start;
++} StartOfDay;
++
++static StartOfDay	starts[] = {
++  { "UTC", 1710510330.5 /* 2024-03-15 13:45:30.5Z */,
++    1710460800.0 /* 2024-03-15 00:00 */ },
++  { "America/Sao_Paulo", 1541332800.0 /* 2018-11-04 12:00Z */,
++    1541300400.0 /* 2018-11-04 01:00 -02, no midnight */ },
++  { "America/Sao_Paulo", 1541302200.0 /* 2018-11-04 03:30Z */,
++    1541300400.0 /* 2018-11-04 01:00 -02, no midnight */ },
++  { "America/Sao_Paulo", 1541246400.0 /* 2018-11-03 12:00Z */,
++    1541214000.0 /* 2018-11-03 00:00 -03 */ },
++  { "America/Sao_Paulo", 1508068800.0 /* 2017-10-15 12:00Z */,
++    1508036400.0 /* 2017-10-15 01:00 -02, no midnight */ },
++  { "America/Sao_Paulo", 1518868800.0 /* 2018-02-17 12:00Z */,
++    1518832800.0 /* 2018-02-17 00:00 -02 */ },
++  { "America/Sao_Paulo", 1518921000.0 /* 2018-02-18 02:30Z */,
++    1518832800.0 /* 2018-02-17 00:00 -02: the repeated 23:00 */ },
++  { "America/Sao_Paulo", 1518955200.0 /* 2018-02-18 12:00Z */,
++    1518922800.0 /* 2018-02-18 00:00 -03 */ },
++  { "America/Havana", 1699185600.0 /* 2023-11-05 12:00Z */,
++    1699156800.0 /* 2023-11-05 00:00 -04, the first of two */ },
++  { "America/Havana", 1678622400.0 /* 2023-03-12 12:00Z */,
++    1678597200.0 /* 2023-03-12 00:00 -05 */ },
++  { "Pacific/Apia", 1325332800.0 /* 2011-12-31 12:00Z */,
++    1325325600.0 /* 2011-12-31 00:00 +14 */ },
++  { "Pacific/Apia", 1325239200.0 /* 2011-12-30 10:00Z */,
++    1325239200.0 /* 2011-12-31 00:00 +14, after 2011-12-29 */ },
++  { "America/New_York", 1710072000.0 /* 2024-03-10 12:00Z */,
++    1710046800.0 /* 2024-03-10 00:00 EST */ },
++  { "America/New_York", 1730635200.0 /* 2024-11-03 12:00Z */,
++    1730606400.0 /* 2024-11-03 00:00 EDT */ },
++  { "America/New_York", 1704085199.0 /* 2024-01-01 04:59:59Z */,
++    1703998800.0 /* 2023-12-31 00:00 EST */ },
++};
++
++typedef struct {
++  double		date1;
++  double		date2;
++  NSCalendarUnit	unit;
++  NSComparisonResult	order;
++} Granularity;
++
++static Granularity	granularities[] = {
++  { 1710513930.0, 1710513930.0, NSCalendarUnitEra, 0 },
++  { 1710513930.0, 1710513930.0, NSCalendarUnitYear, 0 },
++  { 1710513930.0, 1710513930.0, NSCalendarUnitYearForWeekOfYear, 0 },
++  { 1710513930.0, 1710513930.0, NSCalendarUnitMonth, 0 },
++  { 1710513930.0, 1710513930.0, NSCalendarUnitWeekOfYear, 0 },
++  { 1710513930.0, 1710513930.0, NSCalendarUnitWeekOfMonth, 0 },
++  { 1710513930.0, 1710513930.0, NSCalendarUnitWeekdayOrdinal, 0 },
++  { 1710513930.0, 1710513930.0, NSCalendarUnitDay, 0 },
++  { 1710513930.0, 1710513930.0, NSCalendarUnitWeekday, 0 },
++  { 1710513930.0, 1710513930.0, NSCalendarUnitHour, 0 },
++  { 1710513930.0, 1710513930.0, NSCalendarUnitMinute, 0 },
++  { 1710513930.0, 1710513930.0, NSCalendarUnitSecond, 0 },
++  { 1710513930.0, 1710513930.0, NSCalendarUnitNanosecond, 0 },
++  { 1710513930.0, 1710513930.3, NSCalendarUnitEra, 0 },
++  { 1710513930.0, 1710513930.3, NSCalendarUnitYear, 0 },
++  { 1710513930.0, 1710513930.3, NSCalendarUnitYearForWeekOfYear, 0 },
++  { 1710513930.0, 1710513930.3, NSCalendarUnitMonth, 0 },
++  { 1710513930.0, 1710513930.3, NSCalendarUnitWeekOfYear, 0 },
++  { 1710513930.0, 1710513930.3, NSCalendarUnitWeekOfMonth, 0 },
++  { 1710513930.0, 1710513930.3, NSCalendarUnitWeekdayOrdinal, 0 },
++  { 1710513930.0, 1710513930.3, NSCalendarUnitDay, 0 },
++  { 1710513930.0, 1710513930.3, NSCalendarUnitWeekday, 0 },
++  { 1710513930.0, 1710513930.3, NSCalendarUnitHour, 0 },
++  { 1710513930.0, 1710513930.3, NSCalendarUnitMinute, 0 },
++  { 1710513930.0, 1710513930.3, NSCalendarUnitSecond, 0 },
++  { 1710513930.0, 1710513930.3, NSCalendarUnitNanosecond, -1 },
++  { 1710513930.0, 1710514799.0, NSCalendarUnitEra, 0 },
++  { 1710513930.0, 1710514799.0, NSCalendarUnitYear, 0 },
++  { 1710513930.0, 1710514799.0, NSCalendarUnitYearForWeekOfYear, 0 },
++  { 1710513930.0, 1710514799.0, NSCalendarUnitMonth, 0 },
++  { 1710513930.0, 1710514799.0, NSCalendarUnitWeekOfYear, 0 },
++  { 1710513930.0, 1710514799.0, NSCalendarUnitWeekOfMonth, 0 },
++  { 1710513930.0, 1710514799.0, NSCalendarUnitWeekdayOrdinal, 0 },
++  { 1710513930.0, 1710514799.0, NSCalendarUnitDay, 0 },
++  { 1710513930.0, 1710514799.0, NSCalendarUnitWeekday, 0 },
++  { 1710513930.0, 1710514799.0, NSCalendarUnitHour, 0 },
++  { 1710513930.0, 1710514799.0, NSCalendarUnitMinute, -1 },
++  { 1710513930.0, 1710514799.0, NSCalendarUnitSecond, -1 },
++  { 1710513930.0, 1710514799.0, NSCalendarUnitNanosecond, -1 },
++  { 1710513930.0, 1710558000.0, NSCalendarUnitEra, 0 },
++  { 1710513930.0, 1710558000.0, NSCalendarUnitYear, 0 },
++  { 1710513930.0, 1710558000.0, NSCalendarUnitYearForWeekOfYear, 0 },
++  { 1710513930.0, 1710558000.0, NSCalendarUnitMonth, 0 },
++  { 1710513930.0, 1710558000.0, NSCalendarUnitWeekOfYear, 0 },
++  { 1710513930.0, 1710558000.0, NSCalendarUnitWeekOfMonth, 0 },
++  { 1710513930.0, 1710558000.0, NSCalendarUnitWeekdayOrdinal, 0 },
++  { 1710513930.0, 1710558000.0, NSCalendarUnitDay, 0 },
++  { 1710513930.0, 1710558000.0, NSCalendarUnitWeekday, 0 },
++  { 1710513930.0, 1710558000.0, NSCalendarUnitHour, -1 },
++  { 1710513930.0, 1710558000.0, NSCalendarUnitMinute, -1 },
++  { 1710513930.0, 1710558000.0, NSCalendarUnitSecond, -1 },
++  { 1710513930.0, 1710558000.0, NSCalendarUnitNanosecond, -1 },
++  { 1710513930.0, 1710561600.0, NSCalendarUnitEra, 0 },
++  { 1710513930.0, 1710561600.0, NSCalendarUnitYear, 0 },
++  { 1710513930.0, 1710561600.0, NSCalendarUnitYearForWeekOfYear, 0 },
++  { 1710513930.0, 1710561600.0, NSCalendarUnitMonth, 0 },
++  { 1710513930.0, 1710561600.0, NSCalendarUnitWeekOfYear, 0 },
++  { 1710513930.0, 1710561600.0, NSCalendarUnitWeekOfMonth, 0 },
++  { 1710513930.0, 1710561600.0, NSCalendarUnitWeekdayOrdinal, 0 },
++  { 1710513930.0, 1710561600.0, NSCalendarUnitDay, -1 },
++  { 1710513930.0, 1710561600.0, NSCalendarUnitWeekday, -1 },
++  { 1710513930.0, 1710561600.0, NSCalendarUnitHour, -1 },
++  { 1710513930.0, 1710561600.0, NSCalendarUnitMinute, -1 },
++  { 1710513930.0, 1710561600.0, NSCalendarUnitSecond, -1 },
++  { 1710513930.0, 1710561600.0, NSCalendarUnitNanosecond, -1 },
++  { 1710513930.0, 1710648000.0, NSCalendarUnitEra, 0 },
++  { 1710513930.0, 1710648000.0, NSCalendarUnitYear, 0 },
++  { 1710513930.0, 1710648000.0, NSCalendarUnitYearForWeekOfYear, 0 },
++  { 1710513930.0, 1710648000.0, NSCalendarUnitMonth, 0 },
++  { 1710513930.0, 1710648000.0, NSCalendarUnitWeekOfYear, -1 },
++  { 1710513930.0, 1710648000.0, NSCalendarUnitWeekOfMonth, -1 },
++  { 1710513930.0, 1710648000.0, NSCalendarUnitWeekdayOrdinal, 0 },
++  { 1710513930.0, 1710648000.0, NSCalendarUnitDay, -1 },
++  { 1710513930.0, 1710648000.0, NSCalendarUnitWeekday, -1 },
++  { 1710513930.0, 1710648000.0, NSCalendarUnitHour, -1 },
++  { 1710513930.0, 1710648000.0, NSCalendarUnitMinute, -1 },
++  { 1710513930.0, 1710648000.0, NSCalendarUnitSecond, -1 },
++  { 1710513930.0, 1710648000.0, NSCalendarUnitNanosecond, -1 },
++  { 1711893600.0, 1711980000.0, NSCalendarUnitEra, 0 },
++  { 1711893600.0, 1711980000.0, NSCalendarUnitYear, 0 },
++  { 1711893600.0, 1711980000.0, NSCalendarUnitYearForWeekOfYear, 0 },
++  { 1711893600.0, 1711980000.0, NSCalendarUnitMonth, -1 },
++  { 1711893600.0, 1711980000.0, NSCalendarUnitWeekOfYear, 0 },
++  { 1711893600.0, 1711980000.0, NSCalendarUnitWeekOfMonth, -1 },
++  { 1711893600.0, 1711980000.0, NSCalendarUnitWeekdayOrdinal, -1 },
++  { 1711893600.0, 1711980000.0, NSCalendarUnitDay, -1 },
++  { 1711893600.0, 1711980000.0, NSCalendarUnitWeekday, -1 },
++  { 1711893600.0, 1711980000.0, NSCalendarUnitHour, -1 },
++  { 1711893600.0, 1711980000.0, NSCalendarUnitMinute, -1 },
++  { 1711893600.0, 1711980000.0, NSCalendarUnitSecond, -1 },
++  { 1711893600.0, 1711980000.0, NSCalendarUnitNanosecond, -1 },
++  { 1735653600.0, 1735740000.0, NSCalendarUnitEra, 0 },
++  { 1735653600.0, 1735740000.0, NSCalendarUnitYear, -1 },
++  { 1735653600.0, 1735740000.0, NSCalendarUnitYearForWeekOfYear, 0 },
++  { 1735653600.0, 1735740000.0, NSCalendarUnitMonth, -1 },
++  { 1735653600.0, 1735740000.0, NSCalendarUnitWeekOfYear, 0 },
++  { 1735653600.0, 1735740000.0, NSCalendarUnitWeekOfMonth, -1 },
++  { 1735653600.0, 1735740000.0, NSCalendarUnitWeekdayOrdinal, -1 },
++  { 1735653600.0, 1735740000.0, NSCalendarUnitDay, -1 },
++  { 1735653600.0, 1735740000.0, NSCalendarUnitWeekday, -1 },
++  { 1735653600.0, 1735740000.0, NSCalendarUnitHour, -1 },
++  { 1735653600.0, 1735740000.0, NSCalendarUnitMinute, -1 },
++  { 1735653600.0, 1735740000.0, NSCalendarUnitSecond, -1 },
++  { 1735653600.0, 1735740000.0, NSCalendarUnitNanosecond, -1 },
++  { 1710513930.0, 1678891530.0, NSCalendarUnitEra, 0 },
++  { 1710513930.0, 1678891530.0, NSCalendarUnitYear, 1 },
++  { 1710513930.0, 1678891530.0, NSCalendarUnitYearForWeekOfYear, 1 },
++  { 1710513930.0, 1678891530.0, NSCalendarUnitMonth, 1 },
++  { 1710513930.0, 1678891530.0, NSCalendarUnitWeekOfYear, 1 },
++  { 1710513930.0, 1678891530.0, NSCalendarUnitWeekOfMonth, 1 },
++  { 1710513930.0, 1678891530.0, NSCalendarUnitWeekdayOrdinal, 1 },
++  { 1710513930.0, 1678891530.0, NSCalendarUnitDay, 1 },
++  { 1710513930.0, 1678891530.0, NSCalendarUnitWeekday, 1 },
++  { 1710513930.0, 1678891530.0, NSCalendarUnitHour, 1 },
++  { 1710513930.0, 1678891530.0, NSCalendarUnitMinute, 1 },
++  { 1710513930.0, 1678891530.0, NSCalendarUnitSecond, 1 },
++  { 1710513930.0, 1678891530.0, NSCalendarUnitNanosecond, 1 },
++};
++
++typedef struct {
++  NSCalendarUnit	smaller;
++  NSCalendarUnit	larger;
++  NSUInteger		ordinality;
++} Ordinality;
++
++/* For Friday 2024-03-15 10:45:30 EDT. */
++static Ordinality	ordinalities[] = {
++  { NSCalendarUnitDay, NSCalendarUnitMonth, 15 },
++  { NSCalendarUnitDay, NSCalendarUnitYear, 75 },
++  { NSCalendarUnitDay, NSCalendarUnitWeekOfYear, 6 },
++  { NSCalendarUnitDay, NSCalendarUnitWeekOfMonth, 6 },
++  { NSCalendarUnitWeekday, NSCalendarUnitWeekOfYear, 6 },
++  { NSCalendarUnitWeekday, NSCalendarUnitMonth, 3 },
++  { NSCalendarUnitWeekdayOrdinal, NSCalendarUnitMonth, 3 },
++  { NSCalendarUnitHour, NSCalendarUnitDay, 11 },
++  { NSCalendarUnitHour, NSCalendarUnitYear, 1787 },
++  { NSCalendarUnitHour, NSCalendarUnitWeekOfYear, 131 },
++  { NSCalendarUnitMinute, NSCalendarUnitHour, 46 },
++  { NSCalendarUnitSecond, NSCalendarUnitMinute, 31 },
++  { NSCalendarUnitMonth, NSCalendarUnitYear, 3 },
++  { NSCalendarUnitMonth, NSCalendarUnitQuarter, 3 },
++  { NSCalendarUnitQuarter, NSCalendarUnitYear, 1 },
++  { NSCalendarUnitWeekOfYear, NSCalendarUnitYear, 11 },
++  { NSCalendarUnitWeekOfMonth, NSCalendarUnitMonth, 3 },
++  { NSCalendarUnitYear, NSCalendarUnitEra, 2024 },
++  { NSCalendarUnitDay, NSCalendarUnitDay, NSNotFound },
++  { NSCalendarUnitYear, NSCalendarUnitMonth, NSNotFound },
++  { NSCalendarUnitWeekOfYear, NSCalendarUnitMonth, NSNotFound },
++};
++
++int main()
++{
++  START_SET("NSCalendar 10.9 features")
++    NSDateComponents	*c;
++    NSDate		*d;
++    NSDate		*start;
++    NSTimeInterval	length;
++    NSInteger		e, y, m, dd;
++    unsigned		i;
++    BOOL		ok;
++
++    if (!NSCALENDAR_SUPPORTED)
++      SKIP("NSCalendar not supported\nThe ICU library was not available when GNUstep-base was built")
++
++    /* -startOfDayForDate: is the first moment of the day, where there is
++     * no midnight or two. */
++    for (i = 0; i < sizeof(starts) / sizeof(starts[0]); i++)
++      {
++	setup([NSString stringWithUTF8String: starts[i].zone], @"en_US");
++	PASS(is([cal startOfDayForDate: D(starts[i].date)], starts[i].start),
++	  "-startOfDayForDate: %.1f in %s", starts[i].date, starts[i].zone);
++      }
++
++    setup(@"America/Sao_Paulo", @"pt_BR");
++    start = nil;
++    length = 0;
++    ok = [cal rangeOfUnit: NSCalendarUnitDay startDate: &start
++      interval: &length forDate: D(1541332800.0)];
++    PASS(ok && is(start, 1541300400.0) && length == 82800.0,
++      "a day without midnight is 23 hours from its first moment");
++    ok = [cal rangeOfUnit: NSCalendarUnitDay startDate: &start
++      interval: &length forDate: D(1518868800.0)];
++    PASS(ok && is(start, 1518832800.0) && length == 90000.0,
++      "a day with a repeated hour is 25 hours");
++    setup(@"America/Havana", @"es_CU");
++    ok = [cal rangeOfUnit: NSCalendarUnitDay startDate: &start
++      interval: &length forDate: D(1699185600.0)];
++    PASS(ok && is(start, 1699156800.0) && length == 90000.0,
++      "a day with two midnights starts at the first and is 25 hours");
++
++    setup(@"America/New_York", @"en_US");
++    PASS(![cal isDate: D(1710046740.0) inSameDayAsDate: D(1710046800.0)],
++      "-isDate:inSameDayAsDate: 23:59 and the next midnight");
++    PASS([cal isDate: D(1710046800.0) inSameDayAsDate: D(1710129540.0)],
++      "-isDate:inSameDayAsDate: both ends of a 23 hour day");
++    PASS(![cal isDate: D(1710046800.0) inSameDayAsDate: D(1710129600.0)],
++      "-isDate:inSameDayAsDate: midnight and the next midnight");
++    {
++      NSDate	*now = [NSDate date];
++      NSDate	*sod = [cal startOfDayForDate: now];
++
++      PASS([cal isDateInToday: now], "-isDateInToday: now");
++      PASS([cal isDateInToday: sod], "-isDateInToday: start of today");
++      PASS(![cal isDateInToday: [sod dateByAddingTimeInterval: -1]],
++	"-isDateInToday: a second before today");
++      PASS([cal isDateInYesterday: [sod dateByAddingTimeInterval: -1]],
++	"-isDateInYesterday: a second before today");
++      PASS(![cal isDateInYesterday: sod],
++	"-isDateInYesterday: start of today");
++      PASS(![cal isDateInTomorrow: now], "-isDateInTomorrow: now");
++      PASS([cal isDateInTomorrow: [cal dateByAddingUnit: NSCalendarUnitDay
++	value: 1 toDate: now options: 0]],
++	"-isDateInTomorrow: a day from now");
++      PASS([cal isDateInYesterday: [cal dateByAddingUnit: NSCalendarUnitDay
++	value: -1 toDate: now options: 0]],
++	"-isDateInYesterday: a day ago");
++    }
++
++    for (i = 0; i < sizeof(granularities) / sizeof(granularities[0]); i++)
++      {
++	Granularity	*g = &granularities[i];
++
++	PASS([cal compareDate: D(g->date1) toDate: D(g->date2)
++	  toUnitGranularity: g->unit] == g->order
++	  && [cal isDate: D(g->date1) equalToDate: D(g->date2)
++	  toUnitGranularity: g->unit] == (g->order == NSOrderedSame),
++	  "-compareDate:toDate:toUnitGranularity: %.1f %.1f unit %lx",
++	  g->date1, g->date2, (unsigned long)g->unit);
++      }
++
++    /* Weekends come from the locale's region. */
++    setup(@"UTC", @"en_US");
++    PASS(![cal isDateInWeekend: D(1710547199.0)],
++      "-isDateInWeekend: Friday 23:59:59 in the US");
++    PASS([cal isDateInWeekend: D(1710547200.0)],
++      "-isDateInWeekend: Saturday 00:00 in the US");
++    PASS([cal isDateInWeekend: D(1710719999.0)],
++      "-isDateInWeekend: Sunday 23:59:59 in the US");
++    PASS(![cal isDateInWeekend: D(1710720000.0)],
++      "-isDateInWeekend: Monday 00:00 in the US");
++    start = nil;
++    length = 0;
++    ok = [cal rangeOfWeekendStartDate: &start interval: &length
++      containingDate: D(1710687600.0)];
++    PASS(ok && is(start, 1710547200.0) && length == 172800.0,
++      "-rangeOfWeekendStartDate:interval:containingDate: Sunday");
++    start = nil;
++    length = -1;
++    ok = [cal rangeOfWeekendStartDate: &start interval: &length
++      containingDate: D(1710342000.0)];
++    PASS(!ok && start == nil && length == -1,
++      "-rangeOfWeekendStartDate:interval:containingDate: Wednesday");
++    ok = [cal nextWeekendStartDate: &start interval: &length options: 0
++      afterDate: D(1710342000.0)];
++    PASS(ok && is(start, 1710547200.0) && length == 172800.0,
++      "-nextWeekendStartDate:interval:options:afterDate: from Wednesday");
++    ok = [cal nextWeekendStartDate: &start interval: &length options: 0
++      afterDate: D(1710601200.0)];
++    PASS(ok && is(start, 1711152000.0) && length == 172800.0,
++      "-nextWeekendStartDate:interval:options:afterDate: from Saturday");
++    ok = [cal nextWeekendStartDate: &start interval: &length options: 0
++      afterDate: D(1710547200.0)];
++    PASS(ok && is(start, 1711152000.0),
++      "-nextWeekendStartDate:interval:options:afterDate: from its start");
++    ok = [cal nextWeekendStartDate: &start interval: &length
++      options: NSCalendarSearchBackwards afterDate: D(1710342000.0)];
++    PASS(ok && is(start, 1709942400.0) && length == 172800.0,
++      "-nextWeekendStartDate:interval:options:afterDate: back from Wednesday");
++    ok = [cal nextWeekendStartDate: &start interval: &length
++      options: NSCalendarSearchBackwards afterDate: D(1710601200.0)];
++    PASS(ok && is(start, 1709942400.0),
++      "-nextWeekendStartDate:interval:options:afterDate: back from Saturday");
++    setup(@"UTC", @"he_IL");
++    PASS(![cal isDateInWeekend: D(1710417600.0)],
++      "-isDateInWeekend: Thursday in Israel");
++    PASS([cal isDateInWeekend: D(1710504000.0)],
++      "-isDateInWeekend: Friday in Israel");
++    PASS([cal isDateInWeekend: D(1710590400.0)],
++      "-isDateInWeekend: Saturday in Israel");
++    PASS(![cal isDateInWeekend: D(1710676800.0)],
++      "-isDateInWeekend: Sunday in Israel");
++    ok = [cal rangeOfWeekendStartDate: &start interval: &length
++      containingDate: D(1710601200.0)];
++    PASS(ok && is(start, 1710460800.0) && length == 172800.0,
++      "-rangeOfWeekendStartDate:interval:containingDate: Israel's weekend"
++      " starts on Friday");
++    setup(@"America/New_York", @"en_US");
++    ok = [cal rangeOfWeekendStartDate: &start interval: &length
++      containingDate: D(1709996400.0)];
++    PASS(ok && is(start, 1709960400.0) && length == 169200.0,
++      "-rangeOfWeekendStartDate:interval:containingDate: a weekend losing"
++      " an hour");
++
++    /* 2024-12-30 23:30:15.123456789Z is Tuesday 31 December in Berlin. */
++    setup(@"Europe/Berlin", @"de_DE");
++    d = D(1735601415.0 + 0.123456789);
++    {
++      NSCalendarUnit	units[] = { NSCalendarUnitEra, NSCalendarUnitYear,
++	NSCalendarUnitMonth, NSCalendarUnitDay, NSCalendarUnitHour,
++	NSCalendarUnitMinute, NSCalendarUnitSecond, NSCalendarUnitNanosecond,
++	NSCalendarUnitWeekday, NSCalendarUnitWeekdayOrdinal,
++	NSCalendarUnitQuarter, NSCalendarUnitWeekOfMonth,
++	NSCalendarUnitWeekOfYear, NSCalendarUnitYearForWeekOfYear };
++      NSInteger		values[] = { 1, 2024, 12, 31, 0, 30, 15, 123456716,
++	3, 5, 4, 5, 1, 2025 };
++      NSInteger		all[] = { 1, 2024, 12, 31, 0, 30, 15, 3, 5, 4, 5, 1,
++	2025, 123456716 };
++      NSInteger		tokyo[] = { 1, 2024, 12, 31, 8, 30, 15, 3, 5, 4, 5, 1,
++	2025, 123456716 };
++      NSInteger		day[] = { 31 };
++
++      for (i = 0; i < sizeof(units) / sizeof(units[0]); i++)
++	{
++	  PASS([cal component: units[i] fromDate: d] == values[i],
++	    "-component:fromDate: unit %lx", (unsigned long)units[i]);
++	}
++      c = [cal components: NSCalendarUnitEra | NSCalendarUnitYear
++	| NSCalendarUnitMonth | NSCalendarUnitDay | NSCalendarUnitHour
++	| NSCalendarUnitMinute | NSCalendarUnitSecond | NSCalendarUnitWeekday
++	| NSCalendarUnitWeekdayOrdinal | NSCalendarUnitQuarter
++	| NSCalendarUnitWeekOfMonth | NSCalendarUnitWeekOfYear
++	| NSCalendarUnitYearForWeekOfYear | NSCalendarUnitNanosecond
++		 fromDate: d];
++      PASS(has(c, NSCalendarUnitEra | NSCalendarUnitYear | NSCalendarUnitMonth
++	| NSCalendarUnitDay | NSCalendarUnitHour | NSCalendarUnitMinute
++	| NSCalendarUnitSecond | NSCalendarUnitWeekday
++	| NSCalendarUnitWeekdayOrdinal | NSCalendarUnitQuarter
++	| NSCalendarUnitWeekOfMonth | NSCalendarUnitWeekOfYear
++	| NSCalendarUnitYearForWeekOfYear | NSCalendarUnitNanosecond, all),
++	"-components:fromDate: gives nanoseconds, not milliseconds");
++      c = [cal components: NSCalendarUnitCalendar | NSCalendarUnitTimeZone
++	| NSCalendarUnitDay fromDate: d];
++      PASS(has(c, NSCalendarUnitDay, day)
++	&& [[[c calendar] calendarIdentifier] isEqual: @"gregorian"]
++	&& [[[c timeZone] name] isEqual: @"Europe/Berlin"],
++	"-components:fromDate: sets the calendar and time zone asked for");
++      c = [cal componentsInTimeZone: [NSTimeZone timeZoneWithName: @"Asia/Tokyo"]
++			   fromDate: d];
++      PASS(has(c, NSCalendarUnitEra | NSCalendarUnitYear | NSCalendarUnitMonth
++	| NSCalendarUnitDay | NSCalendarUnitHour | NSCalendarUnitMinute
++	| NSCalendarUnitSecond | NSCalendarUnitWeekday
++	| NSCalendarUnitWeekdayOrdinal | NSCalendarUnitQuarter
++	| NSCalendarUnitWeekOfMonth | NSCalendarUnitWeekOfYear
++	| NSCalendarUnitYearForWeekOfYear | NSCalendarUnitNanosecond, tokyo)
++	&& [[[c calendar] calendarIdentifier] isEqual: @"gregorian"]
++	&& [[[c timeZone] name] isEqual: @"Asia/Tokyo"]
++	&& [[[cal timeZone] name] isEqual: @"Europe/Berlin"],
++	"-componentsInTimeZone:fromDate: gives everything in that time zone");
++      PASS([cal component: NSCalendarUnitNanosecond fromDate: D(-0.25)]
++	== 750000000
++	&& [cal component: NSCalendarUnitSecond fromDate: D(-0.25)] == 59,
++	"-component:fromDate: before 1970 counts nanoseconds up from the second");
++
++      e = y = m = dd = -1;
++      [cal getEra: &e year: &y month: &m day: &dd fromDate: d];
++      PASS(e == 1 && y == 2024 && m == 12 && dd == 31,
++	"-getEra:year:month:day:fromDate:");
++      e = y = m = dd = -1;
++      [cal getEra: &e yearForWeekOfYear: &y weekOfYear: &m weekday: &dd
++	fromDate: d];
++      PASS(e == 1 && y == 2025 && m == 1 && dd == 3,
++	"-getEra:yearForWeekOfYear:weekOfYear:weekday:fromDate:");
++      e = y = m = dd = -1;
++      [cal getHour: &e minute: &y second: &m nanosecond: &dd fromDate: d];
++      PASS(e == 0 && y == 30 && m == 15 && dd == 123456716,
++	"-getHour:minute:second:nanosecond:fromDate:");
++      [cal getHour: NULL minute: NULL second: NULL nanosecond: &dd
++	fromDate: D(0.5)];
++      PASS(dd == 500000000,
++	"-getHour:minute:second:nanosecond:fromDate: half a second is"
++	" 500000000 nanoseconds");
++    }
++
++    setup(@"America/New_York", @"en_US");
++    {
++      NSInteger	ymd[] = { 0, 1, 1 };
++      NSInteger	md[] = { -1, -1 };
++      NSInteger	dh[] = { 1, 0 };
++      NSInteger	h[] = { 23 };
++      NSInteger	wd[] = { 5, 2 };
++      NSInteger	sns[] = { 2, 750000000 };
++      NSInteger	ey[] = { 0, 24 };
++      NSInteger	w[] = { 19 };
++      NSInteger	day[] = { 19 };
++
++      PASS(has([cal components: NSCalendarUnitYear | NSCalendarUnitMonth
++	| NSCalendarUnitDay fromDate: D(1706720400.0) toDate: D(1709312400.0)
++	options: 0], NSCalendarUnitYear | NSCalendarUnitMonth
++	| NSCalendarUnitDay, ymd),
++	"-components:fromDate:toDate:options: 31 January to 1 March");
++      PASS(has([cal components: NSCalendarUnitMonth | NSCalendarUnitDay
++	fromDate: D(1709312400.0) toDate: D(1706720400.0) options: 0],
++	NSCalendarUnitMonth | NSCalendarUnitDay, md),
++	"-components:fromDate:toDate:options: backwards");
++      PASS(has([cal components: NSCalendarUnitDay | NSCalendarUnitHour
++	fromDate: D(1710003600.0) toDate: D(1710086400.0) options: 0],
++	NSCalendarUnitDay | NSCalendarUnitHour, dh),
++	"-components:fromDate:toDate:options: a day of 23 hours is a day");
++      PASS(has([cal components: NSCalendarUnitHour
++	fromDate: D(1710003600.0) toDate: D(1710086400.0) options: 0],
++	NSCalendarUnitHour, h),
++	"-components:fromDate:toDate:options: a day of 23 hours in hours");
++      PASS(has([cal components: NSCalendarUnitWeekOfYear | NSCalendarUnitDay
++	fromDate: D(1709312400.0) toDate: D(1710954000.0) options: 0],
++	NSCalendarUnitDay | NSCalendarUnitWeekOfYear, wd),
++	"-components:fromDate:toDate:options: weeks and days");
++      PASS(has([cal components: NSCalendarUnitSecond | NSCalendarUnitNanosecond
++	fromDate: D(1709312400.0) toDate: D(1709312402.75) options: 0],
++	NSCalendarUnitSecond | NSCalendarUnitNanosecond, sns),
++	"-components:fromDate:toDate:options: nanoseconds");
++      PASS(has([cal components: NSCalendarUnitEra | NSCalendarUnitYear
++	fromDate: D(947955600.0) toDate: D(1732122000.0) options: 0],
++	NSCalendarUnitEra | NSCalendarUnitYear, ey),
++	"-components:fromDate:toDate:options: era and year");
++      PASS(has([cal components: NSCalendarUnitWeekday
++	fromDate: D(1709312400.0) toDate: D(1710954000.0) options: 0],
++	NSCalendarUnitWeekday, w),
++	"-components:fromDate:toDate:options: weekdays count days");
++      c = [cal components: NSCalendarUnitCalendar | NSCalendarUnitDay
++	fromDate: D(1709312400.0) toDate: D(1710954000.0) options: 0];
++      PASS(has(c, NSCalendarUnitDay, day) && [c calendar] != nil,
++	"-components:fromDate:toDate:options: sets the calendar asked for");
++    }
++
++    setup(@"UTC", @"en_US");
++    {
++      NSInteger		d30[] = { 30 };
++      NSInteger		md[] = { 1, 1 };
++      NSInteger		mi[] = { 105 };
++      NSInteger		yd[] = { 24, 0 };
++      NSInteger		h[] = { 23 };
++      NSDateComponents	*a = YMD(2024, 3, 9, 12, 0, 0);
++      NSDateComponents	*b = YMD(2024, 3, 10, 12, 0, 0);
++
++      PASS(has([cal components: NSCalendarUnitDay
++	fromDateComponents: YMD(2024, 1, 31, X, X, X)
++	toDateComponents: YMD(2024, 3, 1, X, X, X) options: 0],
++	NSCalendarUnitDay, d30),
++	"-components:fromDateComponents:toDateComponents:options: days");
++      PASS(has([cal components: NSCalendarUnitMonth | NSCalendarUnitDay
++	fromDateComponents: YMD(2024, 1, 31, X, X, X)
++	toDateComponents: YMD(2024, 3, 1, X, X, X) options: 0],
++	NSCalendarUnitMonth | NSCalendarUnitDay, md),
++	"-components:fromDateComponents:toDateComponents:options: months");
++      PASS(has([cal components: NSCalendarUnitMinute
++	fromDateComponents: YMD(X, X, X, 10, 15, X)
++	toDateComponents: YMD(X, X, X, 12, 0, X) options: 0],
++	NSCalendarUnitMinute, mi),
++	"-components:fromDateComponents:toDateComponents:options: times");
++      PASS(has([cal components: NSCalendarUnitYear | NSCalendarUnitDay
++	fromDateComponents: YMD(2000, X, X, X, X, X)
++	toDateComponents: YMD(2024, X, X, X, X, X) options: 0],
++	NSCalendarUnitYear | NSCalendarUnitDay, yd),
++	"-components:fromDateComponents:toDateComponents:options: years");
++      [a setTimeZone: [NSTimeZone timeZoneWithName: @"America/New_York"]];
++      [b setTimeZone: [NSTimeZone timeZoneWithName: @"America/New_York"]];
++      PASS(has([cal components: NSCalendarUnitHour
++	fromDateComponents: a toDateComponents: b options: 0],
++	NSCalendarUnitHour, h),
++	"-components:fromDateComponents:toDateComponents:options: uses the"
++	" components' time zone");
++    }
++
++    PASS(is([cal dateWithEra: 1 year: 2024 month: 2 day: 29 hour: 13
++      minute: 14 second: 15 nanosecond: 500000000], 1709212455.5),
++      "-dateWithEra:year:month:day:hour:minute:second:nanosecond:");
++    PASS(is([cal dateWithEra: 1 year: 2023 month: 2 day: 29 hour: 0
++      minute: 0 second: 0 nanosecond: 0], 1677628800.0),
++      "-dateWithEra:year:month:day:hour:minute:second:nanosecond: 29 February"
++      " 2023 is 1 March");
++    PASS(is([cal dateWithEra: 1 year: 2024 month: 13 day: 1 hour: 0
++      minute: 0 second: 0 nanosecond: 0], 1735689600.0),
++      "-dateWithEra:year:month:day:hour:minute:second:nanosecond: month 13");
++    PASS(is([cal dateWithEra: 1 year: 2024 month: 1 day: 1 hour: 25
++      minute: 0 second: 0 nanosecond: 0], 1704157200.0),
++      "-dateWithEra:year:month:day:hour:minute:second:nanosecond: hour 25");
++    PASS(is([cal dateWithEra: 0 year: 1 month: 1 day: 1 hour: 0
++      minute: 0 second: 0 nanosecond: 0], -62167392000.0),
++      "-dateWithEra:year:month:day:hour:minute:second:nanosecond: 1 BC");
++    PASS(is([cal dateWithEra: 1 yearForWeekOfYear: 2021 weekOfYear: 1
++      weekday: 2 hour: 0 minute: 0 second: 0 nanosecond: 0], 1609113600.0),
++      "-dateWithEra:yearForWeekOfYear:...: Monday of week 1 of 2021");
++    PASS(is([cal dateWithEra: 1 yearForWeekOfYear: 2021 weekOfYear: 53
++      weekday: 1 hour: 0 minute: 0 second: 0 nanosecond: 0], 1640476800.0),
++      "-dateWithEra:yearForWeekOfYear:...: Sunday of week 53 of 2021");
++    [cal setFirstWeekday: 2];
++    [cal setMinimumDaysInFirstWeek: 4];
++    PASS(is([cal dateWithEra: 1 yearForWeekOfYear: 2021 weekOfYear: 1
++      weekday: 2 hour: 6 minute: 7 second: 8 nanosecond: 0], 1609740428.0),
++      "-dateWithEra:yearForWeekOfYear:...: ISO week 1 of 2021");
++    PASS(is([cal dateWithEra: 1 yearForWeekOfYear: 2020 weekOfYear: 53
++      weekday: 6 hour: 0 minute: 0 second: 0 nanosecond: 0], 1609459200.0),
++      "-dateWithEra:yearForWeekOfYear:...: ISO week 53 of 2020");
++    setup(@"America/Sao_Paulo", @"pt_BR");
++    PASS(is([cal dateWithEra: 1 year: 2018 month: 11 day: 4 hour: 0
++      minute: 0 second: 0 nanosecond: 0], 1541300400.0),
++      "-dateWithEra:year:...: a skipped midnight is the moment after");
++    PASS(is([cal dateWithEra: 1 year: 2018 month: 11 day: 4 hour: 0
++      minute: 30 second: 0 nanosecond: 0], 1541302200.0),
++      "-dateWithEra:year:...: a skipped time moves on by the gap");
++    PASS(is([cal dateWithEra: 1 year: 2018 month: 2 day: 17 hour: 23
++      minute: 30 second: 0 nanosecond: 0], 1518917400.0),
++      "-dateWithEra:year:...: a repeated time is the first");
++    setup(@"America/New_York", @"en_US");
++    PASS(is([cal dateWithEra: 1 year: 2024 month: 3 day: 10 hour: 2
++      minute: 30 second: 0 nanosecond: 0], 1710055800.0),
++      "-dateWithEra:year:...: 02:30 in New York's gap");
++    PASS(is([cal dateWithEra: 1 year: 2024 month: 11 day: 3 hour: 1
++      minute: 30 second: 0 nanosecond: 0], 1730611800.0),
++      "-dateWithEra:year:...: 01:30 in New York's repeated hour is the first");
++    setup(@"America/Havana", @"es_CU");
++    PASS(is([cal dateWithEra: 1 year: 2023 month: 11 day: 5 hour: 0
++      minute: 30 second: 0 nanosecond: 0], 1699158600.0),
++      "-dateWithEra:year:...: the first of Havana's two 00:30s");
++
++    setup(@"America/New_York", @"en_US");
++    {
++      struct { NSCalendarUnit unit; NSInteger value; double date;
++	NSUInteger options; double expected; const char *name; } adds[] = {
++	{ NSCalendarUnitMonth, 1, 1706720400.0, 0, 1709226000.0,
++	  "a month from 31 January is 29 February" },
++	{ NSCalendarUnitDay, 1, 1710003600.0, 0, 1710086400.0,
++	  "a day keeps the time of day over a gap" },
++	{ NSCalendarUnitHour, 24, 1710003600.0, 0, 1710090000.0,
++	  "24 hours over a gap is 25 on the clock" },
++	{ NSCalendarUnitDay, 1, 1706720400.0, NSCalendarWrapComponents,
++	  1704128400.0, "a day wrapped from 31 January is 1 January" },
++	{ NSCalendarUnitMonth, 1, 1734282000.0, NSCalendarWrapComponents,
++	  1705338000.0, "a month wrapped from December is January" },
++	{ NSCalendarUnitYear, -1, 1709226000.0, 0, 1677603600.0,
++	  "a year back from 29 February is 28 February" },
++	{ NSCalendarUnitWeekOfYear, 2, 1709312400.0, 0, 1710518400.0,
++	  "two weeks" },
++	{ NSCalendarUnitWeekday, 3, 1709312400.0, 0, 1709571600.0,
++	  "three weekdays are three days" },
++	{ NSCalendarUnitQuarter, 1, 1709312400.0, 0, 1709312400.0,
++	  "a quarter is not added" },
++	{ NSCalendarUnitNanosecond, 1500000000, 1709312400.0, 0, 1709312401.5,
++	  "1500000000 nanoseconds" },
++	{ NSCalendarUnitSecond, 0, 1709312400.25, 0, 1709312400.25,
++	  "nothing keeps a fraction of a second" },
++	{ NSCalendarUnitEra, 1, 1709312400.0, 0, 1709312400.0,
++	  "an era is not added" },
++	{ NSCalendarUnitYearForWeekOfYear, 1, 1709312400.0, 0, 1740762000.0,
++	  "a week-based year" },
++	{ NSCalendarUnitDay, 1, 1709969400.0, 0, 1710055800.0,
++	  "a day from 02:30 the day before a gap" },
++      };
++
++      for (i = 0; i < sizeof(adds) / sizeof(adds[0]); i++)
++	{
++	  PASS(is([cal dateByAddingUnit: adds[i].unit value: adds[i].value
++	    toDate: D(adds[i].date) options: adds[i].options],
++	    adds[i].expected),
++	    "-dateByAddingUnit:value:toDate:options: %s", adds[i].name);
++	}
++    }
++
++    d = D(1710513930.0);	/* Friday 2024-03-15 10:45:30 EDT */
++    for (i = 0; i < sizeof(ordinalities) / sizeof(ordinalities[0]); i++)
++      {
++	PASS([cal ordinalityOfUnit: ordinalities[i].smaller
++			    inUnit: ordinalities[i].larger
++			   forDate: d] == ordinalities[i].ordinality,
++	  "-ordinalityOfUnit:inUnit:forDate: %lx in %lx",
++	  (unsigned long)ordinalities[i].smaller,
++	  (unsigned long)ordinalities[i].larger);
++      }
++    PASS([cal ordinalityOfUnit: NSCalendarUnitHour inUnit: NSCalendarUnitDay
++      forDate: D(1710055800.0)] == 4,
++      "-ordinalityOfUnit:inUnit:forDate: 03:30 after a gap is in hour 4");
++    PASS([cal ordinalityOfUnit: NSCalendarUnitHour inUnit: NSCalendarUnitDay
++      forDate: D(1730615400.0)] == 2,
++      "-ordinalityOfUnit:inUnit:forDate: the second 01:30 is in hour 2");
++
++    PASS(NSEqualRanges([cal minimumRangeOfUnit: NSCalendarUnitDay],
++      NSMakeRange(1, 28))
++      && NSEqualRanges([cal minimumRangeOfUnit: NSCalendarUnitHour],
++      NSMakeRange(0, 24)),
++      "-minimumRangeOfUnit:");
++
++    PASS_EQUAL(NSCalendarIdentifierISO8601, @"iso8601",
++      "NSCalendarIdentifierISO8601 is ICU's name");
++    PASS_EQUAL(NSCalendarIdentifierEthiopicAmeteMihret, @"ethiopic",
++      "NSCalendarIdentifierEthiopicAmeteMihret is ICU's name");
++    PASS_EQUAL(NSCalendarIdentifierIslamicTabular, @"islamic-tbla",
++      "NSCalendarIdentifierIslamicTabular is ICU's name");
++    PASS_EQUAL(NSCalendarIdentifierIslamicUmmAlQura, @"islamic-umalqura",
++      "NSCalendarIdentifierIslamicUmmAlQura is ICU's name");
++    {
++      NSString	*known[] = { NSCalendarIdentifierGregorian,
++	NSCalendarIdentifierISO8601, NSCalendarIdentifierHebrew,
++	NSCalendarIdentifierIslamicUmmAlQura, NSCalendarIdentifierJapanese,
++	NSCalendarIdentifierChinese };
++      NSCalendar	*iso;
++
++      for (i = 0; i < sizeof(known) / sizeof(known[0]); i++)
++	{
++	  PASS_EQUAL([[NSCalendar calendarWithIdentifier: known[i]]
++	    calendarIdentifier], known[i],
++	    "+calendarWithIdentifier: %s", [known[i] UTF8String]);
++	}
++      PASS([NSCalendar calendarWithIdentifier: @"bogus"] == nil,
++	"+calendarWithIdentifier: an unknown identifier");
++      PASS([NSCalendar calendarWithIdentifier: @"gregory"] == nil,
++	"+calendarWithIdentifier: the BCP 47 name is not an identifier");
++      iso = [NSCalendar calendarWithIdentifier: NSCalendarIdentifierISO8601];
++      PASS([iso firstWeekday] == 2 && [iso minimumDaysInFirstWeek] == 4,
++	"the ISO 8601 calendar's weeks start on Monday with four days");
++    }
++
++    setup(@"UTC", @"en_US");
++    c = YMD(2024, 2, 30, X, X, X);
++    PASS(![c isValidDate], "-isValidDate without a calendar");
++    PASS(![c isValidDateInCalendar: cal], "-isValidDateInCalendar: 30 February");
++    [c setCalendar: cal];
++    PASS(![c isValidDate], "-isValidDate 30 February");
++    PASS(is([c date], 1709251200.0), "-date of 30 February is 1 March");
++    PASS([YMD(2024, 2, 29, X, X, X) isValidDateInCalendar: cal],
++      "-isValidDateInCalendar: 29 February 2024");
++    PASS(![YMD(2023, 2, 29, X, X, X) isValidDateInCalendar: cal],
++      "-isValidDateInCalendar: 29 February 2023");
++    PASS(![YMD(2024, 1, 1, 24, 0, 0) isValidDateInCalendar: cal],
++      "-isValidDateInCalendar: 24:00");
++    PASS(![YMD(2024, 1, 1, 23, 60, 0) isValidDateInCalendar: cal],
++      "-isValidDateInCalendar: 23:60");
++    PASS(![YMD(X, 13, X, X, X, X) isValidDateInCalendar: cal],
++      "-isValidDateInCalendar: month 13");
++    PASS([YMD(X, 12, X, X, X, X) isValidDateInCalendar: cal],
++      "-isValidDateInCalendar: month 12");
++    PASS([YMD(X, X, 31, X, X, X) isValidDateInCalendar: cal],
++      "-isValidDateInCalendar: day 31");
++    PASS(![YMD(X, 2, 31, X, X, X) isValidDateInCalendar: cal],
++      "-isValidDateInCalendar: 31 February");
++    PASS([YMD(X, X, X, X, X, X) isValidDateInCalendar: cal],
++      "-isValidDateInCalendar: no components");
++    c = YMD(2024, 1, 1, X, X, X);
++    [c setWeekday: 2];
++    PASS([c isValidDateInCalendar: cal],
++      "-isValidDateInCalendar: 1 January 2024 is a Monday");
++    [c setWeekday: 3];
++    PASS(![c isValidDateInCalendar: cal],
++      "-isValidDateInCalendar: 1 January 2024 is not a Tuesday");
++    c = YMD(2024, 1, 1, X, X, X);
++    [c setNanosecond: 999999999];
++    PASS([c isValidDateInCalendar: cal],
++      "-isValidDateInCalendar: nanosecond 999999999");
++    [c setNanosecond: 1000000000];
++    PASS(![c isValidDateInCalendar: cal],
++      "-isValidDateInCalendar: nanosecond 1000000000");
++    c = YMD(2024, 3, 10, 2, 30, 0);
++    [c setTimeZone: [NSTimeZone timeZoneWithName: @"America/New_York"]];
++    PASS(![c isValidDateInCalendar: cal],
++      "-isValidDateInCalendar: a time skipped in the components' time zone");
++    c = YMD(2024, 1, 1, X, X, X);
++    [c setQuarter: 2];
++    PASS(![c isValidDateInCalendar: cal],
++      "-isValidDateInCalendar: a quarter the date is not in");
++
++    c = YMD(X, X, X, X, X, X);
++    PASS([c valueForComponent: NSCalendarUnitDay] == X,
++      "-valueForComponent: a unit not set");
++    PASS([c valueForComponent: NSCalendarUnitCalendar] == X,
++      "-valueForComponent: the calendar unit");
++    PASS([c valueForComponent: NSCalendarUnitDay | NSCalendarUnitMonth] == X,
++      "-valueForComponent: two units");
++    [c setValue: 5 forComponent: NSCalendarUnitDay | NSCalendarUnitMonth];
++    PASS([c day] == X && [c month] == X,
++      "-setValue:forComponent: two units sets nothing");
++    [c setValue: 7 forComponent: NSCalendarUnitWeekOfYear];
++    PASS([c weekOfYear] == 7, "-setValue:forComponent: week of year");
++
++    c = YMD(2024, 1, 1, 10, X, X);
++    [c setCalendar: cal];
++    [c setTimeZone: [NSTimeZone timeZoneWithName: @"Asia/Tokyo"]];
++    PASS(is([c date], 1704070800.0), "-date uses the components' time zone");
++    PASS([YMD(2024, 1, 1, 10, X, X) date] == nil, "-date without a calendar");
++    PASS_EQUAL(YMD(2024, 1, 1, 10, X, X), YMD(2024, 1, 1, 10, X, X),
++      "-isEqual: the same components");
++    PASS(![YMD(2024, 1, 1, 10, X, X) isEqual: YMD(2024, 1, 1, 11, X, X)],
++      "-isEqual: different components");
++    PASS([YMD(2024, 1, 1, 10, X, X) hash] == [YMD(2024, 1, 1, 10, X, X) hash],
++      "-hash of equal components");
++    c = YMD(2024, 1, 1, 10, X, X);
++    [c setCalendar: cal];
++    PASS([c calendar] != cal, "-setCalendar: copies the calendar");
++    [cal setTimeZone: [NSTimeZone timeZoneWithName: @"Asia/Tokyo"]];
++    PASS([[[c calendar] timeZone] isEqual: [NSTimeZone timeZoneWithName: @"UTC"]],
++      "a calendar set in components is not changed with the original");
++    PASS([cal copy] != cal, "-copy of a calendar is a new calendar");
++    [cal setFirstWeekday: 3];
++    PASS([AUTORELEASE([cal copy]) firstWeekday] == 3,
++      "-copy keeps the first weekday");
++    c = [cal components: NSCalendarUnitMonth fromDate: D(1710513930.0)];
++    PASS([c isLeapMonth] == NO, "-isLeapMonth");
++
++    RELEASE(cal);
++  END_SET("NSCalendar 10.9 features")
++  return 0;
++}
+diff --git a/Tests/base/NSCalendar/nextDate.m b/Tests/base/NSCalendar/nextDate.m
+new file mode 100644
+index 000000000..40f9fee5a
+--- /dev/null
++++ b/Tests/base/NSCalendar/nextDate.m
+@@ -0,0 +1,1115 @@
++/*
++ * nextDate.m - the 10.9 searches of NSCalendar: nextDateAfterDate:...,
++ * enumerateDatesStartingAfterDate:..., dateBySettingUnit:...,
++ * dateBySettingHour:... and date:matchesComponents:.
++ *
++ * Every expected date is what macOS 15 returns for the same call, with the
++ * same calendar (Gregorian, first weekday Sunday, one day in the first
++ * week) and time zone.  New York has a daylight saving gap on 2024-03-10
++ * (02:00-03:00 missing) and a repeated hour on 2024-11-03 (01:00-02:00
++ * twice); Sao Paulo's clocks skipped midnight on 2018-11-04 and repeated
++ * 23:00 on 2018-02-17.
++ */
++#import <Foundation/Foundation.h>
++#import "Testing.h"
++
++#if	defined(GS_USE_ICU)
++#define	NSCALENDAR_SUPPORTED	GS_USE_ICU
++#else
++#define	NSCALENDAR_SUPPORTED	1 /* Assume Apple support */
++#endif
++
++#define	X	NSDateComponentUndefined
++#define	NONE	(-1.0e300)
++
++static NSCalendar	*cal = nil;
++
++static void
++setup(NSString *zone)
++{
++  RELEASE(cal);
++  cal = [[NSCalendar alloc]
++    initWithCalendarIdentifier: NSCalendarIdentifierGregorian];
++  [cal setLocale: AUTORELEASE([[NSLocale alloc]
++    initWithLocaleIdentifier: @"en_US"])];
++  [cal setTimeZone: [NSTimeZone timeZoneWithName: zone]];
++  [cal setFirstWeekday: 1];
++  [cal setMinimumDaysInFirstWeek: 1];
++}
++
++static NSDate *
++D(NSTimeInterval t)
++{
++  return [NSDate dateWithTimeIntervalSince1970: t];
++}
++
++static BOOL
++is(NSDate *date, NSTimeInterval t)
++{
++  if (t == NONE)
++    {
++      return date == nil;
++    }
++  return date != nil && [date timeIntervalSince1970] == t;
++}
++
++/* era, year, month, day, hour, minute, second, nanosecond, weekday,
++ * weekdayOrdinal, weekOfMonth, weekOfYear, yearForWeekOfYear, quarter */
++static NSDateComponents *
++C(const NSInteger *f)
++{
++  NSDateComponents	*c = AUTORELEASE([NSDateComponents new]);
++
++  [c setEra: f[0]];
++  [c setYear: f[1]];
++  [c setMonth: f[2]];
++  [c setDay: f[3]];
++  [c setHour: f[4]];
++  [c setMinute: f[5]];
++  [c setSecond: f[6]];
++  [c setNanosecond: f[7]];
++  [c setWeekday: f[8]];
++  [c setWeekdayOrdinal: f[9]];
++  [c setWeekOfMonth: f[10]];
++  [c setWeekOfYear: f[11]];
++  [c setYearForWeekOfYear: f[12]];
++  [c setQuarter: f[13]];
++  return c;
++}
++
++static NSDateComponents *
++HMS(NSInteger d, NSInteger h, NSInteger m, NSInteger s)
++{
++  NSInteger	f[14] = { X, X, X, d, h, m, s, X, X, X, X, X, X, X };
++
++  return C(f);
++}
++
++typedef struct {
++  const char	*name;
++  const char	*zone;
++  double	after;
++  NSInteger	fields[14];
++  NSUInteger	options;
++  double	expected;
++} Search;
++
++static Search searches[] = {
++  { "hour 9, next, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, X, X, 9, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1710594000.0 /* 2024-03-16 13:00:00Z */ },
++  { "hour 9, no options, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, X, X, 9, X, X, X, X, X, X, X, X, X },
++    0,
++    1710594000.0 /* 2024-03-16 13:00:00Z */ },
++  { "hour 11, next, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, X, X, 11, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1710514800.0 /* 2024-03-15 15:00:00Z */ },
++  { "hour 10, next, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, X, X, 10, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1710597600.0 /* 2024-03-16 14:00:00Z */ },
++  { "hour 10 minute 45 second 30, next, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, X, X, 10, 45, 30, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1710600330.0 /* 2024-03-16 14:45:30Z */ },
++  { "minute 30, next, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, X, X, X, 30, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1710516600.0 /* 2024-03-15 15:30:00Z */ },
++  { "minute 50, next, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, X, X, X, 50, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1710514200.0 /* 2024-03-15 14:50:00Z */ },
++  { "second 0, next, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, X, X, X, X, 0, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1710513960.0 /* 2024-03-15 14:46:00Z */ },
++  { "day 1, next, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, X, 1, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1711944000.0 /* 2024-04-01 04:00:00Z */ },
++  { "day 15, next, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, X, 15, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1713153600.0 /* 2024-04-15 04:00:00Z */ },
++  { "day 31, strict, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, X, 31, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchStrictly,
++    1711857600.0 /* 2024-03-31 04:00:00Z */ },
++  { "day 31, strict, after 2024-04-15 14:00:00Z in New_York",
++    "America/New_York", 1713189600.0 /* 2024-04-15 14:00:00Z */,
++    { X, X, X, 31, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchStrictly,
++    1717128000.0 /* 2024-05-31 04:00:00Z */ },
++  { "day 31, next, after 2024-04-15 14:00:00Z in New_York",
++    "America/New_York", 1713189600.0 /* 2024-04-15 14:00:00Z */,
++    { X, X, X, 31, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1714536000.0 /* 2024-05-01 04:00:00Z */ },
++  { "day 31, next preserving, after 2024-04-15 14:00:00Z in New_York",
++    "America/New_York", 1713189600.0 /* 2024-04-15 14:00:00Z */,
++    { X, X, X, 31, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTimePreservingSmallerUnits,
++    1714572000.0 /* 2024-05-01 14:00:00Z */ },
++  { "day 31, previous preserving, after 2024-04-15 14:00:00Z in New_York",
++    "America/New_York", 1713189600.0 /* 2024-04-15 14:00:00Z */,
++    { X, X, X, 31, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchPreviousTimePreservingSmallerUnits,
++    1714485600.0 /* 2024-04-30 14:00:00Z */ },
++  { "day 31 hour 10, next, after 2024-04-15 14:00:00Z in New_York",
++    "America/New_York", 1713189600.0 /* 2024-04-15 14:00:00Z */,
++    { X, X, X, 31, 10, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1714536000.0 /* 2024-05-01 04:00:00Z */ },
++  { "day 31 hour 10, next preserving, after 2024-04-15 14:00:00Z in New_York",
++    "America/New_York", 1713189600.0 /* 2024-04-15 14:00:00Z */,
++    { X, X, X, 31, 10, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTimePreservingSmallerUnits,
++    1714572000.0 /* 2024-05-01 14:00:00Z */ },
++  { "day 31 hour 10, previous preserving, after 2024-04-15 14:00:00Z in New_York",
++    "America/New_York", 1713189600.0 /* 2024-04-15 14:00:00Z */,
++    { X, X, X, 31, 10, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchPreviousTimePreservingSmallerUnits,
++    1714485600.0 /* 2024-04-30 14:00:00Z */ },
++  { "month 2 day 29, strict, after 2024-03-01 14:00:00Z in New_York",
++    "America/New_York", 1709301600.0 /* 2024-03-01 14:00:00Z */,
++    { X, X, 2, 29, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchStrictly,
++    1835413200.0 /* 2028-02-29 05:00:00Z */ },
++  { "month 2 day 29, next, after 2024-03-01 14:00:00Z in New_York",
++    "America/New_York", 1709301600.0 /* 2024-03-01 14:00:00Z */,
++    { X, X, 2, 29, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1740805200.0 /* 2025-03-01 05:00:00Z */ },
++  { "month 2 day 29, next preserving, after 2024-03-01 14:00:00Z in New_York",
++    "America/New_York", 1709301600.0 /* 2024-03-01 14:00:00Z */,
++    { X, X, 2, 29, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTimePreservingSmallerUnits,
++    1740837600.0 /* 2025-03-01 14:00:00Z */ },
++  { "month 2 day 29, previous preserving, after 2024-03-01 14:00:00Z in New_York",
++    "America/New_York", 1709301600.0 /* 2024-03-01 14:00:00Z */,
++    { X, X, 2, 29, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchPreviousTimePreservingSmallerUnits,
++    1740751200.0 /* 2025-02-28 14:00:00Z */ },
++  { "month 2 day 30, strict, after 2024-03-01 14:00:00Z in New_York",
++    "America/New_York", 1709301600.0 /* 2024-03-01 14:00:00Z */,
++    { X, X, 2, 30, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchStrictly,
++    NONE },
++  { "month 2 day 30, next, after 2024-03-01 14:00:00Z in New_York",
++    "America/New_York", 1709301600.0 /* 2024-03-01 14:00:00Z */,
++    { X, X, 2, 30, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1740805200.0 /* 2025-03-01 05:00:00Z */ },
++  { "month 6, next, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, 6, X, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1717214400.0 /* 2024-06-01 04:00:00Z */ },
++  { "month 3, next, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, 3, X, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1740805200.0 /* 2025-03-01 05:00:00Z */ },
++  { "month 2 hour 9, next, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, 2, X, 9, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1738418400.0 /* 2025-02-01 14:00:00Z */ },
++  { "year 2030, next, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, 2030, X, X, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1893474000.0 /* 2030-01-01 05:00:00Z */ },
++  { "year 2024, next, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, 2024, X, X, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    NONE },
++  { "year 2020, next, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, 2020, X, X, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    NONE },
++  { "year 2020, next backwards, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, 2020, X, X, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime|NSCalendarSearchBackwards,
++    1577854800.0 /* 2020-01-01 05:00:00Z */ },
++  { "year 2030 month 7 day 4, next, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, 2030, 7, 4, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1909368000.0 /* 2030-07-04 04:00:00Z */ },
++  { "year 2030 hour 6, next, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, 2030, X, X, 6, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1893495600.0 /* 2030-01-01 11:00:00Z */ },
++  { "hour 9, next backwards, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, X, X, 9, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime|NSCalendarSearchBackwards,
++    1710507600.0 /* 2024-03-15 13:00:00Z */ },
++  { "hour 11, next backwards, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, X, X, 11, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime|NSCalendarSearchBackwards,
++    1710428400.0 /* 2024-03-14 15:00:00Z */ },
++  { "day 1, next backwards, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, X, 1, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime|NSCalendarSearchBackwards,
++    1709269200.0 /* 2024-03-01 05:00:00Z */ },
++  { "day 31, strict backwards, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, X, 31, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchStrictly|NSCalendarSearchBackwards,
++    1706677200.0 /* 2024-01-31 05:00:00Z */ },
++  { "month 2 day 29, strict backwards, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, 2, 29, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchStrictly|NSCalendarSearchBackwards,
++    1709182800.0 /* 2024-02-29 05:00:00Z */ },
++  { "weekday 1, next, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, X, X, X, X, X, X, 1, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1710648000.0 /* 2024-03-17 04:00:00Z */ },
++  { "weekday 1, next backwards, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, X, X, X, X, X, X, 1, X, X, X, X, X },
++    NSCalendarMatchNextTime|NSCalendarSearchBackwards,
++    1710046800.0 /* 2024-03-10 05:00:00Z */ },
++  { "weekday 6, next, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, X, X, X, X, X, X, 6, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1711080000.0 /* 2024-03-22 04:00:00Z */ },
++  { "hour 9 weekday 2, next, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, X, X, 9, X, X, X, 2, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1710766800.0 /* 2024-03-18 13:00:00Z */ },
++  { "weekday 5 weekdayOrdinal 4, next, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, X, X, X, X, X, X, 5, 4, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1711598400.0 /* 2024-03-28 04:00:00Z */ },
++  { "month 11 weekday 5 weekdayOrdinal 4, next, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, 11, X, X, X, X, X, 5, 4, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1732770000.0 /* 2024-11-28 05:00:00Z */ },
++  { "weekOfYear 20, next, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, X, X, X, X, X, X, X, X, X, 20, X, X },
++    NSCalendarMatchNextTime,
++    1715486400.0 /* 2024-05-12 04:00:00Z */ },
++  { "weekOfMonth 1, next, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, X, X, X, X, X, X, X, X, 1, X, X, X },
++    NSCalendarMatchNextTime,
++    1711944000.0 /* 2024-04-01 04:00:00Z */ },
++  { "quarter 3, next, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, X, X, X, X, X, X, X, X, X, X, X, 3 },
++    NSCalendarMatchNextTime,
++    1719806400.0 /* 2024-07-01 04:00:00Z */ },
++  { "weekday 2 weekOfYear 1 yearForWeekOfYear 2026, next, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, X, X, X, X, X, X, 2, X, X, 1, 2026, X },
++    NSCalendarMatchNextTime,
++    1766984400.0 /* 2025-12-29 05:00:00Z */ },
++  { "nanosecond 500000000, next, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, X, X, X, X, X, 500000000, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1710513930.5 /* 2024-03-15 14:45:30.5Z */ },
++  { "day 15 hour 10 minute 45 second 30, next, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, X, 15, 10, 45, 30, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1713192330.0 /* 2024-04-15 14:45:30Z */ },
++  { "era 0, next, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { 0, X, X, X, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    NONE },
++  { "nothing, next, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, X, X, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    NONE },
++  { "hour 2 minute 30, strict, after 2024-03-09 17:00:00Z in New_York",
++    "America/New_York", 1710003600.0 /* 2024-03-09 17:00:00Z */,
++    { X, X, X, X, 2, 30, X, X, X, X, X, X, X, X },
++    NSCalendarMatchStrictly,
++    1710138600.0 /* 2024-03-11 06:30:00Z */ },
++  { "hour 2 minute 30, next, after 2024-03-09 17:00:00Z in New_York",
++    "America/New_York", 1710003600.0 /* 2024-03-09 17:00:00Z */,
++    { X, X, X, X, 2, 30, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1710054000.0 /* 2024-03-10 07:00:00Z */ },
++  { "hour 2 minute 30, next preserving, after 2024-03-09 17:00:00Z in New_York",
++    "America/New_York", 1710003600.0 /* 2024-03-09 17:00:00Z */,
++    { X, X, X, X, 2, 30, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTimePreservingSmallerUnits,
++    1710055800.0 /* 2024-03-10 07:30:00Z */ },
++  { "hour 2 minute 30, previous preserving, after 2024-03-09 17:00:00Z in New_York",
++    "America/New_York", 1710003600.0 /* 2024-03-09 17:00:00Z */,
++    { X, X, X, X, 2, 30, X, X, X, X, X, X, X, X },
++    NSCalendarMatchPreviousTimePreservingSmallerUnits,
++    1710052200.0 /* 2024-03-10 06:30:00Z */ },
++  { "hour 2, strict, after 2024-03-09 17:00:00Z in New_York",
++    "America/New_York", 1710003600.0 /* 2024-03-09 17:00:00Z */,
++    { X, X, X, X, 2, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchStrictly,
++    1710136800.0 /* 2024-03-11 06:00:00Z */ },
++  { "hour 2, next, after 2024-03-09 17:00:00Z in New_York",
++    "America/New_York", 1710003600.0 /* 2024-03-09 17:00:00Z */,
++    { X, X, X, X, 2, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1710054000.0 /* 2024-03-10 07:00:00Z */ },
++  { "hour 2, next preserving, after 2024-03-09 17:00:00Z in New_York",
++    "America/New_York", 1710003600.0 /* 2024-03-09 17:00:00Z */,
++    { X, X, X, X, 2, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTimePreservingSmallerUnits,
++    1710054000.0 /* 2024-03-10 07:00:00Z */ },
++  { "hour 2, previous preserving, after 2024-03-09 17:00:00Z in New_York",
++    "America/New_York", 1710003600.0 /* 2024-03-09 17:00:00Z */,
++    { X, X, X, X, 2, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchPreviousTimePreservingSmallerUnits,
++    1710050400.0 /* 2024-03-10 06:00:00Z */ },
++  { "hour 1 minute 30, next, after 2024-11-02 16:00:00Z in New_York",
++    "America/New_York", 1730563200.0 /* 2024-11-02 16:00:00Z */,
++    { X, X, X, X, 1, 30, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1730611800.0 /* 2024-11-03 05:30:00Z */ },
++  { "hour 1 minute 30, next first, after 2024-11-02 16:00:00Z in New_York",
++    "America/New_York", 1730563200.0 /* 2024-11-02 16:00:00Z */,
++    { X, X, X, X, 1, 30, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime|NSCalendarMatchFirst,
++    1730611800.0 /* 2024-11-03 05:30:00Z */ },
++  { "hour 1 minute 30, next last, after 2024-11-02 16:00:00Z in New_York",
++    "America/New_York", 1730563200.0 /* 2024-11-02 16:00:00Z */,
++    { X, X, X, X, 1, 30, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime|NSCalendarMatchLast,
++    1730615400.0 /* 2024-11-03 06:30:00Z */ },
++  { "hour 1 minute 30, strict, after 2024-11-02 16:00:00Z in New_York",
++    "America/New_York", 1730563200.0 /* 2024-11-02 16:00:00Z */,
++    { X, X, X, X, 1, 30, X, X, X, X, X, X, X, X },
++    NSCalendarMatchStrictly,
++    1730611800.0 /* 2024-11-03 05:30:00Z */ },
++  { "hour 1 minute 30, next, after 2024-11-03 05:30:00Z in New_York",
++    "America/New_York", 1730611800.0 /* 2024-11-03 05:30:00Z */,
++    { X, X, X, X, 1, 30, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1730701800.0 /* 2024-11-04 06:30:00Z */ },
++  { "minute 30, next, after 2024-11-03 05:00:00Z in New_York",
++    "America/New_York", 1730610000.0 /* 2024-11-03 05:00:00Z */,
++    { X, X, X, X, X, 30, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1730611800.0 /* 2024-11-03 05:30:00Z */ },
++  { "minute 30, next, after 2024-11-03 05:45:00Z in New_York",
++    "America/New_York", 1730612700.0 /* 2024-11-03 05:45:00Z */,
++    { X, X, X, X, X, 30, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1730615400.0 /* 2024-11-03 06:30:00Z */ },
++  { "hour 1, next, after 2024-11-03 05:00:00Z in New_York",
++    "America/New_York", 1730610000.0 /* 2024-11-03 05:00:00Z */,
++    { X, X, X, X, 1, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1730700000.0 /* 2024-11-04 06:00:00Z */ },
++  { "hour 1, next last, after 2024-11-03 05:00:00Z in New_York",
++    "America/New_York", 1730610000.0 /* 2024-11-03 05:00:00Z */,
++    { X, X, X, X, 1, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime|NSCalendarMatchLast,
++    1730613600.0 /* 2024-11-03 06:00:00Z */ },
++  { "hour 0, next, after 2018-11-03 12:00:00Z in Sao_Paulo",
++    "America/Sao_Paulo", 1541246400.0 /* 2018-11-03 12:00:00Z */,
++    { X, X, X, X, 0, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1541300400.0 /* 2018-11-04 03:00:00Z */ },
++  { "hour 0, strict, after 2018-11-03 12:00:00Z in Sao_Paulo",
++    "America/Sao_Paulo", 1541246400.0 /* 2018-11-03 12:00:00Z */,
++    { X, X, X, X, 0, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchStrictly,
++    1541383200.0 /* 2018-11-05 02:00:00Z */ },
++  { "day 4, next, after 2018-11-03 12:00:00Z in Sao_Paulo",
++    "America/Sao_Paulo", 1541246400.0 /* 2018-11-03 12:00:00Z */,
++    { X, X, X, 4, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1541300400.0 /* 2018-11-04 03:00:00Z */ },
++  { "day 4, strict, after 2018-11-03 12:00:00Z in Sao_Paulo",
++    "America/Sao_Paulo", 1541246400.0 /* 2018-11-03 12:00:00Z */,
++    { X, X, X, 4, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchStrictly,
++    1541300400.0 /* 2018-11-04 03:00:00Z */ },
++  { "day 18, next, after 2018-02-17 12:00:00Z in Sao_Paulo",
++    "America/Sao_Paulo", 1518868800.0 /* 2018-02-17 12:00:00Z */,
++    { X, X, X, 18, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1518922800.0 /* 2018-02-18 03:00:00Z */ },
++  { "hour 23, next, after 2018-02-17 12:00:00Z in Sao_Paulo",
++    "America/Sao_Paulo", 1518868800.0 /* 2018-02-17 12:00:00Z */,
++    { X, X, X, X, 23, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1518915600.0 /* 2018-02-18 01:00:00Z */ },
++  { "hour 23, next last, after 2018-02-17 12:00:00Z in Sao_Paulo",
++    "America/Sao_Paulo", 1518868800.0 /* 2018-02-17 12:00:00Z */,
++    { X, X, X, X, 23, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime|NSCalendarMatchLast,
++    1518919200.0 /* 2018-02-18 02:00:00Z */ },
++  { "month 2 hour 9, next, after 2025-02-01 15:00:00Z in New_York",
++    "America/New_York", 1738422000.0 /* 2025-02-01 15:00:00Z */,
++    { X, X, 2, X, 9, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1769954400.0 /* 2026-02-01 14:00:00Z */ },
++  { "month 3, next, after 2024-03-01 05:00:00Z in New_York",
++    "America/New_York", 1709269200.0 /* 2024-03-01 05:00:00Z */,
++    { X, X, 3, X, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1740805200.0 /* 2025-03-01 05:00:00Z */ },
++  { "month 3, next, after 2024-03-01 04:59:59Z in New_York",
++    "America/New_York", 1709269199.0 /* 2024-03-01 04:59:59Z */,
++    { X, X, 3, X, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1709269200.0 /* 2024-03-01 05:00:00Z */ },
++  { "weekday 2, next, after 2024-03-18 04:00:00Z in New_York",
++    "America/New_York", 1710734400.0 /* 2024-03-18 04:00:00Z */,
++    { X, X, X, X, X, X, X, X, 2, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1711339200.0 /* 2024-03-25 04:00:00Z */ },
++  { "weekOfYear 20, next, after 2024-05-14 12:00:00Z in New_York",
++    "America/New_York", 1715688000.0 /* 2024-05-14 12:00:00Z */,
++    { X, X, X, X, X, X, X, X, X, X, X, 20, X, X },
++    NSCalendarMatchNextTime,
++    1746936000.0 /* 2025-05-11 04:00:00Z */ },
++  { "minute 30, next, after 2024-03-15 14:30:00Z in New_York",
++    "America/New_York", 1710513000.0 /* 2024-03-15 14:30:00Z */,
++    { X, X, X, X, X, 30, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1710516600.0 /* 2024-03-15 15:30:00Z */ },
++  { "hour 10, next backwards, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, X, X, 10, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime|NSCalendarSearchBackwards,
++    1710511200.0 /* 2024-03-15 14:00:00Z */ },
++  { "minute 45, next backwards, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, X, X, X, 45, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime|NSCalendarSearchBackwards,
++    1710513900.0 /* 2024-03-15 14:45:00Z */ },
++  { "minute 46, next backwards, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, X, X, X, 46, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime|NSCalendarSearchBackwards,
++    1710510360.0 /* 2024-03-15 13:46:00Z */ },
++  { "second 0, next backwards, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, X, X, X, X, 0, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime|NSCalendarSearchBackwards,
++    1710513900.0 /* 2024-03-15 14:45:00Z */ },
++  { "second 30, next backwards, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, X, X, X, X, 30, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime|NSCalendarSearchBackwards,
++    1710513870.0 /* 2024-03-15 14:44:30Z */ },
++  { "year 2030 weekday 2, next, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, 2030, X, X, X, X, X, X, 2, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1893992400.0 /* 2030-01-07 05:00:00Z */ },
++  { "quarter 1, next, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, X, X, X, X, X, X, X, X, X, X, X, 1 },
++    NSCalendarMatchNextTime,
++    1735707600.0 /* 2025-01-01 05:00:00Z */ },
++  { "month 4 day 31, next, after 2024-01-01 12:00:00Z in New_York",
++    "America/New_York", 1704110400.0 /* 2024-01-01 12:00:00Z */,
++    { X, X, 4, 31, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1714536000.0 /* 2024-05-01 04:00:00Z */ },
++  { "month 4 day 31, strict, after 2024-01-01 12:00:00Z in New_York",
++    "America/New_York", 1704110400.0 /* 2024-01-01 12:00:00Z */,
++    { X, X, 4, 31, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchStrictly,
++    NONE },
++  { "weekday 2 weekdayOrdinal 5, next, after 2024-03-01 12:00:00Z in New_York",
++    "America/New_York", 1709294400.0 /* 2024-03-01 12:00:00Z */,
++    { X, X, X, X, X, X, X, X, 2, 5, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1714363200.0 /* 2024-04-29 04:00:00Z */ },
++  { "weekday 2 weekdayOrdinal 5, strict, after 2024-03-01 12:00:00Z in New_York",
++    "America/New_York", 1709294400.0 /* 2024-03-01 12:00:00Z */,
++    { X, X, X, X, X, X, X, X, 2, 5, X, X, X, X },
++    NSCalendarMatchStrictly,
++    1714363200.0 /* 2024-04-29 04:00:00Z */ },
++  { "weekday 2 weekdayOrdinal 5, previous preserving, after 2024-03-01 12:00:00Z in New_York",
++    "America/New_York", 1709294400.0 /* 2024-03-01 12:00:00Z */,
++    { X, X, X, X, X, X, X, X, 2, 5, X, X, X, X },
++    NSCalendarMatchPreviousTimePreservingSmallerUnits,
++    1714363200.0 /* 2024-04-29 04:00:00Z */ },
++  { "day 29, next, after 2023-02-10 17:00:00Z in New_York",
++    "America/New_York", 1676048400.0 /* 2023-02-10 17:00:00Z */,
++    { X, X, X, 29, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1677646800.0 /* 2023-03-01 05:00:00Z */ },
++  { "second 30, next, after 2024-03-15 14:45:30.5Z in New_York",
++    "America/New_York", 1710513930.5 /* 2024-03-15 14:45:30.5Z */,
++    { X, X, X, X, X, X, 30, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1710513990.0 /* 2024-03-15 14:46:30Z */ },
++  { "nanosecond 0, next, after 2024-03-15 14:45:30.5Z in New_York",
++    "America/New_York", 1710513930.5 /* 2024-03-15 14:45:30.5Z */,
++    { X, X, X, X, X, X, X, 0, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1710513931.0 /* 2024-03-15 14:45:31Z */ },
++  { "hour 23, next, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, X, X, 23, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1710558000.0 /* 2024-03-16 03:00:00Z */ },
++  { "month 2 day 29, next backwards, after 2025-06-01 12:00:00Z in New_York",
++    "America/New_York", 1748779200.0 /* 2025-06-01 12:00:00Z */,
++    { X, X, 2, 29, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime|NSCalendarSearchBackwards,
++    1740805200.0 /* 2025-03-01 05:00:00Z */ },
++  { "month 2 day 29, previous preserving backwards, after 2025-06-01 12:00:00Z in New_York",
++    "America/New_York", 1748779200.0 /* 2025-06-01 12:00:00Z */,
++    { X, X, 2, 29, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchPreviousTimePreservingSmallerUnits|NSCalendarSearchBackwards,
++    1740747600.0 /* 2025-02-28 13:00:00Z */ },
++  { "day 31, next backwards, after 2024-05-15 12:00:00Z in New_York",
++    "America/New_York", 1715774400.0 /* 2024-05-15 12:00:00Z */,
++    { X, X, X, 31, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime|NSCalendarSearchBackwards,
++    1714536000.0 /* 2024-05-01 04:00:00Z */ },
++  { "day 31, next backwards, after 2024-06-15 12:00:00Z in New_York",
++    "America/New_York", 1718452800.0 /* 2024-06-15 12:00:00Z */,
++    { X, X, X, 31, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime|NSCalendarSearchBackwards,
++    1717128000.0 /* 2024-05-31 04:00:00Z */ },
++  { "day 31, previous preserving backwards, after 2024-06-15 12:00:00Z in New_York",
++    "America/New_York", 1718452800.0 /* 2024-06-15 12:00:00Z */,
++    { X, X, X, 31, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchPreviousTimePreservingSmallerUnits|NSCalendarSearchBackwards,
++    1717128000.0 /* 2024-05-31 04:00:00Z */ },
++  { "hour 2 minute 30, next backwards, after 2024-03-10 16:00:00Z in New_York",
++    "America/New_York", 1710086400.0 /* 2024-03-10 16:00:00Z */,
++    { X, X, X, X, 2, 30, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime|NSCalendarSearchBackwards,
++    1710054000.0 /* 2024-03-10 07:00:00Z */ },
++  { "hour 2 minute 30, previous preserving backwards, after 2024-03-10 16:00:00Z in New_York",
++    "America/New_York", 1710086400.0 /* 2024-03-10 16:00:00Z */,
++    { X, X, X, X, 2, 30, X, X, X, X, X, X, X, X },
++    NSCalendarMatchPreviousTimePreservingSmallerUnits|NSCalendarSearchBackwards,
++    1710052200.0 /* 2024-03-10 06:30:00Z */ },
++  { "hour 2 minute 30, strict backwards, after 2024-03-10 16:00:00Z in New_York",
++    "America/New_York", 1710086400.0 /* 2024-03-10 16:00:00Z */,
++    { X, X, X, X, 2, 30, X, X, X, X, X, X, X, X },
++    NSCalendarMatchStrictly|NSCalendarSearchBackwards,
++    1709969400.0 /* 2024-03-09 07:30:00Z */ },
++  { "hour 1 minute 30, next backwards, after 2024-11-03 12:00:00Z in New_York",
++    "America/New_York", 1730635200.0 /* 2024-11-03 12:00:00Z */,
++    { X, X, X, X, 1, 30, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime|NSCalendarSearchBackwards,
++    1730615400.0 /* 2024-11-03 06:30:00Z */ },
++  { "hour 1 minute 30, next backwards last, after 2024-11-03 12:00:00Z in New_York",
++    "America/New_York", 1730635200.0 /* 2024-11-03 12:00:00Z */,
++    { X, X, X, X, 1, 30, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime|NSCalendarSearchBackwards|NSCalendarMatchLast,
++    1730611800.0 /* 2024-11-03 05:30:00Z */ },
++  { "day 1 hour 0, next, after 2024-03-31 12:00:00Z in New_York",
++    "America/New_York", 1711886400.0 /* 2024-03-31 12:00:00Z */,
++    { X, X, X, 1, 0, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1711944000.0 /* 2024-04-01 04:00:00Z */ },
++  { "year 2024 month 3 day 15 hour 10, next, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, 2024, 3, 15, 10, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    NONE },
++  { "year 2024 month 3 day 15 hour 11, next, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, 2024, 3, 15, 11, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1710514800.0 /* 2024-03-15 15:00:00Z */ },
++  { "month 2 day 29, previous preserving, after 2023-01-10 17:00:00Z in New_York",
++    "America/New_York", 1673370000.0 /* 2023-01-10 17:00:00Z */,
++    { X, X, 2, 29, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchPreviousTimePreservingSmallerUnits,
++    1677603600.0 /* 2023-02-28 17:00:00Z */ },
++  { "day 30, next, after 2023-02-10 17:00:00Z in New_York",
++    "America/New_York", 1676048400.0 /* 2023-02-10 17:00:00Z */,
++    { X, X, X, 30, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1677646800.0 /* 2023-03-01 05:00:00Z */ },
++  { "day 30 hour 5, next preserving, after 2023-02-10 17:00:00Z in New_York",
++    "America/New_York", 1676048400.0 /* 2023-02-10 17:00:00Z */,
++    { X, X, X, 30, 5, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTimePreservingSmallerUnits,
++    1677664800.0 /* 2023-03-01 10:00:00Z */ },
++  { "day 30 minute 5, next preserving, after 2023-02-10 17:20:30Z in New_York",
++    "America/New_York", 1676049630.0 /* 2023-02-10 17:20:30Z */,
++    { X, X, X, 30, X, 5, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTimePreservingSmallerUnits,
++    1677690330.0 /* 2023-03-01 17:05:30Z */ },
++  { "hour 9, next, after 2024-03-15 12:59:59.5Z in New_York",
++    "America/New_York", 1710507599.5 /* 2024-03-15 12:59:59.5Z */,
++    { X, X, X, X, 9, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1710507600.0 /* 2024-03-15 13:00:00Z */ },
++  { "month 4 weekday 1, next, after 2024-03-15 12:00:00Z in New_York",
++    "America/New_York", 1710504000.0 /* 2024-03-15 12:00:00Z */,
++    { X, X, 4, X, X, X, X, X, 1, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1712462400.0 /* 2024-04-07 04:00:00Z */ },
++  { "weekOfYear 53, next, after 2024-03-15 12:00:00Z in New_York",
++    "America/New_York", 1710504000.0 /* 2024-03-15 12:00:00Z */,
++    { X, X, X, X, X, X, X, X, X, X, X, 53, X, X },
++    NSCalendarMatchNextTime,
++    1861246800.0 /* 2028-12-24 05:00:00Z */ },
++  { "weekOfYear 53, strict, after 2024-03-15 12:00:00Z in New_York",
++    "America/New_York", 1710504000.0 /* 2024-03-15 12:00:00Z */,
++    { X, X, X, X, X, X, X, X, X, X, X, 53, X, X },
++    NSCalendarMatchStrictly,
++    1861246800.0 /* 2028-12-24 05:00:00Z */ },
++  { "hour 2 minute 30 weekday 1, next, after 2024-03-09 17:00:00Z in New_York",
++    "America/New_York", 1710003600.0 /* 2024-03-09 17:00:00Z */,
++    { X, X, X, X, 2, 30, X, X, 1, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1710054000.0 /* 2024-03-10 07:00:00Z */ },
++  { "hour 0 minute 30, next, after 2018-11-03 12:00:00Z in Sao_Paulo",
++    "America/Sao_Paulo", 1541246400.0 /* 2018-11-03 12:00:00Z */,
++    { X, X, X, X, 0, 30, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1541300400.0 /* 2018-11-04 03:00:00Z */ },
++  { "hour 0 minute 30, next preserving, after 2018-11-03 12:00:00Z in Sao_Paulo",
++    "America/Sao_Paulo", 1541246400.0 /* 2018-11-03 12:00:00Z */,
++    { X, X, X, X, 0, 30, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTimePreservingSmallerUnits,
++    1541302200.0 /* 2018-11-04 03:30:00Z */ },
++  { "hour 0 minute 30, previous preserving, after 2018-11-03 12:00:00Z in Sao_Paulo",
++    "America/Sao_Paulo", 1541246400.0 /* 2018-11-03 12:00:00Z */,
++    { X, X, X, X, 0, 30, X, X, X, X, X, X, X, X },
++    NSCalendarMatchPreviousTimePreservingSmallerUnits,
++    1541298600.0 /* 2018-11-04 02:30:00Z */ },
++  { "day 4 hour 0 minute 0, next, after 2018-11-03 12:00:00Z in Sao_Paulo",
++    "America/Sao_Paulo", 1541246400.0 /* 2018-11-03 12:00:00Z */,
++    { X, X, X, 4, 0, 0, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1541300400.0 /* 2018-11-04 03:00:00Z */ },
++  { "day 4 hour 0 minute 0, strict, after 2018-11-03 12:00:00Z in Sao_Paulo",
++    "America/Sao_Paulo", 1541246400.0 /* 2018-11-03 12:00:00Z */,
++    { X, X, X, 4, 0, 0, X, X, X, X, X, X, X, X },
++    NSCalendarMatchStrictly,
++    1543888800.0 /* 2018-12-04 02:00:00Z */ },
++  { "minute 30, next, after 2018-11-04 02:45:00Z in Sao_Paulo",
++    "America/Sao_Paulo", 1541299500.0 /* 2018-11-04 02:45:00Z */,
++    { X, X, X, X, X, 30, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1541302200.0 /* 2018-11-04 03:30:00Z */ },
++  { "hour 0, next backwards, after 2018-11-04 12:00:00Z in Sao_Paulo",
++    "America/Sao_Paulo", 1541332800.0 /* 2018-11-04 12:00:00Z */,
++    { X, X, X, X, 0, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime|NSCalendarSearchBackwards,
++    1541300400.0 /* 2018-11-04 03:00:00Z */ },
++  { "day 15 minute 30, next, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, X, 15, X, 30, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1713155400.0 /* 2024-04-15 04:30:00Z */ },
++  { "day 16 minute 30, next, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, X, 16, X, 30, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1710563400.0 /* 2024-03-16 04:30:00Z */ },
++  { "hour 9 second 30, next, after 2024-03-15 13:10:00Z in New_York",
++    "America/New_York", 1710508200.0 /* 2024-03-15 13:10:00Z */,
++    { X, X, X, X, 9, X, 30, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1710594030.0 /* 2024-03-16 13:00:30Z */ },
++  { "hour 11 second 30, next, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, X, X, 11, X, 30, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1710514830.0 /* 2024-03-15 15:00:30Z */ },
++  { "second 30, next, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, X, X, X, X, 30, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1710513990.0 /* 2024-03-15 14:46:30Z */ },
++  { "month 2 day 10, next backwards, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, 2, 10, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime|NSCalendarSearchBackwards,
++    1707541200.0 /* 2024-02-10 05:00:00Z */ },
++  { "hour 9 weekday 6, next backwards, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, X, X, 9, X, X, X, 6, X, X, X, X, X },
++    NSCalendarMatchNextTime|NSCalendarSearchBackwards,
++    1710507600.0 /* 2024-03-15 13:00:00Z */ },
++  { "minute 30 weekday 2, next, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, X, X, X, X, 30, X, X, 2, X, X, X, X, X },
++    NSCalendarMatchNextTime,
++    1710736200.0 /* 2024-03-18 04:30:00Z */ },
++  { "year 2024, next backwards, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, 2024, X, X, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime|NSCalendarSearchBackwards,
++    1704085200.0 /* 2024-01-01 05:00:00Z */ },
++  { "year 2025, next backwards, after 2024-03-15 14:45:30Z in New_York",
++    "America/New_York", 1710513930.0 /* 2024-03-15 14:45:30Z */,
++    { X, 2025, X, X, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTime|NSCalendarSearchBackwards,
++    NONE },
++  { "day 31, previous preserving backwards, after 2024-05-15 12:00:00Z in New_York",
++    "America/New_York", 1715774400.0 /* 2024-05-15 12:00:00Z */,
++    { X, X, X, 31, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchPreviousTimePreservingSmallerUnits|NSCalendarSearchBackwards,
++    1714478400.0 /* 2024-04-30 12:00:00Z */ },
++  { "day 31, next preserving backwards, after 2024-05-15 12:00:00Z in New_York",
++    "America/New_York", 1715774400.0 /* 2024-05-15 12:00:00Z */,
++    { X, X, X, 31, X, X, X, X, X, X, X, X, X, X },
++    NSCalendarMatchNextTimePreservingSmallerUnits|NSCalendarSearchBackwards,
++    1714564800.0 /* 2024-05-01 12:00:00Z */ },
++};
++
++typedef struct {
++  double	date;
++  BOOL		exact;
++} Found;
++
++/* Collects the first count dates an enumeration finds. */
++static BOOL
++enumerated(double after, NSDateComponents *comps, NSUInteger options,
++  const Found *expected, int count)
++{
++  __block int	n = 0;
++  __block BOOL	ok = YES;
++
++  [cal enumerateDatesStartingAfterDate: D(after)
++		    matchingComponents: comps
++			       options: options
++			    usingBlock: ^(NSDate *date, BOOL exact, BOOL *stop)
++    {
++      if (n >= count || !is(date, expected[n].date)
++	|| exact != expected[n].exact)
++	{
++	  ok = NO;
++	}
++      if (++n >= count)
++	{
++	  *stop = YES;
++	}
++    }];
++  return ok && n == count;
++}
++
++int main()
++{
++  START_SET("NSCalendar 10.9 searches")
++    NSDate	*d;
++    unsigned	i;
++
++    if (!NSCALENDAR_SUPPORTED)
++      SKIP("NSCalendar not supported\nThe ICU library was not available when GNUstep-base was built")
++
++    for (i = 0; i < sizeof(searches) / sizeof(searches[0]); i++)
++      {
++	Search	*s = &searches[i];
++
++	setup([NSString stringWithUTF8String: s->zone]);
++	PASS(is([cal nextDateAfterDate: D(s->after)
++		    matchingComponents: C(s->fields)
++			       options: s->options], s->expected),
++	  "-nextDateAfterDate:matchingComponents:options: %s", s->name);
++      }
++
++    setup(@"America/New_York");
++    {
++      NSDateComponents	*c = HMS(X, 9, X, X);
++
++      [c setTimeZone: [NSTimeZone timeZoneWithName: @"UTC"]];
++      PASS(is([cal nextDateAfterDate: D(1710513930.0)
++		  matchingComponents: c
++			     options: NSCalendarMatchNextTime], 1710594000.0),
++	"a time zone in the components is not used by the search");
++    }
++    {
++      Found	next[] = {
++	{ 1706677200.0, YES },	/* 2024-01-31 */
++	{ 1709269200.0, NO },	/* 2024-03-01, for 31 February */
++	{ 1711857600.0, YES },	/* 2024-03-31 */
++	{ 1714536000.0, NO },	/* 2024-05-01, for 31 April */
++	{ 1717128000.0, YES },	/* 2024-05-31 */
++	{ 1719806400.0, NO }	/* 2024-07-01, for 31 June */
++      };
++      Found	strict[] = {
++	{ 1706677200.0, YES },	/* 2024-01-31 */
++	{ 1711857600.0, YES },	/* 2024-03-31 */
++	{ 1717128000.0, YES },	/* 2024-05-31 */
++	{ 1722398400.0, YES }	/* 2024-07-31 */
++      };
++      Found	previous[] = {
++	{ 1706677200.0, YES },	/* 2024-01-31 */
++	{ 1709226000.0, NO },	/* 2024-02-29 12:00, the start's time */
++	{ 1711857600.0, YES },	/* 2024-03-31 */
++	{ 1714492800.0, NO }	/* 2024-04-30 12:00 */
++      };
++      Found	minutes[] = {
++	{ 1710048600.0, YES },	/* 00:30 EST */
++	{ 1710052200.0, YES },	/* 01:30 EST */
++	{ 1710055800.0, YES },	/* 03:30 EDT: 02:30 was skipped */
++	{ 1710059400.0, YES }	/* 04:30 EDT */
++      };
++      Found	back[] = {
++	{ 1710507600.0, YES },	/* 2024-03-15 09:00 */
++	{ 1710421200.0, YES },	/* 2024-03-14 09:00 */
++	{ 1710334800.0, YES }	/* 2024-03-13 09:00 */
++      };
++      Found	first[] = {
++	{ 1730611800.0, YES },	/* 2024-11-03 01:30 EDT */
++	{ 1730701800.0, YES },	/* 2024-11-04 01:30 EST */
++	{ 1730788200.0, YES }	/* 2024-11-05 01:30 EST */
++      };
++      Found	last[] = {
++	{ 1730615400.0, YES },	/* 2024-11-03 01:30 EST */
++	{ 1730701800.0, YES },
++	{ 1730788200.0, YES }
++      };
++
++      PASS(enumerated(1705338000.0, HMS(31, X, X, X),
++	NSCalendarMatchNextTime, next, 6),
++	"enumerating the 31st of each month gives the 1st after a short month");
++      PASS(enumerated(1705338000.0, HMS(31, X, X, X),
++	NSCalendarMatchStrictly, strict, 4),
++	"enumerating the 31st strictly passes over short months");
++      PASS(enumerated(1705338000.0, HMS(31, X, X, X),
++	NSCalendarMatchPreviousTimePreservingSmallerUnits, previous, 4),
++	"enumerating the 31st keeping smaller units gives the last day of a"
++	" short month at the starting time of day");
++      PASS(enumerated(1710046800.0, HMS(X, X, 30, X),
++	NSCalendarMatchNextTime, minutes, 4),
++	"enumerating minute 30 across a daylight saving gap");
++      PASS(enumerated(1710522000.0, HMS(X, 9, X, X),
++	NSCalendarMatchNextTime | NSCalendarSearchBackwards, back, 3),
++	"enumerating hour 9 backwards");
++      PASS(enumerated(1730563200.0, HMS(X, 1, 30, X),
++	NSCalendarMatchNextTime, first, 3),
++	"enumerating 01:30 over a repeated hour gives its first instance");
++      PASS(enumerated(1730563200.0, HMS(X, 1, 30, X),
++	NSCalendarMatchNextTime | NSCalendarMatchLast, last, 3),
++	"enumerating 01:30 with NSCalendarMatchLast gives its last instance");
++    }
++    {
++      __block int	calls = 0;
++      NSDateComponents	*c = HMS(30, X, X, X);
++
++      [c setMonth: 2];
++      [cal enumerateDatesStartingAfterDate: D(1709301600.0)
++			matchingComponents: c
++				   options: NSCalendarMatchStrictly
++			usingBlock: ^(NSDate *date, BOOL exact, BOOL *stop)
++	{
++	  calls++;
++	}];
++      PASS(calls == 0,
++	"an enumeration of a date which never exists calls nothing");
++    }
++
++    d = D(1710513930.0);	/* Friday 2024-03-15 10:45:30 EDT */
++    PASS(is([cal nextDateAfterDate: d matchingUnit: NSCalendarUnitHour
++      value: 9 options: NSCalendarMatchNextTime], 1710594000.0),
++      "-nextDateAfterDate:matchingUnit:value:options: hour");
++    PASS(is([cal nextDateAfterDate: d matchingUnit: NSCalendarUnitDay
++      value: 1 options: NSCalendarMatchNextTime], 1711944000.0),
++      "-nextDateAfterDate:matchingUnit:value:options: day");
++    PASS(is([cal nextDateAfterDate: d matchingUnit: NSCalendarUnitWeekday
++      value: 1 options: NSCalendarMatchNextTime], 1710648000.0),
++      "-nextDateAfterDate:matchingUnit:value:options: weekday");
++    PASS(is([cal nextDateAfterDate: d matchingHour: 9 minute: 30 second: 0
++      options: NSCalendarMatchNextTime], 1710595800.0),
++      "-nextDateAfterDate:matchingHour:minute:second:options: 09:30:00");
++    PASS(is([cal nextDateAfterDate: d matchingHour: 10 minute: 45 second: 30
++      options: NSCalendarMatchNextTime], 1710600330.0),
++      "-nextDateAfterDate:matchingHour:minute:second:options: the date's own"
++      " time is the next day's");
++    PASS(is([cal nextDateAfterDate: d matchingHour: X minute: 30 second: X
++      options: NSCalendarMatchNextTime], 1710516600.0),
++      "-nextDateAfterDate:matchingHour:minute:second:options: minute only");
++    PASS(is([cal nextDateAfterDate: d matchingHour: 9 minute: X second: X
++      options: NSCalendarMatchNextTime], 1710594000.0),
++      "-nextDateAfterDate:matchingHour:minute:second:options: hour only");
++
++    {
++      struct { NSCalendarUnit unit; NSInteger value; double date;
++	double expected; const char *name; } sets[] = {
++	{ NSCalendarUnitHour, 9, 1710513930.0, 1710594000.0,
++	  "hour 9 of 10:45:30 is 09:00 the next day" },
++	{ NSCalendarUnitHour, 12, 1710513930.0, 1710518400.0,
++	  "hour 12 of 10:45:30 is 12:00" },
++	{ NSCalendarUnitHour, 10, 1710513930.0, 1710513930.0,
++	  "hour 10 of 10:45:30 leaves the date" },
++	{ NSCalendarUnitDay, 1, 1710513930.0, 1711944000.0,
++	  "day 1 is the next 1st" },
++	{ NSCalendarUnitDay, 20, 1710513930.0, 1710907200.0,
++	  "day 20 is the 20th of the month" },
++	{ NSCalendarUnitDay, 15, 1710513930.0, 1710513930.0,
++	  "day 15 of the 15th leaves the date" },
++	{ NSCalendarUnitMonth, 1, 1710513930.0, 1735707600.0,
++	  "month 1 is next January" },
++	{ NSCalendarUnitMonth, 6, 1710513930.0, 1717214400.0,
++	  "month 6 is 1 June" },
++	{ NSCalendarUnitYear, 2030, 1710513930.0, 1893474000.0,
++	  "year 2030 is 1 January 2030" },
++	{ NSCalendarUnitYear, 2000, 1710513930.0, NONE,
++	  "year 2000 is in the past" },
++	{ NSCalendarUnitMinute, 0, 1710513930.0, 1710514800.0,
++	  "minute 0 is the next hour" },
++	{ NSCalendarUnitSecond, 0, 1710513930.0, 1710513960.0,
++	  "second 0 is the next minute" },
++	{ NSCalendarUnitWeekday, 2, 1710513930.0, 1710734400.0,
++	  "weekday 2 is next Monday" },
++	{ NSCalendarUnitWeekday, 6, 1710513930.0, 1710513930.0,
++	  "weekday 6 of a Friday leaves the date" },
++	{ NSCalendarUnitNanosecond, 500000000, 1710513930.0, 1710513930.5,
++	  "nanosecond 500000000 is half a second later" },
++	{ NSCalendarUnitMonth, 3, 1710513930.25, 1710513930.25,
++	  "month 3 in March keeps a fraction of a second" },
++	{ NSCalendarUnitDay, 31, 1713189600.0, 1714536000.0,
++	  "day 31 in April is 1 May" },
++	{ NSCalendarUnitHour, 25, 1710513930.0, NONE,
++	  "hour 25 does not exist" }
++      };
++
++      for (i = 0; i < sizeof(sets) / sizeof(sets[0]); i++)
++	{
++	  PASS(is([cal dateBySettingUnit: sets[i].unit
++				   value: sets[i].value
++				  ofDate: D(sets[i].date)
++				 options: 0], sets[i].expected),
++	    "-dateBySettingUnit:value:ofDate:options: %s", sets[i].name);
++	}
++      PASS(is([cal dateBySettingUnit: NSCalendarUnitDay value: 31
++	ofDate: D(1713189600.0)
++	options: NSCalendarMatchPreviousTimePreservingSmallerUnits],
++	1714485600.0),
++	"-dateBySettingUnit:value:ofDate:options: day 31 in April keeping"
++	" smaller units is 30 April at the same time");
++    }
++
++    PASS(is([cal dateBySettingHour: 9 minute: 0 second: 0 ofDate: d
++      options: 0], 1710507600.0),
++      "-dateBySettingHour:minute:second:ofDate:options: an earlier time");
++    PASS(is([cal dateBySettingHour: 23 minute: 59 second: 59 ofDate: d
++      options: 0], 1710561599.0),
++      "-dateBySettingHour:minute:second:ofDate:options: a later time");
++    PASS(is([cal dateBySettingHour: 10 minute: 45 second: 30 ofDate: d
++      options: NSCalendarMatchStrictly], 1710513930.0),
++      "-dateBySettingHour:minute:second:ofDate:options: the same time");
++    PASS(is([cal dateBySettingHour: 24 minute: 0 second: 0 ofDate: d
++      options: 0], NONE),
++      "-dateBySettingHour:minute:second:ofDate:options: hour 24");
++    PASS(is([cal dateBySettingHour: 9 minute: 60 second: 0 ofDate: d
++      options: 0], NONE),
++      "-dateBySettingHour:minute:second:ofDate:options: minute 60");
++    PASS(is([cal dateBySettingHour: -1 minute: 0 second: 0 ofDate: d
++      options: 0], NONE),
++      "-dateBySettingHour:minute:second:ofDate:options: hour -1");
++    {
++      NSUInteger	opts[] = { 0, NSCalendarMatchNextTime,
++	NSCalendarMatchNextTimePreservingSmallerUnits,
++	NSCalendarMatchPreviousTimePreservingSmallerUnits };
++
++      for (i = 0; i < sizeof(opts) / sizeof(opts[0]); i++)
++	{
++	  PASS(is([cal dateBySettingHour: 2 minute: 30 second: 0
++	    ofDate: D(1710072000.0) options: opts[i]], 1710054000.0),
++	    "-dateBySettingHour:minute:second:ofDate:options: 02:30 on a day"
++	    " that skips it is 03:00 (options %lx)", (unsigned long)opts[i]);
++	  PASS(is([cal dateBySettingHour: 1 minute: 30 second: 0
++	    ofDate: D(1730635200.0) options: opts[i]], 1730611800.0),
++	    "-dateBySettingHour:minute:second:ofDate:options: 01:30 on a day"
++	    " that repeats it is the first (options %lx)",
++	    (unsigned long)opts[i]);
++	  PASS(is([cal dateBySettingHour: 1 minute: 30 second: 0
++	    ofDate: D(1730635200.0) options: opts[i] | NSCalendarMatchLast],
++	    1730615400.0),
++	    "-dateBySettingHour:minute:second:ofDate:options: 01:30 on a day"
++	    " that repeats it is the last with NSCalendarMatchLast (options %lx)",
++	    (unsigned long)opts[i]);
++	}
++      PASS(is([cal dateBySettingHour: 2 minute: 30 second: 0
++	ofDate: D(1710072000.0) options: NSCalendarMatchStrictly],
++	1710138600.0),
++	"-dateBySettingHour:minute:second:ofDate:options: 02:30 strictly on a"
++	" day that skips it is the next day's");
++    }
++    setup(@"America/Sao_Paulo");
++    PASS(is([cal dateBySettingHour: 0 minute: 0 second: 0
++      ofDate: D(1541343600.0) options: 0], 1541300400.0),
++      "-dateBySettingHour:minute:second:ofDate:options: midnight on a day"
++      " without one is its first moment");
++    PASS(is([cal dateBySettingUnit: NSCalendarUnitHour value: 0
++      ofDate: D(1541332800.0) options: 0], 1541383200.0),
++      "-dateBySettingUnit:value:ofDate:options: hour 0 after a day without"
++      " midnight is the next midnight");
++
++    setup(@"America/New_York");
++    {
++      NSDateComponents	*c;
++
++      PASS([cal date: d matchesComponents: HMS(15, 10, X, X)],
++	"-date:matchesComponents: day and hour");
++      PASS(![cal date: d matchesComponents: HMS(15, 11, X, X)],
++	"-date:matchesComponents: a different hour");
++      PASS([cal date: d matchesComponents: HMS(X, X, X, X)],
++	"-date:matchesComponents: no components");
++      c = HMS(X, X, X, X);
++      [c setWeekday: 6];
++      [c setWeekdayOrdinal: 3];
++      PASS([cal date: d matchesComponents: c],
++	"-date:matchesComponents: the third Friday");
++      [c setWeekdayOrdinal: 2];
++      PASS(![cal date: d matchesComponents: c],
++	"-date:matchesComponents: not the second Friday");
++      c = HMS(X, X, X, X);
++      [c setNanosecond: 0];
++      PASS([cal date: d matchesComponents: c],
++	"-date:matchesComponents: nanosecond 0");
++      c = HMS(X, X, X, X);
++      [c setQuarter: 1];
++      PASS([cal date: d matchesComponents: c],
++	"-date:matchesComponents: quarter");
++      c = HMS(X, 14, X, X);
++      [c setTimeZone: [NSTimeZone timeZoneWithName: @"UTC"]];
++      PASS(![cal date: d matchesComponents: c],
++	"-date:matchesComponents: ignores the components' time zone");
++      c = HMS(X, X, X, X);
++      [c setWeekOfYear: 11];
++      [c setYearForWeekOfYear: 2024];
++      PASS([cal date: d matchesComponents: c],
++	"-date:matchesComponents: week of year");
++    }
++    RELEASE(cal);
++  END_SET("NSCalendar 10.9 searches")
++  return 0;
++}
+-- 
+2.50.1 (Apple Git-155)
+
