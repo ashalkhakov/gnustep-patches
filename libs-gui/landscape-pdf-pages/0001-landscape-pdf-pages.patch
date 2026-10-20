@@ -1,0 +1,171 @@
+From f9d095bc8f2cc8a4f90535d972601cd26aa885be Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Tue, 20 Oct 2026 02:00:44 +0500
+Subject: [PATCH] NSPrintOperation: landscape PDF pages are landscape pages
+
+A view printed in landscape - paper wider than tall, or the landscape
+orientation - was turned a quarter round (DPSrotate 90 and a translation
+by the paper height) onto a portrait sheet at the start of every sheet,
+and the backend made the page portrait to match.  That is how PostScript
+printers are fed, but a PDF was made the same way, so a landscape document
+came out as portrait pages with the drawing on its side.  macOS makes a
+landscape page: on macOS 15 a two page view printed to PDF with
+-setPaperSize: (842, 595), or with A4 and -setOrientation:
+NSPaperOrientationLandscape, has /MediaBox [0 0 842 595] on both pages
+and no rotation in the content.
+
+When the operation draws into a PDF context and one page goes on each
+sheet, draw landscape upright: no rotation, and the sheet bounds are the
+paper bounds.  Record the choice in the print info as
+GSPrintLandscapeSheets, which is what the backend reads to make the page
+landscape instead of swapping it back to portrait (the cairo backend's
+half of this change, landscape-pdf-pages in libs-back; the two go
+together).  PostScript output, EPS and several pages on a sheet are
+unchanged.
+
+The test prints a view to PDF on landscape paper, both ways of asking for
+it, and checks that the transformation the view is drawn with has no
+rotation.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/NSPrintOperation.m                 | 14 +++-
+ Tests/gui/NSPrintOperation/TestInfo       |  0
+ Tests/gui/NSPrintOperation/landscapePDF.m | 82 +++++++++++++++++++++++
+ 3 files changed, 94 insertions(+), 2 deletions(-)
+ create mode 100644 Tests/gui/NSPrintOperation/TestInfo
+ create mode 100644 Tests/gui/NSPrintOperation/landscapePDF.m
+
+diff --git a/Source/NSPrintOperation.m b/Source/NSPrintOperation.m
+index 4b3de59a1..a062ecc09 100644
+--- a/Source/NSPrintOperation.m
++++ b/Source/NSPrintOperation.m
+@@ -95,6 +95,8 @@
+   int    nup;                /* Number of pages to print on a sheet */
+   double lastWidth, lastHeight; /* max. values of last printed page (scaled) */
+   NSPrintingOrientation orient;
++  BOOL   landscapeSheets;    /* Landscape drawn on landscape sheets, not
++                                rotated onto portrait ones */
+   int    pageDirection;      /* NSPrintPageDirection */
+ } page_info_t;
+ 
+@@ -786,7 +788,15 @@ - (void) _printPaginateWithInfo: (page_info_t *)info knowsRange: (BOOL)knowsRang
+   info->paperBounds.size.height -= 
+     ([_print_info topMargin]+[_print_info bottomMargin]);
+ 
+-  if (info->orient == NSLandscapeOrientation)
++  /* Landscape PDF pages are landscape pages, as on macOS. */
++  info->landscapeSheets = (info->orient == NSLandscapeOrientation
++    && info->nup == 1
++    && [[dict objectForKey: NSGraphicsContextRepresentationFormatAttributeName]
++         isEqual: NSGraphicsContextPDFFormat]);
++  [dict setObject: [NSNumber numberWithBool: info->landscapeSheets]
++           forKey: @"GSPrintLandscapeSheets"];
++
++  if (info->orient == NSLandscapeOrientation && !info->landscapeSheets)
+     {
+       /* Bounding box needs to be in default user space, but the bbox
+          we get is rotated */
+@@ -1146,7 +1156,7 @@ - (void) _displayPageInRect: (NSRect)pageRect
+             label: label
+             bBox: boundsForPage
+             fonts: nil];
+-      if (info.orient == NSLandscapeOrientation)
++      if (info.orient == NSLandscapeOrientation && !info.landscapeSheets)
+         {
+           DPSrotate(ctxt, 90);
+           DPStranslate(ctxt, 0, -info.paperSize.height);
+diff --git a/Tests/gui/NSPrintOperation/TestInfo b/Tests/gui/NSPrintOperation/TestInfo
+new file mode 100644
+index 000000000..e69de29bb
+diff --git a/Tests/gui/NSPrintOperation/landscapePDF.m b/Tests/gui/NSPrintOperation/landscapePDF.m
+new file mode 100644
+index 000000000..ee9ef18ef
+--- /dev/null
++++ b/Tests/gui/NSPrintOperation/landscapePDF.m
+@@ -0,0 +1,82 @@
++/* A view printed to PDF on landscape paper is drawn upright, on a landscape
++ * page, as on macOS; it is not turned a quarter round onto a portrait sheet
++ * the way a PostScript printer is fed.  The view reads the transformation it
++ * is drawn with, which has no rotation in it.
++ */
++#import "Testing.h"
++#import <Foundation/Foundation.h>
++#import <AppKit/AppKit.h>
++#import <GNUstepGUI/GSDisplayServer.h>
++
++static NSAffineTransformStruct drawnWith;
++
++@interface LandscapeView : NSView
++@end
++
++@implementation LandscapeView
++- (void) drawRect: (NSRect)r
++{
++  drawnWith = [GSCurrentCTM(GSCurrentContext()) transformStruct];
++}
++@end
++
++static BOOL
++printedUpright(BOOL byOrientation)
++{
++  LandscapeView *v;
++  NSPrintInfo *info;
++  NSPrintOperation *op;
++
++  info = AUTORELEASE([[NSPrintInfo alloc] initWithDictionary: nil]);
++  if (byOrientation)
++    {
++      [info setPaperSize: NSMakeSize(595, 842)];
++      [info setOrientation: NSLandscapeOrientation];
++    }
++  else
++    {
++      [info setPaperSize: NSMakeSize(842, 595)];
++    }
++  [info setLeftMargin: 0];
++  [info setRightMargin: 0];
++  [info setTopMargin: 0];
++  [info setBottomMargin: 0];
++  v = AUTORELEASE([[LandscapeView alloc]
++    initWithFrame: NSMakeRect(0, 0, 842, 595)]);
++  op = [NSPrintOperation PDFOperationWithView: v
++                                   insideRect: [v bounds]
++                                       toData: [NSMutableData data]
++                                    printInfo: info];
++  [op setShowsPrintPanel: NO];
++  [op setShowsProgressPanel: NO];
++  memset(&drawnWith, 0, sizeof(drawnWith));
++  [op runOperation];
++  return drawnWith.m11 > 0 && drawnWith.m22 > 0
++    && drawnWith.m12 == 0 && drawnWith.m21 == 0;
++}
++
++int
++main(int argc, char **argv)
++{
++  CREATE_AUTORELEASE_POOL(arp);
++  START_SET("landscape PDF")
++
++  NS_DURING
++    {
++      [NSApplication sharedApplication];
++    }
++  NS_HANDLER
++    {
++      if ([[localException name]
++        isEqualToString: NSInternalInconsistencyException])
++        SKIP("It looks like GNUstep backend is not yet installed")
++    }
++  NS_ENDHANDLER
++
++  PASS(printedUpright(NO), "landscape paper is drawn upright in a PDF");
++  PASS(printedUpright(YES), "landscape orientation is drawn upright in a PDF");
++
++  END_SET("landscape PDF")
++  DESTROY(arp);
++  return 0;
++}
+-- 
+2.50.1 (Apple Git-155)
+

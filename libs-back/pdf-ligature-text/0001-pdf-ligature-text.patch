@@ -1,0 +1,329 @@
+From acc8e6b3114585e994a449fdf8808e10ead82a53 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Tue, 20 Oct 2026 01:51:27 +0500
+Subject: [PATCH] cairo: keep the letters of ligatures in PDF text
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The glyph generator draws "fi", "fl", "ff", "ffi" and "ffl" as the
+presentation forms U+FB00..U+FB04 when the font has them, and the cairo
+backend draws an NSGlyph as the character it is, through
+cairo_show_text.  Cairo is told the text is U+FB01, so a PDF made by
+printing or -dataWithPDFInsideRect: maps the ligature glyph to U+FB01:
+pdftotext, search and copy read "ﬁnish" where the page says
+"finish".  Cocoa draws the same ligature glyph and wraps it in
+/ActualText (fi), so the text reads as the letters.
+
+When the string has a ligature from that block, -drawGlyphs:length:on:
+now draws it with cairo_show_text_glyphs, giving cairo the glyphs it
+would have drawn and the letters the ligature stands for as the
+cluster's text.  The PDF surface then writes the same /ActualText span
+Cocoa does; other surfaces ignore the clusters, and what is drawn is
+unchanged (the glyphs and the current point after them are computed as
+cairo_show_text computes them).  Strings without a ligature take the
+old path.
+
+The backend cannot tell a ligature the glyph generator made from a
+U+FB01 that was in the text, so the latter now also reads as "fi" in
+a PDF, which is its compatibility decomposition.
+
+Tests/cairo/pdfligatures.m draws "finish flow office" to PDF and looks
+in the inflated streams for the UTF-16 of "fi", "fl" and "ffi"; it
+skips when the user font has no such ligatures.  It links zlib, which
+cairo depends on, to inflate them.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/cairo/CairoFontInfo.m     |  82 +++++++++++++++-
+ Tests/cairo/GNUmakefile.preamble |   6 ++
+ Tests/cairo/pdfligatures.m       | 163 +++++++++++++++++++++++++++++++
+ 3 files changed, 250 insertions(+), 1 deletion(-)
+ create mode 100644 Tests/cairo/pdfligatures.m
+
+diff --git a/Source/cairo/CairoFontInfo.m b/Source/cairo/CairoFontInfo.m
+index 34733f3..3fed141 100644
+--- a/Source/cairo/CairoFontInfo.m
++++ b/Source/cairo/CairoFontInfo.m
+@@ -566,6 +566,83 @@ - (void) appendBezierPathWithGlyphs: (NSGlyph *)glyphs
+   free(cdata);
+ }
+ 
++/* The letters a ligature from the Alphabetic Presentation Forms block
++   stands for, or NULL when the UTF-8 sequence is not one.  */
++static const char *
++ligatureLetters(const char *utf8, int length)
++{
++  static const char *letters[] = {"ff", "fi", "fl", "ffi", "ffl", "st", "st"};
++  const unsigned char *u = (const unsigned char *)utf8;
++
++  if (length == 3 && u[0] == 0xef && u[1] == 0xac
++      && u[2] >= 0x80 && u[2] <= 0x86)
++    {
++      return letters[u[2] - 0x80];
++    }
++  return NULL;
++}
++
++static BOOL
++showTextWithLigatures(cairo_t *ct, const char *str)
++{
++  cairo_glyph_t *glyphs = NULL;
++  cairo_text_cluster_t *clusters = NULL;
++  cairo_text_cluster_flags_t flags;
++  cairo_text_extents_t extents;
++  int num_glyphs, num_clusters, i;
++  double x, y;
++  const char *in = str;
++  char *text;
++  char *out;
++
++  if (strstr(str, "\xef\xac") == NULL || !cairo_has_current_point(ct))
++    {
++      return NO;
++    }
++  cairo_get_current_point(ct, &x, &y);
++  if (cairo_scaled_font_text_to_glyphs(cairo_get_scaled_font(ct), x, y,
++                                       str, -1, &glyphs, &num_glyphs,
++                                       &clusters, &num_clusters, &flags)
++      != CAIRO_STATUS_SUCCESS || num_glyphs == 0)
++    {
++      cairo_glyph_free(glyphs);
++      cairo_text_cluster_free(clusters);
++      return NO;
++    }
++
++  text = malloc(strlen(str) + 1);
++  out = text;
++  for (i = 0; i < num_clusters; i++)
++    {
++      const char *letters = ligatureLetters(in, clusters[i].num_bytes);
++
++      if (letters != NULL && clusters[i].num_glyphs == 1)
++        {
++          memcpy(out, letters, strlen(letters));
++          out += strlen(letters);
++          in += clusters[i].num_bytes;
++          clusters[i].num_bytes = strlen(letters);
++        }
++      else
++        {
++          memcpy(out, in, clusters[i].num_bytes);
++          out += clusters[i].num_bytes;
++          in += clusters[i].num_bytes;
++        }
++    }
++
++  cairo_show_text_glyphs(ct, text, out - text, glyphs, num_glyphs,
++                         clusters, num_clusters, flags);
++  cairo_glyph_extents(ct, &glyphs[num_glyphs - 1], 1, &extents);
++  cairo_move_to(ct, glyphs[num_glyphs - 1].x + extents.x_advance,
++                glyphs[num_glyphs - 1].y + extents.y_advance);
++
++  free(text);
++  cairo_glyph_free(glyphs);
++  cairo_text_cluster_free(clusters);
++  return YES;
++}
++
+ - (void) drawGlyphs: (const NSGlyph*)glyphs
+              length: (int)length 
+                  on: (cairo_t*)ct
+@@ -599,7 +676,10 @@ - (void) drawGlyphs: (const NSGlyph*)glyphs
+       return;
+     }
+ 
+-  cairo_show_text(ct, str);
++  if (!showTextWithLigatures(ct, str))
++    {
++      cairo_show_text(ct, str);
++    }
+   if (cairo_status(ct) != CAIRO_STATUS_SUCCESS)
+     {
+       NSLog(@"Error drawing string: '%s' for string %s", 
+diff --git a/Tests/cairo/GNUmakefile.preamble b/Tests/cairo/GNUmakefile.preamble
+index 89bebfd..a161368 100644
+--- a/Tests/cairo/GNUmakefile.preamble
++++ b/Tests/cairo/GNUmakefile.preamble
+@@ -37,3 +37,9 @@ ifeq ($(WITH_EGL),yes)
+ wlglcontext_TOOL_LIBS += -lGL
+ endif
+ endif
++
++# The PDF ligature test inflates the streams of the document cairo writes, so
++# it links zlib, which cairo itself depends on.
++ifeq ($(BUILD_GRAPHICS),cairo)
++pdfligatures_TOOL_LIBS += -lz
++endif
+diff --git a/Tests/cairo/pdfligatures.m b/Tests/cairo/pdfligatures.m
+new file mode 100644
+index 0000000..553cbf9
+--- /dev/null
++++ b/Tests/cairo/pdfligatures.m
+@@ -0,0 +1,163 @@
++/* Tests that text drawn with ligatures into a PDF keeps the letters the
++ * ligatures stand for.  The glyph generator draws "fi" as the presentation
++ * form U+FB01 when the font has it, and a PDF reader that extracts, searches
++ * or copies the text must still read "fi", as it does from Cocoa's PDFs.
++ * The text a glyph reads as (a ToUnicode map, or an ActualText span around
++ * it) is written in compressed streams, so the test inflates every stream in
++ * the document and looks for the letters, in UTF-16 hex, of each ligature.
++ *
++ * It needs a window server (to load the backend), so it skips when no display
++ * server can be reached, and it guards on the cairo graphics backend being the
++ * one built.
++ */
++#import <Foundation/NSObject.h>
++#import "Testing.h"
++#include "config.h"
++
++#if defined(BUILD_GRAPHICS) && defined(GRAPHICS_cairo) \
++  && BUILD_GRAPHICS == GRAPHICS_cairo
++
++#import <AppKit/AppKit.h>
++#import <GNUstepGUI/GSDisplayServer.h>
++#include <string.h>
++#include <zlib.h>
++
++static NSString *sample = @"finish flow office";
++
++@interface GSLigatureTestView : NSView
++@end
++
++@implementation GSLigatureTestView
++- (void) drawRect: (NSRect)r
++{
++  NSDictionary *attributes;
++
++  attributes = [NSDictionary dictionaryWithObject: [NSFont userFontOfSize: 24]
++                                           forKey: NSFontAttributeName];
++  [sample drawAtPoint: NSMakePoint(10, 10) withAttributes: attributes];
++}
++@end
++
++static NSData *
++inflated(const char *bytes, NSUInteger length)
++{
++  NSMutableData *result = [NSMutableData data];
++  unsigned char chunk[4096];
++  z_stream z;
++  int status;
++
++  memset(&z, 0, sizeof(z));
++  if (inflateInit(&z) != Z_OK)
++    return nil;
++  z.next_in = (Bytef *)bytes;
++  z.avail_in = length;
++  do
++    {
++      z.next_out = chunk;
++      z.avail_out = sizeof(chunk);
++      status = inflate(&z, Z_NO_FLUSH);
++      [result appendBytes: chunk length: sizeof(chunk) - z.avail_out];
++    }
++  while (status == Z_OK);
++  inflateEnd(&z);
++  return status == Z_STREAM_END ? result : nil;
++}
++
++/* The text of every stream in the PDF, inflated where it is compressed.  */
++static NSString *
++streamsOf(NSData *pdf)
++{
++  NSMutableString *all = [NSMutableString string];
++  NSData *open = [NSData dataWithBytes: "stream" length: 6];
++  NSData *close = [NSData dataWithBytes: "endstream" length: 9];
++  const char *bytes = [pdf bytes];
++  NSUInteger length = [pdf length];
++  NSUInteger i = 0;
++
++  while (i < length)
++    {
++      NSUInteger begin, end;
++      NSRange r;
++      NSData *data;
++
++      r = [pdf rangeOfData: open options: 0
++                     range: NSMakeRange(i, length - i)];
++      if (r.location == NSNotFound)
++        break;
++      begin = NSMaxRange(r);
++      if (begin < length && bytes[begin] == '\r')
++        begin++;
++      if (begin < length && bytes[begin] == '\n')
++        begin++;
++      r = [pdf rangeOfData: close options: 0
++                     range: NSMakeRange(begin, length - begin)];
++      if (r.location == NSNotFound)
++        break;
++      end = r.location;
++      data = inflated(bytes + begin, end - begin);
++      if (data == nil)
++        data = [NSData dataWithBytes: bytes + begin length: end - begin];
++      [all appendString: [[[NSString alloc] initWithData: data
++        encoding: NSISOLatin1StringEncoding] autorelease]];
++      i = NSMaxRange(r);
++    }
++  return [all lowercaseString];
++}
++
++int
++main(int argc, const char **argv)
++{
++  START_SET("PDF text keeps the letters of ligatures")
++  GSLigatureTestView *v;
++  NSCharacterSet *covered;
++  NSString *streams;
++
++  NS_DURING
++    {
++      [NSApplication sharedApplication];
++      if (nil == GSCurrentServer())
++	{
++	  SKIP("no window server available")
++	}
++    }
++  NS_HANDLER
++    {
++      SKIP("It looks like GNUstep backend is not yet installed")
++    }
++  NS_ENDHANDLER
++  covered = [[NSFont userFontOfSize: 24] coveredCharacterSet];
++  if (![covered characterIsMember: 0xfb01]
++      || ![covered characterIsMember: 0xfb02]
++      || ![covered characterIsMember: 0xfb03])
++    {
++      SKIP("the user font has no fi, fl and ffi ligatures")
++    }
++
++  v = [[GSLigatureTestView alloc] initWithFrame: NSMakeRect(0, 0, 400, 60)];
++  streams = streamsOf([v dataWithPDFInsideRect: [v bounds]]);
++  PASS([streams rangeOfString: @"beginbfchar"].location != NSNotFound,
++       "the PDF maps its glyphs to text");
++  PASS([streams rangeOfString: @"<feff00660069>"].location != NSNotFound
++       || [streams rangeOfString: @"<00660069>"].location != NSNotFound,
++       "the fi ligature reads as the letters f and i");
++  PASS([streams rangeOfString: @"0066006c>"].location != NSNotFound,
++       "the fl ligature reads as the letters f and l");
++  PASS([streams rangeOfString: @"006600660069>"].location != NSNotFound,
++       "the ffi ligature reads as the letters f, f and i");
++  [v release];
++  END_SET("PDF text keeps the letters of ligatures")
++  return 0;
++}
++
++#else
++
++int
++main(int argc, const char **argv)
++{
++  START_SET("PDF text keeps the letters of ligatures")
++    SKIP("back is not built with the cairo graphics backend")
++  END_SET("PDF text keeps the letters of ligatures")
++  return 0;
++}
++
++#endif
+-- 
+2.50.1 (Apple Git-155)
+

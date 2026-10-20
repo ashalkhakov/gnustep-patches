@@ -1,0 +1,270 @@
+From 3f79e47609936be962055d5775ceffe377b4b82b Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Tue, 20 Oct 2026 09:44:24 +0500
+Subject: [PATCH] NSWindow: -endSheet:, -endSheet:returnCode:, -sheets and
+ -isSheet
+
+NSWindow had -beginSheet:completionHandler: but not the methods that end
+the sheet it begins: [window endSheet: sheet] raised, so a sheet begun
+the way macOS 10.9 and later begin them could be ended only through
+NSApp.  -sheetParent was always nil, and -sheets, -isSheet and
+-beginCriticalSheet:completionHandler: were missing.
+
+On macOS 15, while a sheet is up its window's -attachedSheet is the sheet
+and -sheets holds it, the sheet's -sheetParent is the window and it
+-isSheet (the window not); -endSheet:returnCode: calls the completion
+handler with the code - while the sheet is still visible and attached -
+and then orders the sheet out and detaches it; -endSheet: does so with
+NSModalResponseStop; and -[NSApplication endSheet:returnCode:] ends a
+sheet begun with -beginSheet:completionHandler: as well.
+
+GNUstep runs a sheet as a modal session in which -beginSheet:
+completionHandler: calls the handler before it closes the sheet, which
+is the order macOS keeps.  -endSheet:returnCode: now ends that session,
+through NSApp, when the sheet is the window's; -endSheet: passes the stop
+code; -sheetParent is the parent window whose attached sheet the receiver
+is; -isSheet follows from it; -sheets is the attached sheet, if any; and
+a critical sheet is begun as any other.  -beginSheet:completionHandler:
+still returns when the sheet has ended, where macOS returns at once and
+queues a second sheet behind the first: making sheets asynchronous would
+change every panel GNUstep runs as one.
+
+The test runs a sheet three times, ended from a timer with each of the
+three methods, and checks the window's and the sheet's state while it is
+up and after, the code and when the handler is called.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Headers/AppKit/NSWindow.h     |  11 +++
+ Source/NSWindow.m             |  34 +++++++-
+ Tests/gui/NSWindow/sheetAPI.m | 151 ++++++++++++++++++++++++++++++++++
+ 3 files changed, 195 insertions(+), 1 deletion(-)
+ create mode 100644 Tests/gui/NSWindow/sheetAPI.m
+
+diff --git a/Headers/AppKit/NSWindow.h b/Headers/AppKit/NSWindow.h
+index 9d89ca5d9..00c336091 100644
+--- a/Headers/AppKit/NSWindow.h
++++ b/Headers/AppKit/NSWindow.h
+@@ -875,6 +875,17 @@ PACKAGE_SCOPE
+ 
+ - (void)beginSheet:(NSWindow *)sheet
+  completionHandler:(GSNSWindowDidEndSheetCallbackBlock)handler;
++- (void)beginCriticalSheet:(NSWindow *)sheet
++         completionHandler:(GSNSWindowDidEndSheetCallbackBlock)handler;
++- (void)endSheet:(NSWindow *)sheet;
++- (void)endSheet:(NSWindow *)sheet returnCode:(NSModalResponse)returnCode;
++#if GS_HAS_DECLARED_PROPERTIES
++@property (readonly, copy) NSArray *sheets;
++@property (readonly) BOOL isSheet;
++#else
++- (NSArray *) sheets;
++- (BOOL) isSheet;
++#endif
+ #endif
+ 
+ #if OS_API_VERSION(MAC_OS_X_VERSION_10_7, GS_API_LATEST)
+diff --git a/Source/NSWindow.m b/Source/NSWindow.m
+index b6856def7..9309d31c4 100644
+--- a/Source/NSWindow.m
++++ b/Source/NSWindow.m
+@@ -6097,7 +6097,39 @@ - (NSWindow *) attachedSheet
+ 
+ - (NSWindow *) sheetParent
+ {
+-  return nil;
++  NSWindow *parent = [self parentWindow];
++
++  return [parent attachedSheet] == self ? parent : nil;
++}
++
++- (BOOL) isSheet
++{
++  return [self sheetParent] != nil;
++}
++
++- (NSArray *) sheets
++{
++  return _attachedSheet ? [NSArray arrayWithObject: _attachedSheet]
++    : [NSArray array];
++}
++
++- (void) beginCriticalSheet: (NSWindow *)sheet
++          completionHandler: (GSNSWindowDidEndSheetCallbackBlock)handler
++{
++  [self beginSheet: sheet completionHandler: handler];
++}
++
++- (void) endSheet: (NSWindow *)sheet
++{
++  [self endSheet: sheet returnCode: NSModalResponseStop];
++}
++
++- (void) endSheet: (NSWindow *)sheet returnCode: (NSModalResponse)returnCode
++{
++  if (sheet != nil && sheet == _attachedSheet)
++    {
++      [NSApp endSheet: sheet returnCode: returnCode];
++    }
+ }
+ 
+ - (void)beginSheet:(NSWindow *)sheet
+diff --git a/Tests/gui/NSWindow/sheetAPI.m b/Tests/gui/NSWindow/sheetAPI.m
+new file mode 100644
+index 000000000..6aa5faf0b
+--- /dev/null
++++ b/Tests/gui/NSWindow/sheetAPI.m
+@@ -0,0 +1,151 @@
++/* The window sheet methods as macOS 15 has them.  While a sheet is up its
++ * window's -attachedSheet and -sheets have it, its -sheetParent is the
++ * window and it -isSheet.  -endSheet:returnCode: ends it with that code and
++ * -endSheet: with NSModalResponseStop; the completion handler is called
++ * with the code while the sheet is still up and attached, and the sheet is
++ * then ordered out and detached.  -[NSApplication endSheet:returnCode:] ends
++ * a sheet begun with -beginSheet:completionHandler: too.
++ *
++ * GNUstep runs a sheet as a modal loop, so -beginSheet:completionHandler:
++ * returns once the sheet has ended (macOS returns at once): the sheet is
++ * ended from a timer, and another thread ends the loop after a few seconds
++ * so that a sheet nothing ends fails the test rather than hanging it.
++ */
++#import "Testing.h"
++#import <Foundation/Foundation.h>
++#import <AppKit/AppKit.h>
++
++static NSWindow *window;
++static NSWindow *sheet;
++static int how;
++static BOOL during;
++static BOOL inHandler;
++static NSModalResponse code;
++
++@interface SheetEnder : NSObject
++@end
++
++@implementation SheetEnder
++- (void) end: (NSTimer *)t
++{
++  if (![window respondsToSelector: @selector(endSheet:returnCode:)])
++    {
++      [NSApp abortModal];
++      return;
++    }
++  during = [window attachedSheet] == sheet
++    && [[window sheets] count] == 1
++    && [[window sheets] objectAtIndex: 0] == sheet
++    && [sheet sheetParent] == window
++    && [sheet isSheet] && ![window isSheet] && [window sheetParent] == nil;
++  if (how == 2)
++    [NSApp endSheet: sheet returnCode: 7];
++  else if (how == 0)
++    [window endSheet: sheet returnCode: 42];
++  else
++    [window endSheet: sheet];
++}
++
++- (void) watch: (id)unused
++{
++  CREATE_AUTORELEASE_POOL(pool);
++  [NSThread sleepForTimeInterval: 4.0];
++  [self performSelectorOnMainThread: @selector(wake:)
++                         withObject: nil
++                      waitUntilDone: NO
++                              modes: [NSArray arrayWithObject:
++                                NSModalPanelRunLoopMode]];
++  DESTROY(pool);
++}
++
++- (void) wake: (id)unused
++{
++  [NSApp abortModal];
++  [NSApp postEvent: [NSEvent otherEventWithType: NSApplicationDefined
++                                       location: NSZeroPoint
++                                  modifierFlags: 0
++                                      timestamp: 0
++                                   windowNumber: [sheet windowNumber]
++                                        context: nil
++                                        subtype: 0
++                                          data1: 0
++                                          data2: 0]
++           atStart: NO];
++}
++@end
++
++static void
++runSheet(int h)
++{
++  SheetEnder *ender = AUTORELEASE([SheetEnder new]);
++
++  how = h;
++  during = inHandler = NO;
++  code = 0;
++  [[NSRunLoop currentRunLoop] addTimer:
++    [NSTimer timerWithTimeInterval: 0.2
++                            target: ender
++                          selector: @selector(end:)
++                          userInfo: nil
++                           repeats: NO]
++                               forMode: NSModalPanelRunLoopMode];
++  [NSThread detachNewThreadSelector: @selector(watch:)
++                           toTarget: ender
++                         withObject: nil];
++  [window beginSheet: sheet completionHandler: ^(NSModalResponse r) {
++    code = r;
++    inHandler = [sheet isVisible] && [window attachedSheet] == sheet;
++  }];
++}
++
++int
++main(int argc, char **argv)
++{
++  CREATE_AUTORELEASE_POOL(arp);
++  START_SET("window sheets")
++
++  NS_DURING
++    {
++      [NSApplication sharedApplication];
++    }
++  NS_HANDLER
++    {
++      if ([[localException name]
++        isEqualToString: NSInternalInconsistencyException])
++        SKIP("It looks like GNUstep backend is not yet installed")
++    }
++  NS_ENDHANDLER
++
++  window = [[NSWindow alloc] initWithContentRect: NSMakeRect(100, 100, 400, 300)
++                                       styleMask: NSTitledWindowMask
++                                         backing: NSBackingStoreBuffered
++                                           defer: NO];
++  sheet = [[NSWindow alloc] initWithContentRect: NSMakeRect(0, 0, 200, 100)
++                                      styleMask: NSTitledWindowMask
++                                        backing: NSBackingStoreBuffered
++                                          defer: NO];
++  [sheet setReleasedWhenClosed: NO];
++  [window orderFront: nil];
++
++  PASS([window respondsToSelector: @selector(sheets)]
++    && [[window sheets] count] == 0 && [window attachedSheet] == nil,
++    "a window has no sheets at first");
++
++  runSheet(0);
++  PASS(during, "while a sheet is up, its window has it and it has its window");
++  PASS(code == 42, "-endSheet:returnCode: ends it with the code");
++  PASS(inHandler, "the handler is called while the sheet is up");
++  PASS(![sheet isVisible] && [window attachedSheet] == nil
++    && [[window sheets] count] == 0 && [sheet sheetParent] == nil,
++    "then the sheet is ordered out and detached");
++
++  runSheet(1);
++  PASS(code == NSModalResponseStop, "-endSheet: ends it with the stop code");
++
++  runSheet(2);
++  PASS(code == 7, "NSApp's -endSheet:returnCode: ends a window's sheet");
++
++  END_SET("window sheets")
++  DESTROY(arp);
++  return 0;
++}
+-- 
+2.50.1 (Apple Git-155)
+

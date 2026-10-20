@@ -1,0 +1,253 @@
+From 15fdbf7e9610c61f084ebb6eb2af2dff073f6f04 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Tue, 20 Oct 2026 01:50:55 +0500
+Subject: [PATCH] NSFont: take family and full names, as macOS does
+
++fontWithName:size: and +fontWithName:matrix: found a font only by the
+exact PostScript name the backend enumerated it under, so [NSFont
+fontWithName: @"Arial" size: 10] was nil on a system that has Arial, and
+so were "Times New Roman", "Liberation Sans" and "DejaVu Sans".  macOS
+takes more than the PostScript name: on macOS 15
+
+  "ArialMT"            ArialMT                (the PostScript name, exactly;
+                                               "arialmt" is nil)
+  "Arial", "arial"     ArialMT                (a family, in any case: its
+                                               regular face)
+  "Arial Bold"         Arial-BoldMT           (a full name, in any case)
+  "arial bold italic"  Arial-BoldItalicMT
+  "Avenir"             Avenir-Book
+  "Times New Roman"    TimesNewRomanPSMT
+  "NoSuchFont", " Arial", "Arial-Bold"   nil
+
+and the font it returns is named by the face's PostScript name.  Names
+like these are what documents and other platforms carry - a report names
+"Arial", a style sheet "Times New Roman" - and an application that passes
+them on got nil and fell back to the system font, in other metrics.
+
+When no face has the name as its PostScript name, look for a family of
+that name, ignoring case, and take its regular face (neither bold nor
+italic, the weight nearest the regular one), or for a family followed by
+one of its faces' style names ("Arial" "Bold Italic"), and make the font
+by that face's PostScript name.  The font is then the one asked for by
+its own name, and is cached under it.  This takes "Arial Regular" too,
+which macOS does not because the face's full name is just "Arial"; the
+enumerated families do not carry full names, and taking it is harmless.
+The replacements for Helvetica and Courier still apply when no family
+answers.
+
+The test takes the system font's family, asks for it by family name in
+two cases and for its bold face by full name in two cases, and for a name
+nothing has.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/NSFont.m               | 83 +++++++++++++++++++++++++++++++++
+ Tests/gui/NSFont/familyname.m | 88 +++++++++++++++++++++++++++++++++++
+ 2 files changed, 171 insertions(+)
+ create mode 100644 Tests/gui/NSFont/familyname.m
+
+diff --git a/Source/NSFont.m b/Source/NSFont.m
+index 2cbb83565..f1a9a4126 100644
+--- a/Source/NSFont.m
++++ b/Source/NSFont.m
+@@ -28,6 +28,8 @@
+ */ 
+ 
+ #include "config.h"
++#include <limits.h>
++#include <stdlib.h>
+ #import <Foundation/NSAffineTransform.h>
+ #import <Foundation/NSCoder.h>
+ #import <Foundation/NSDictionary.h>
+@@ -192,6 +194,72 @@ Font sizes list with (none) default to NSFontSize.
+ 
+   </unit> */
+   
++/* The PostScript name of the face that name, a family name or a full name
++   ("Arial", "Arial Bold"), stands for, in any case, or nil when no installed
++   face has that name.  A family stands for its regular face. */
++static NSString *
++postScriptNameForName(NSString *name)
++{
++  GSFontEnumerator *enumerator = [GSFontEnumerator sharedEnumerator];
++  NSEnumerator *families = [[enumerator availableFontFamilies] objectEnumerator];
++  NSString *family;
++
++  if ([name length] == 0)
++    {
++      return nil;
++    }
++  while ((family = [families nextObject]) != nil)
++    {
++      NSArray *members = [enumerator availableMembersOfFontFamily: family];
++      NSUInteger count = [members count];
++      NSUInteger i;
++
++      if ([family caseInsensitiveCompare: name] == NSOrderedSame)
++        {
++          NSArray *regular = nil;
++          int distance = INT_MAX;
++
++          for (i = 0; i < count; i++)
++            {
++              NSArray *member = [members objectAtIndex: i];
++              int weight = [[member objectAtIndex: 2] intValue];
++              unsigned int traits = [[member objectAtIndex: 3] unsignedIntValue];
++
++              if ((traits & (NSItalicFontMask | NSBoldFontMask)) == 0
++                && abs(weight - 5) < distance)
++                {
++                  regular = member;
++                  distance = abs(weight - 5);
++                }
++            }
++          if (regular == nil && count > 0)
++            {
++              regular = [members objectAtIndex: 0];
++            }
++          return [regular objectAtIndex: 0];
++        }
++      if ([name length] > [family length]
++        && [name characterAtIndex: [family length]] == ' '
++        && [[name substringToIndex: [family length]]
++             caseInsensitiveCompare: family] == NSOrderedSame)
++        {
++          NSString *style = [name substringFromIndex: [family length] + 1];
++
++          for (i = 0; i < count; i++)
++            {
++              NSArray *member = [members objectAtIndex: i];
++
++              if ([[member objectAtIndex: 1] caseInsensitiveCompare: style]
++                == NSOrderedSame)
++                {
++                  return [member objectAtIndex: 0];
++                }
++            }
++        }
++    }
++  return nil;
++}
++
+ @implementation NSFont
+ 
+ /* Class variables*/
+@@ -863,6 +931,21 @@ - (id) initWithName: (NSString*)name
+       fontInfo = RETAIN([GSFontInfo fontInfoForFontName: fontName
+                                                  matrix: fontMatrix
+                                              screenFont: screen]);
++      if ((fontInfo == nil) && (aRole == RoleExplicit))
++        {
++          NSString *postScriptName = postScriptNameForName(name);
++
++          if (postScriptName != nil && ![postScriptName isEqualToString: name])
++            {
++              DESTROY(fontName);
++              DESTROY(key);
++              RELEASE(self);
++              return [placeHolder initWithName: postScriptName
++                                        matrix: fontMatrix
++                                    screenFont: screen
++                                          role: aRole];
++            }
++        }
+       if ((fontInfo == nil) && (aRole == RoleExplicit))
+         {
+           NSString *replacementFontName = [self _replacementFontName];
+diff --git a/Tests/gui/NSFont/familyname.m b/Tests/gui/NSFont/familyname.m
+new file mode 100644
+index 000000000..69f5cb3b6
+--- /dev/null
++++ b/Tests/gui/NSFont/familyname.m
+@@ -0,0 +1,88 @@
++/* +fontWithName:size: takes the name of a family or the full name of a face
++ * as well as a PostScript name, as on macOS: "Arial" is ArialMT, the
++ * family's regular face, "Arial Bold" is Arial-BoldMT, and either may be in
++ * any case.  A PostScript name is matched exactly, and a name nothing
++ * installed has gives nil.
++ *
++ * The family is whichever the system font belongs to.
++ */
++#include "Testing.h"
++#include <Foundation/Foundation.h>
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSFont.h>
++#include <AppKit/NSFontManager.h>
++
++int
++main(int argc, char **argv, char **env)
++{
++  CREATE_AUTORELEASE_POOL(arp);
++  START_SET("NSFont family and full names")
++
++  NSFontManager *fm;
++  NSFont *system, *f;
++  NSString *family;
++  NSArray *members;
++  NSArray *bold = nil;
++  NSUInteger i;
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException]
++      || [[localException name] isEqualToString: @"NSWindowServerCommunicationException"])
++      SKIP("It looks like the GNUstep backend is not available")
++  NS_ENDHANDLER
++
++  fm = [NSFontManager sharedFontManager];
++  system = [NSFont systemFontOfSize: 12];
++  family = [system familyName];
++  if (system == nil || [family length] == 0
++    || [family isEqualToString: [system fontName]])
++    {
++      SKIP("the system font has no family name of its own")
++    }
++
++  f = [NSFont fontWithName: family size: 12];
++  PASS(f != nil, "a family name gives a font");
++  PASS([[f familyName] isEqualToString: family], "of that family");
++  PASS(f != nil && ([fm traitsOfFont: f] & (NSBoldFontMask | NSItalicFontMask)) == 0,
++    "its regular face");
++  PASS([[fm availableFonts] containsObject: [f fontName]],
++    "named by its PostScript name");
++
++  f = [NSFont fontWithName: [family uppercaseString] size: 12];
++  PASS(f != nil && [[f familyName] isEqualToString: family],
++    "a family name is found in any case");
++
++  members = [fm availableMembersOfFontFamily: family];
++  for (i = 0; i < [members count]; i++)
++    {
++      NSArray *m = [members objectAtIndex: i];
++      unsigned int traits = [[m objectAtIndex: 3] unsignedIntValue];
++
++      if ((traits & NSBoldFontMask) && !(traits & NSItalicFontMask))
++        {
++          bold = m;
++          break;
++        }
++    }
++  if (bold != nil)
++    {
++      NSString *full = [NSString stringWithFormat: @"%@ %@",
++        family, [bold objectAtIndex: 1]];
++
++      f = [NSFont fontWithName: full size: 12];
++      PASS(f != nil && [[f fontName] isEqualToString: [bold objectAtIndex: 0]],
++        "a full name gives that face");
++      f = [NSFont fontWithName: [full lowercaseString] size: 12];
++      PASS(f != nil && [[f fontName] isEqualToString: [bold objectAtIndex: 0]],
++        "a full name is found in any case");
++    }
++
++  PASS([NSFont fontWithName: @"No Such Family Anywhere" size: 12] == nil,
++    "a name nothing has gives nil");
++
++  END_SET("NSFont family and full names")
++  DESTROY(arp);
++  return 0;
++}
+-- 
+2.50.1 (Apple Git-155)
+

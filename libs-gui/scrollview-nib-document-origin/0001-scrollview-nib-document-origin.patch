@@ -1,0 +1,236 @@
+From fc017748633375f366d841f346bbbc33b2e91cc1 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Tue, 20 Oct 2026 02:11:55 +0500
+Subject: [PATCH] Show a nib-loaded scroll view's document from its origin
+
+A scroll view loaded from a xib can open scrolled away from its
+document's origin, by however much the decoding moved the document.
+
+The clip view puts its document at the origin when it is decoded and
+leaves its bounds at zero; then the scroll view tiles, the clip view
+takes the size the theme gives it, and a document that is pinned to the
+top (flexibleMinY, as Interface Builder sets it) moves with the clip
+view's edge. The bounds stay where they were, so the visible rect no
+longer starts at the document's origin. Our default theme's scrollers
+are wider than the ones the xib was laid out for, so even a scroll view
+exactly as Interface Builder wrote it opens a few points down; one whose
+clip view the xib gives another height than its scroll view has room
+for (RDLDesigner's canvas) opens more than an inch down.
+
+AppKit ends nib instantiation with -[NSScrollView setDocumentView:],
+which scrolls the clip view to the document's frame origin, whatever
+bounds the nib held (seen with a breakpoint on -setBoundsOrigin: of a
+clip view subclass on macOS 15): after loading, the clip view's bounds
+origin is the document's frame origin and the visible rect starts at
+the document's origin, flipped or not. Do the same once the decoded
+scroll view has tiled.
+
+Tests/gui/NSScrollView/nibDocumentOrigin.m loads DocumentOrigin.xib, a
+window with two scroll views laid out as Interface Builder writes them,
+one with an unflipped document and one with a flipped one. Its checks
+hold on macOS 15 for the same xib compiled with ibtool; without the
+change four of them fail here (the clip view's bounds origin stays at
+zero while the document has moved 6 points), with it all pass. The
+other NSScrollView and NSClipView tests still pass.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/NSScrollView.m                      |  4 +
+ Tests/gui/NSScrollView/DocumentOrigin.xib  | 67 +++++++++++++++
+ Tests/gui/NSScrollView/nibDocumentOrigin.m | 95 ++++++++++++++++++++++
+ 3 files changed, 166 insertions(+)
+ create mode 100644 Tests/gui/NSScrollView/DocumentOrigin.xib
+ create mode 100644 Tests/gui/NSScrollView/nibDocumentOrigin.m
+
+diff --git a/Source/NSScrollView.m b/Source/NSScrollView.m
+index 7f71dbfe9..608150e62 100644
+--- a/Source/NSScrollView.m
++++ b/Source/NSScrollView.m
+@@ -1660,6 +1660,10 @@ - (id) initWithCoder: (NSCoder*)aDecoder
+       // set the document view into the content.
+       [self setContentView: content];
+       [self tile];
++      if (docView != nil)
++        {
++          [content setBoundsOrigin: [docView frame].origin];
++        }
+       // Reenable notification sending.
+       [docView setPostsFrameChangedNotifications: post_frame];
+       [docView setPostsBoundsChangedNotifications: post_bound];
+diff --git a/Tests/gui/NSScrollView/DocumentOrigin.xib b/Tests/gui/NSScrollView/DocumentOrigin.xib
+new file mode 100644
+index 000000000..2798284ee
+--- /dev/null
++++ b/Tests/gui/NSScrollView/DocumentOrigin.xib
+@@ -0,0 +1,67 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<document type="com.apple.InterfaceBuilder3.Cocoa.XIB" version="3.0" toolsVersion="24127" targetRuntime="MacOSX.Cocoa" propertyAccessControl="none" useAutolayout="YES" customObjectInstantitationMethod="direct">
++    <dependencies>
++        <deployment identifier="macosx"/>
++        <plugIn identifier="com.apple.InterfaceBuilder.CocoaPlugin" version="24127"/>
++    </dependencies>
++    <objects>
++        <customObject id="-2" userLabel="File's Owner" customClass="NSObject"/>
++        <customObject id="-1" userLabel="First Responder" customClass="FirstResponder"/>
++        <customObject id="-3" userLabel="Application" customClass="NSObject"/>
++        <window title="Document Origin" releasedWhenClosed="NO" visibleAtLaunch="NO" animationBehavior="default" id="window">
++            <windowStyleMask key="styleMask" titled="YES"/>
++            <rect key="contentRect" x="100" y="100" width="640" height="240"/>
++            <rect key="screenRect" x="0.0" y="0.0" width="1920" height="1055"/>
++            <view key="contentView" id="content">
++                <rect key="frame" x="0.0" y="0.0" width="640" height="240"/>
++                <autoresizingMask key="autoresizingMask"/>
++                <subviews>
++                    <scrollView horizontalLineScroll="10" horizontalPageScroll="10" verticalLineScroll="10" verticalPageScroll="10" id="plainScroll">
++                        <rect key="frame" x="20" y="20" width="300" height="200"/>
++                        <autoresizingMask key="autoresizingMask"/>
++                        <clipView key="contentView" id="plainClip">
++                            <rect key="frame" x="1" y="1" width="283" height="183"/>
++                            <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
++                            <subviews>
++                                <customView id="plainDocument">
++                                    <rect key="frame" x="0.0" y="-317" width="400" height="500"/>
++                                    <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMinY="YES"/>
++                                </customView>
++                            </subviews>
++                        </clipView>
++                        <scroller key="horizontalScroller" verticalHuggingPriority="750" horizontal="YES" id="plainH">
++                            <rect key="frame" x="1" y="184" width="283" height="15"/>
++                            <autoresizingMask key="autoresizingMask"/>
++                        </scroller>
++                        <scroller key="verticalScroller" verticalHuggingPriority="750" horizontal="NO" id="plainV">
++                            <rect key="frame" x="284" y="1" width="15" height="183"/>
++                            <autoresizingMask key="autoresizingMask"/>
++                        </scroller>
++                    </scrollView>
++                    <scrollView horizontalLineScroll="10" horizontalPageScroll="10" verticalLineScroll="10" verticalPageScroll="10" id="flippedScroll">
++                        <rect key="frame" x="320" y="20" width="300" height="200"/>
++                        <autoresizingMask key="autoresizingMask"/>
++                        <clipView key="contentView" id="flippedClip">
++                            <rect key="frame" x="1" y="1" width="283" height="183"/>
++                            <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
++                            <subviews>
++                                <customView id="flippedDocument" customClass="FlippedDocument">
++                                    <rect key="frame" x="0.0" y="0.0" width="400" height="500"/>
++                                    <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMinY="YES"/>
++                                </customView>
++                            </subviews>
++                        </clipView>
++                        <scroller key="horizontalScroller" verticalHuggingPriority="750" horizontal="YES" id="flippedH">
++                            <rect key="frame" x="1" y="184" width="283" height="15"/>
++                            <autoresizingMask key="autoresizingMask"/>
++                        </scroller>
++                        <scroller key="verticalScroller" verticalHuggingPriority="750" horizontal="NO" id="flippedV">
++                            <rect key="frame" x="284" y="1" width="15" height="183"/>
++                            <autoresizingMask key="autoresizingMask"/>
++                        </scroller>
++                    </scrollView>
++                </subviews>
++            </view>
++        </window>
++    </objects>
++</document>
+diff --git a/Tests/gui/NSScrollView/nibDocumentOrigin.m b/Tests/gui/NSScrollView/nibDocumentOrigin.m
+new file mode 100644
+index 000000000..e686c7569
+--- /dev/null
++++ b/Tests/gui/NSScrollView/nibDocumentOrigin.m
+@@ -0,0 +1,95 @@
++/* A scroll view loaded from a nib shows its document view from the
++   document's frame origin, as Cocoa's does: the clip view's bounds origin is
++   the document's frame origin once loading is done, whatever the decoding
++   did to their sizes.  Checked against AppKit with DocumentOrigin.xib. */
++#import "Testing.h"
++#import <Foundation/NSArray.h>
++#import <Foundation/NSAutoreleasePool.h>
++#import <Foundation/NSURL.h>
++#import <AppKit/NSApplication.h>
++#import <AppKit/NSClipView.h>
++#import <AppKit/NSNib.h>
++#import <AppKit/NSScrollView.h>
++#import <AppKit/NSWindow.h>
++
++@interface FlippedDocument : NSView
++@end
++
++@implementation FlippedDocument
++- (BOOL) isFlipped
++{
++  return YES;
++}
++@end
++
++static NSScrollView *
++scrollViewAt(NSWindow *window, NSUInteger index)
++{
++  return [[[window contentView] subviews] objectAtIndex: index];
++}
++
++int
++main(int argc, const char **argv)
++{
++  CREATE_AUTORELEASE_POOL(arp);
++
++  START_SET("NSScrollView document origin after nib loading")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  NS_DURING
++    {
++      NSNib *nib;
++      NSArray *objects = nil;
++      NSWindow *window = nil;
++      NSEnumerator *e;
++      id o;
++      NSUInteger i;
++
++      nib = AUTORELEASE([[NSNib alloc] initWithContentsOfURL:
++        [NSURL fileURLWithPath: @"DocumentOrigin.xib"]]);
++      PASS(nib != nil, "DocumentOrigin.xib is read");
++      PASS([nib instantiateWithOwner: AUTORELEASE([NSObject new])
++                     topLevelObjects: &objects],
++        "DocumentOrigin.xib is instantiated");
++      e = [objects objectEnumerator];
++      while ((o = [e nextObject]) != nil)
++        {
++          if ([o isKindOfClass: [NSWindow class]])
++            window = o;
++        }
++      PASS(window != nil, "the window is a top-level object");
++
++      for (i = 0; i < 2; i++)
++        {
++          NSScrollView *sv = scrollViewAt(window, i);
++          NSView *doc = [sv documentView];
++          NSRect visible = [sv documentVisibleRect];
++
++          PASS(NSEqualPoints([[sv contentView] bounds].origin,
++                             [doc frame].origin),
++            "%s document: the clip view is scrolled to the document's origin",
++            [doc isFlipped] ? "flipped" : "unflipped");
++          PASS(NSEqualPoints(visible.origin, NSZeroPoint),
++            "%s document: the visible rect starts at the document's origin",
++            [doc isFlipped] ? "flipped" : "unflipped");
++        }
++    }
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException]
++      || [[localException name] isEqualToString: @"NSWindowServerCommunicationException"])
++      SKIP("No display available")
++    else
++      [localException raise];
++  NS_ENDHANDLER
++
++  END_SET("NSScrollView document origin after nib loading")
++
++  DESTROY(arp);
++  return 0;
++}
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,144 @@
+From 9386b2b9710bc94fa9fb01779608998f0c13dc28 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Tue, 20 Oct 2026 02:05:53 +0500
+Subject: [PATCH] cairo: a screen font is the font at the size asked for
+
+-initWithFontName:matrix:screenFont: rounded the size of every screen
+font up to a whole point ("makes the text more legible"), a rule the art
+backend took on in 2003 for its bitmap fonts and the cairo backend copied.
+String drawing measures with screen fonts (-sizeWithAttributes: and
+-boundingRectWithSize:options: always, drawing when the CTM is the
+identity) and NSLayoutManager uses them by default, so text at 14.5
+points was measured and drawn on screen at 15, and at 9.99978 or 7.5
+points at 10 and 8, while a PDF of the same view draws it at the size
+asked for: "line wraps here" in Arial at 14.5 points measured 101.7
+points instead of 98.3, and text laid out to fit a box overflowed it in
+print.  On macOS 15 -screenFont of Arial at 14.5 points is Arial at 14.5
+points, and measuring with it gives 98.33.
+
+cairo scales outlines to any size and renders them at fractional sizes
+as well as at whole ones, so keep the size of a screen font as it is.
+
+The test takes the system font at 14.5 points and its screen font, and
+checks that both measure a string to the same width and have the same
+ascender, and that string drawing measures it at that width.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/cairo/CairoFontInfo.m | 10 -----
+ Tests/cairo/screenfontsize.m | 82 ++++++++++++++++++++++++++++++++++++
+ 2 files changed, 82 insertions(+), 10 deletions(-)
+ create mode 100644 Tests/cairo/screenfontsize.m
+
+diff --git a/Source/cairo/CairoFontInfo.m b/Source/cairo/CairoFontInfo.m
+index 34733f3..e493dc3 100644
+--- a/Source/cairo/CairoFontInfo.m
++++ b/Source/cairo/CairoFontInfo.m
+@@ -233,16 +233,6 @@ - (id) initWithFontName: (NSString *)name
+   fontName = [name copy];
+   memcpy(matrix, fmatrix, sizeof(matrix));
+ 
+-  if (_screenFont)
+-    {
+-      /* Round up; makes the text more legible. */
+-      matrix[0] = ceil(matrix[0]);
+-      if (matrix[3] < 0.0)
+-        matrix[3] = floor(matrix[3]);
+-      else
+-        matrix[3] = ceil(matrix[3]);
+-    }
+-
+   if (![self setupAttributes])
+     {
+       RELEASE(self);
+diff --git a/Tests/cairo/screenfontsize.m b/Tests/cairo/screenfontsize.m
+new file mode 100644
+index 0000000..cb62158
+--- /dev/null
++++ b/Tests/cairo/screenfontsize.m
+@@ -0,0 +1,82 @@
++/* A screen font is the font at the size asked for, as on macOS, where
++ * -screenFont of Arial at 14.5 points is Arial at 14.5 points: text
++ * measured with it (string drawing and the text system use screen fonts
++ * when drawing to the screen) is as wide as it is drawn in a PDF.  The
++ * backend used to round the size of a screen font up to a whole point,
++ * so text at 14.5 points was measured, and drawn on screen, at 15.
++ *
++ * It needs a running window server to load the backend at all, so it skips
++ * cleanly when there is none, and it guards on the cairo graphics backend.
++ */
++#import <Foundation/NSObject.h>
++#import "Testing.h"
++#include "config.h"
++
++#if defined(BUILD_GRAPHICS) && defined(GRAPHICS_cairo) \
++  && BUILD_GRAPHICS == GRAPHICS_cairo
++
++#import <AppKit/AppKit.h>
++#import <GNUstepGUI/GSDisplayServer.h>
++#include <math.h>
++
++int
++main(int argc, const char **argv)
++{
++  START_SET("screen font size")
++
++  NSString *s = @"line wraps here";
++  NSFont *printer, *screen;
++  NSSize ps, ss;
++
++  NS_DURING
++    {
++      [NSApplication sharedApplication];
++      if (nil == GSCurrentServer())
++	{
++	  SKIP("no window server available")
++	}
++    }
++  NS_HANDLER
++    {
++      SKIP("It looks like the GNUstep backend is not installed")
++    }
++  NS_ENDHANDLER
++
++  printer = [NSFont fontWithName: [[NSFont systemFontOfSize: 10] fontName]
++                            size: 14.5];
++  screen = [printer screenFont];
++  if (printer == nil || screen == nil)
++    {
++      SKIP("no system font")
++    }
++
++  PASS(fabs([screen widthOfString: s] - [printer widthOfString: s]) < 0.01,
++    "a screen font at 14.5 points is as wide as the font");
++  PASS(fabs([screen ascender] - [printer ascender]) < 0.01,
++    "a screen font at 14.5 points is as tall as the font");
++
++  ps = [s sizeWithAttributes:
++    [NSDictionary dictionaryWithObject: printer forKey: NSFontAttributeName]];
++  ss = [s sizeWithAttributes:
++    [NSDictionary dictionaryWithObject: [printer screenFont]
++                                forKey: NSFontAttributeName]];
++  PASS(fabs(ps.width - [printer widthOfString: s]) < 0.01
++    && fabs(ss.width - ps.width) < 0.01,
++    "string drawing measures text at 14.5 points at that size");
++
++  END_SET("screen font size")
++  return 0;
++}
++
++#else
++
++int
++main(int argc, const char **argv)
++{
++  START_SET("screen font size")
++    SKIP("back is not built with the cairo graphics backend")
++  END_SET("screen font size")
++  return 0;
++}
++
++#endif
+-- 
+2.50.1 (Apple Git-155)
+

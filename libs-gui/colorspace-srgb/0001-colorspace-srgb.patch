@@ -1,0 +1,355 @@
+From 87871501d8018a07394ff881c981fa367c43b964 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Tue, 20 Oct 2026 09:35:00 +0500
+Subject: [PATCH] NSColorSpace: sRGB and the other named spaces, and sRGB
+ colours in them
+
+NSColorSpace had only the device and generic spaces, so
+[NSColorSpace sRGBColorSpace] raised, and an application that keeps its
+colours in sRGB - CSS and .NET colours, as RDLKit's reports have them -
+had to look for the method before using it.  +colorWithSRGBRed:... made a
+calibrated colour whose -colorSpace was generic RGB, and
+-colorUsingColorSpace: knew no space but by its model.
+
+macOS 15 has, besides those: +sRGBColorSpace and +extendedSRGBColorSpace
+(both "sRGB IEC61966-2.1", two objects), +displayP3ColorSpace ("Display
+P3"), +adobeRGB1998ColorSpace ("Adobe RGB (1998)"),
++genericGamma22GrayColorSpace and +extendedGenericGamma22GrayColorSpace
+("Generic Gray Gamma 2.2 Profile"); each is one object and none is the
+generic space of its model.  A colour made with +colorWithSRGBRed:... is
+in sRGB, -colorUsingColorSpace: with sRGB returns it as it is, and a
+colour converted to sRGB is in sRGB.
+
+Add the six spaces, with their names (and the sRGB profile the library
+already carries for the sRGB ones); make an sRGB colour a calibrated RGB
+colour whose space is sRGB; and convert to sRGB through calibrated RGB,
+and to the gamma 2.2 gray spaces through calibrated white.  GNUstep does
+no colour management, so components are kept on the way, as macOS keeps
+them from sRGB to sRGB and to device RGB; macOS would convert a generic
+RGB colour's components, which GNUstep has never done for any space.
+
+The test checks each space's identity, model, components and name, and
+the sRGB conversions.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Headers/AppKit/NSColorSpace.h           |  38 +++++++++
+ Source/NSColor.m                        |  47 +++++++++--
+ Source/NSColorSpace.m                   |  47 +++++++++++
+ Tests/gui/NSColorSpace/standardSpaces.m | 104 ++++++++++++++++++++++++
+ 4 files changed, 231 insertions(+), 5 deletions(-)
+ create mode 100644 Tests/gui/NSColorSpace/standardSpaces.m
+
+diff --git a/Headers/AppKit/NSColorSpace.h b/Headers/AppKit/NSColorSpace.h
+index d5cbfb7ad..91ad9e45c 100644
+--- a/Headers/AppKit/NSColorSpace.h
++++ b/Headers/AppKit/NSColorSpace.h
+@@ -69,6 +69,7 @@ APPKIT_EXPORT_CLASS
+   NSColorSpaceModel _colorSpaceModel;
+   NSData *_iccData;
+   void *_colorSyncProfile;
++  NSString *_localizedName;
+ }
+ 
+ /**
+@@ -101,6 +102,43 @@ APPKIT_EXPORT_CLASS
+  */
+ + (NSColorSpace *)genericRGBColorSpace;
+ 
++#if OS_API_VERSION(MAC_OS_X_VERSION_10_5, GS_API_LATEST)
++/**
++ * Returns the sRGB color space (IEC 61966-2.1).
++ */
+++ (NSColorSpace *)sRGBColorSpace;
++
++/**
++ * Returns the Adobe RGB (1998) color space.
++ */
+++ (NSColorSpace *)adobeRGB1998ColorSpace;
++#endif
++
++#if OS_API_VERSION(MAC_OS_X_VERSION_10_6, GS_API_LATEST)
++/**
++ * Returns the gray color space with a gamma of 2.2.
++ */
+++ (NSColorSpace *)genericGamma22GrayColorSpace;
++#endif
++
++#if OS_API_VERSION(MAC_OS_X_VERSION_10_12, GS_API_LATEST)
++/**
++ * Returns the sRGB color space with components allowed outside 0 to 1.
++ */
+++ (NSColorSpace *)extendedSRGBColorSpace;
++
++/**
++ * Returns the gamma 2.2 gray color space with components allowed outside
++ * 0 to 1.
++ */
+++ (NSColorSpace *)extendedGenericGamma22GrayColorSpace;
++
++/**
++ * Returns the Display P3 color space.
++ */
+++ (NSColorSpace *)displayP3ColorSpace;
++#endif
++
+ /**
+  * Returns the color space model associated with this instance.
+  */
+diff --git a/Source/NSColor.m b/Source/NSColor.m
+index 94a768a09..478cee659 100644
+--- a/Source/NSColor.m
++++ b/Source/NSColor.m
+@@ -154,6 +154,11 @@ - (NSColor*) initWithCalibratedHue: (CGFloat)hue
+ 			     alpha: (CGFloat)alpha;
+ @end
+ 
++/* A colour made in sRGB; its components are calibrated RGB ones, since
++   GNUstep does no colour management, but its colour space is sRGB. */
++@interface GSSRGBColor : GSCalibratedRGBColor
++@end
++
+ // FIXME: This is not described in the specification
+ @interface GSPatternColor : NSColor
+ {
+@@ -508,11 +513,14 @@ + (NSColor *) colorWithSRGBRed: (CGFloat)red
+                           blue: (CGFloat)blue
+                          alpha: (CGFloat)alpha
+ {
+-  // FIXME
+-  return [self colorWithCalibratedRed: red
+-                                green: green
+-                                 blue: blue
+-                                alpha: alpha];
++  id color;
++
++  color = [GSSRGBColor allocWithZone: NSDefaultMallocZone()];
++  color = [color initWithCalibratedRed: red
++                                 green: green
++                                  blue: blue
++                                 alpha: alpha];
++  return AUTORELEASE(color);
+ }
+ 
+ + (NSColor *)colorWithDisplayP3Red:(CGFloat)red
+@@ -1422,6 +1430,26 @@ - (NSColor *) colorUsingColorSpace: (NSColorSpace *)space
+       return self;
+     }
+ 
++  if (space == [NSColorSpace sRGBColorSpace]
++    || space == [NSColorSpace extendedSRGBColorSpace])
++    {
++      NSColor *rgb = [self colorUsingColorSpaceName: NSCalibratedRGBColorSpace];
++
++      if (rgb == nil)
++        {
++          return nil;
++        }
++      return [NSColor colorWithSRGBRed: [rgb redComponent]
++                                 green: [rgb greenComponent]
++                                  blue: [rgb blueComponent]
++                                 alpha: [rgb alphaComponent]];
++    }
++  if (space == [NSColorSpace genericGamma22GrayColorSpace]
++    || space == [NSColorSpace extendedGenericGamma22GrayColorSpace])
++    {
++      return [self colorUsingColorSpaceName: NSCalibratedWhiteColorSpace];
++    }
++
+   switch ([space colorSpaceModel])
+     {
+       default:
+@@ -3409,6 +3437,15 @@ - (NSColor*) initWithCalibratedHue: (CGFloat)hue
+ 
+ @end
+ 
++@implementation GSSRGBColor
++
++- (NSColorSpace *) colorSpace
++{
++  return [NSColorSpace sRGBColorSpace];
++}
++
++@end
++
+ @implementation GSPatternColor
+ 
+ - (NSColor*) initWithPatternImage: (NSImage*) pattern;
+diff --git a/Source/NSColorSpace.m b/Source/NSColorSpace.m
+index f72964abe..4c69af4b7 100644
+--- a/Source/NSColorSpace.m
++++ b/Source/NSColorSpace.m
+@@ -91,6 +91,49 @@ + (NSColorSpace *) genericGrayColorSpace
+   COLORSPACE(NSGrayColorSpaceModel);
+ }
+ 
++/* A named standard colour space, made once.  GNUstep does no colour
++   management, so these differ from the generic ones only in name. */
++#define NAMEDCOLORSPACE(model, name, profile) \
++  static NSColorSpace *csp = nil;                                     \
++  if (!csp)                                                           \
++    {                                                                 \
++      csp = [[self alloc] _initWithColorSpaceModel: model];           \
++      csp->_localizedName = @name;                                    \
++      if (profile != nil)                                             \
++        [csp _loadICCProfileNamed: profile];                          \
++    }                                                                 \
++  return csp;
++
+++ (NSColorSpace *) sRGBColorSpace
++{
++  NAMEDCOLORSPACE(NSRGBColorSpaceModel, "sRGB IEC61966-2.1", @"sRGB2014");
++}
++
+++ (NSColorSpace *) extendedSRGBColorSpace
++{
++  NAMEDCOLORSPACE(NSRGBColorSpaceModel, "sRGB IEC61966-2.1", @"sRGB2014");
++}
++
+++ (NSColorSpace *) displayP3ColorSpace
++{
++  NAMEDCOLORSPACE(NSRGBColorSpaceModel, "Display P3", nil);
++}
++
+++ (NSColorSpace *) adobeRGB1998ColorSpace
++{
++  NAMEDCOLORSPACE(NSRGBColorSpaceModel, "Adobe RGB (1998)", nil);
++}
++
+++ (NSColorSpace *) genericGamma22GrayColorSpace
++{
++  NAMEDCOLORSPACE(NSGrayColorSpaceModel, "Generic Gray Gamma 2.2 Profile", nil);
++}
++
+++ (NSColorSpace *) extendedGenericGamma22GrayColorSpace
++{
++  NAMEDCOLORSPACE(NSGrayColorSpaceModel, "Generic Gray Gamma 2.2 Profile", nil);
++}
++
+ + (NSColorSpace *) genericRGBColorSpace
+ {
+   static NSColorSpace *csp = nil;
+@@ -151,6 +194,10 @@ - (NSData *) ICCProfileData
+ 
+ - (NSString *) localizedName
+ {
++  if (_localizedName != nil)
++    {
++      return _localizedName;
++    }
+   switch (_colorSpaceModel)
+     {
+       default:
+diff --git a/Tests/gui/NSColorSpace/standardSpaces.m b/Tests/gui/NSColorSpace/standardSpaces.m
+new file mode 100644
+index 000000000..259821d80
+--- /dev/null
++++ b/Tests/gui/NSColorSpace/standardSpaces.m
+@@ -0,0 +1,104 @@
++/* The named standard colour spaces macOS has beside the generic ones, as
++ * macOS 15 describes them: sRGB and extended sRGB ("sRGB IEC61966-2.1"),
++ * Display P3, Adobe RGB (1998), and gray with a gamma of 2.2 and its
++ * extended form ("Generic Gray Gamma 2.2 Profile").  Each is one object,
++ * none of them is the generic space of its model.
++ *
++ * A colour made with +colorWithSRGBRed:green:blue:alpha: is in sRGB, and
++ * -colorUsingColorSpace: with sRGB gives it back as it is; a colour in
++ * another space comes back in sRGB.  GNUstep does no colour management, so
++ * an RGB colour keeps its components on the way (macOS converts a calibrated
++ * colour; sRGB to sRGB and sRGB to device RGB keep them there too).
++ * These need no backend.
++ */
++#include "Testing.h"
++#include <math.h>
++#include <Foundation/Foundation.h>
++#include <AppKit/NSColor.h>
++#include <AppKit/NSColorSpace.h>
++
++#define CLOSE(a, b) (fabs((double)(a) - (double)(b)) < 0.0001)
++
++static NSColorSpace *
++named(NSString *selector)
++{
++  SEL s = NSSelectorFromString(selector);
++
++  if (![NSColorSpace respondsToSelector: s])
++    return nil;
++  return [NSColorSpace performSelector: s];
++}
++
++static void
++check(NSString *selector, NSColorSpaceModel model, NSString *name)
++{
++  NSColorSpace *space = named(selector);
++
++  PASS(space != nil && space == named(selector),
++    "+%s is one colour space", [selector UTF8String]);
++  PASS([space colorSpaceModel] == model
++    && [space numberOfColorComponents] == (model == NSRGBColorSpaceModel ? 3 : 1),
++    "+%s has its model and components", [selector UTF8String]);
++  PASS_EQUAL([space localizedName], name,
++    "+%s is called %s", [selector UTF8String], [name UTF8String]);
++}
++
++int
++main(int argc, char **argv)
++{
++  CREATE_AUTORELEASE_POOL(arp);
++  NSColorSpace *srgb;
++  NSColor *c, *u;
++  CGFloat r, g, b, a;
++
++  START_SET("named colour spaces")
++    check(@"sRGBColorSpace", NSRGBColorSpaceModel, @"sRGB IEC61966-2.1");
++    check(@"extendedSRGBColorSpace", NSRGBColorSpaceModel, @"sRGB IEC61966-2.1");
++    check(@"displayP3ColorSpace", NSRGBColorSpaceModel, @"Display P3");
++    check(@"adobeRGB1998ColorSpace", NSRGBColorSpaceModel, @"Adobe RGB (1998)");
++    check(@"genericGamma22GrayColorSpace", NSGrayColorSpaceModel,
++      @"Generic Gray Gamma 2.2 Profile");
++    check(@"extendedGenericGamma22GrayColorSpace", NSGrayColorSpaceModel,
++      @"Generic Gray Gamma 2.2 Profile");
++    PASS(named(@"sRGBColorSpace") != [NSColorSpace genericRGBColorSpace]
++      && named(@"sRGBColorSpace") != named(@"extendedSRGBColorSpace"),
++      "sRGB is neither generic RGB nor extended sRGB");
++  END_SET("named colour spaces")
++
++  START_SET("sRGB colours")
++    srgb = named(@"sRGBColorSpace");
++    c = [NSColor colorWithSRGBRed: 0 green: 109 / 255.0 blue: 109 / 255.0
++                            alpha: 1];
++    PASS(srgb != nil && [c colorSpace] == srgb, "an sRGB colour is in sRGB");
++    PASS(srgb != nil && [c colorUsingColorSpace: srgb] == c,
++      "an sRGB colour in sRGB is itself");
++
++    u = srgb ? [[NSColor colorWithCalibratedRed: 0.25 green: 0.5 blue: 0.75
++                                          alpha: 0.5]
++      colorUsingColorSpace: srgb] : nil;
++    r = g = b = a = -1;
++    [u getRed: &r green: &g blue: &b alpha: &a];
++    PASS(u != nil && [u colorSpace] == srgb
++      && CLOSE(r, 0.25) && CLOSE(g, 0.5) && CLOSE(b, 0.75) && CLOSE(a, 0.5),
++      "an RGB colour in sRGB is in sRGB, with its components");
++
++    u = srgb ? [[NSColor colorWithCalibratedWhite: 0.5 alpha: 1]
++      colorUsingColorSpace: srgb] : nil;
++    PASS(u != nil && CLOSE([u redComponent], 0.5)
++      && CLOSE([u greenComponent], 0.5) && CLOSE([u blueComponent], 0.5),
++      "a gray colour in sRGB is gray");
++
++    u = [c colorUsingColorSpace: [NSColorSpace deviceRGBColorSpace]];
++    PASS(u != nil && CLOSE([u greenComponent], 109 / 255.0),
++      "an sRGB colour in device RGB keeps its components");
++
++    u = named(@"genericGamma22GrayColorSpace")
++      ? [[NSColor colorWithCalibratedWhite: 0.25 alpha: 1]
++          colorUsingColorSpace: named(@"genericGamma22GrayColorSpace")] : nil;
++    PASS(u != nil && CLOSE([u whiteComponent], 0.25),
++      "a gray colour in gamma 2.2 gray keeps its white");
++  END_SET("sRGB colours")
++
++  DESTROY(arp);
++  return 0;
++}
+-- 
+2.50.1 (Apple Git-155)
+

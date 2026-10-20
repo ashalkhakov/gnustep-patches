@@ -1,0 +1,180 @@
+From 08dac4fb50f219fb1006a2bb812014679af0929e Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Tue, 20 Oct 2026 01:48:50 +0500
+Subject: [PATCH] cairo: dash lengths in user space, not 1.4 times them
+
+-DPSsetdash::: multiplied every length of the pattern by 1.4 before
+handing it to cairo, with a FIXME saying that some dashes looked wrong
+with the correct values.  The lengths of a dash pattern are user space
+lengths in PostScript and in Quartz, and -[NSBezierPath
+setLineDash:count:phase:] passes them through unchanged: macOS draws
+[6 3] as six units painted and three left, and writes "[ 6 3 ] 1 d" into
+a PDF.  GNUstep painted 8.4 and left 4.2, and wrote "[ 8.4 4.2] 1 d", so
+every dashed border and rule came out with longer dashes than on macOS,
+on screen, in bitmaps and in PDF and PostScript output.  The phase was
+not scaled, so it no longer lined up with the pattern either.
+
+Convert each length from user space to device space and nothing more,
+as the phase already is.
+
+The test draws a dashed line into a bitmap and reads the pixels along it:
+the first gap starts six units in, the second dash ten units in, a phase
+moves the pattern back, and under a scaled CTM the lengths scale with the
+line.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/cairo/CairoGState.m |   3 +-
+ Tests/cairo/dashpattern.m  | 126 +++++++++++++++++++++++++++++++++++++
+ 2 files changed, 127 insertions(+), 2 deletions(-)
+ create mode 100644 Tests/cairo/dashpattern.m
+
+diff --git a/Source/cairo/CairoGState.m b/Source/cairo/CairoGState.m
+index 051e65a..2107c79 100644
+--- a/Source/cairo/CairoGState.m
++++ b/Source/cairo/CairoGState.m
+@@ -645,8 +645,7 @@ - (void) DPSsetdash: (const CGFloat *)pat : (NSInteger)size : (CGFloat)foffset
+       while (i)
+         {
+           i--;
+-          // FIXME: When using the correct values, some dashes look wrong
+-          dpat[i] = doubleFromUserSpace(ctm, pat[i]) * 1.4;
++          dpat[i] = doubleFromUserSpace(ctm, pat[i]);
+         }
+       cairo_set_dash(_ct, dpat, size, doffset);
+       GS_ENDITEMBUF();
+diff --git a/Tests/cairo/dashpattern.m b/Tests/cairo/dashpattern.m
+new file mode 100644
+index 0000000..b889382
+--- /dev/null
++++ b/Tests/cairo/dashpattern.m
+@@ -0,0 +1,126 @@
++/* A dash pattern is a list of lengths in user space, as PostScript and
++ * Quartz have it: [6 4] paints six units and leaves four.  The line is drawn
++ * into a bitmap one unit to a pixel, and the pixels along it are read back:
++ * the first dash ends at x = 6, the second starts at x = 10, and a phase
++ * moves the pattern back along the line.
++ *
++ * It needs a running window server to load the backend at all, so it skips
++ * cleanly when there is none, and it guards on the cairo graphics backend.
++ */
++#import <Foundation/NSObject.h>
++#import "Testing.h"
++#include "config.h"
++
++#if defined(BUILD_GRAPHICS) && defined(GRAPHICS_cairo) \
++  && BUILD_GRAPHICS == GRAPHICS_cairo
++
++#import <AppKit/AppKit.h>
++#import <GNUstepGUI/GSDisplayServer.h>
++#include <string.h>
++
++#define WIDE 40
++#define HIGH 8
++
++static NSBitmapImageRep *
++dashedLine(CGFloat phase, CGFloat scale)
++{
++  NSBitmapImageRep *rep;
++  NSGraphicsContext *ctxt;
++  NSBezierPath *p = [NSBezierPath bezierPath];
++  CGFloat pattern[2] = { 6, 4 };
++
++  rep = AUTORELEASE([[NSBitmapImageRep alloc]
++    initWithBitmapDataPlanes: NULL
++                  pixelsWide: WIDE
++                  pixelsHigh: HIGH
++               bitsPerSample: 8
++             samplesPerPixel: 4
++                    hasAlpha: YES
++                    isPlanar: NO
++              colorSpaceName: NSDeviceRGBColorSpace
++                 bytesPerRow: 0
++                bitsPerPixel: 0]);
++  memset([rep bitmapData], 0, [rep bytesPerRow] * [rep pixelsHigh]);
++  ctxt = [NSGraphicsContext graphicsContextWithBitmapImageRep: rep];
++  [NSGraphicsContext saveGraphicsState];
++  [NSGraphicsContext setCurrentContext: ctxt];
++  if (scale != 1.0)
++    {
++      NSAffineTransform *t = [NSAffineTransform transform];
++
++      [t scaleBy: scale];
++      [t concat];
++    }
++  [p moveToPoint: NSMakePoint(0, HIGH / 2 / scale)];
++  [p lineToPoint: NSMakePoint(WIDE / scale, HIGH / 2 / scale)];
++  [p setLineWidth: 4 / scale];
++  [p setLineDash: pattern count: 2 phase: phase];
++  [[NSColor blackColor] set];
++  [p stroke];
++  [ctxt flushGraphics];
++  [NSGraphicsContext restoreGraphicsState];
++  return rep;
++}
++
++/* Whether the pixel in column x, on the line, is painted. */
++static BOOL
++painted(NSBitmapImageRep *rep, int x)
++{
++  unsigned char *p = [rep bitmapData] + (HIGH / 2) * [rep bytesPerRow] + x * 4;
++
++  return p[3] > 128;
++}
++
++int
++main(int argc, const char **argv)
++{
++  START_SET("dash pattern")
++
++  NSBitmapImageRep *rep;
++
++  NS_DURING
++    {
++      [NSApplication sharedApplication];
++      if (nil == GSCurrentServer())
++	{
++	  SKIP("no window server available")
++	}
++    }
++  NS_HANDLER
++    {
++      SKIP("It looks like the GNUstep backend is not installed")
++    }
++  NS_ENDHANDLER
++
++  rep = dashedLine(0, 1);
++  PASS(painted(rep, 0) && painted(rep, 5), "the first dash is painted");
++  PASS(!painted(rep, 6) && !painted(rep, 9),
++    "the first gap starts six units along and is four long");
++  PASS(painted(rep, 10) && painted(rep, 15) && !painted(rep, 16),
++    "the second dash starts ten units along");
++  PASS(painted(rep, 20) && painted(rep, 30), "the pattern repeats every ten units");
++
++  rep = dashedLine(3, 1);
++  PASS(painted(rep, 2) && !painted(rep, 3) && !painted(rep, 6)
++    && painted(rep, 7), "a phase moves the pattern back along the line");
++
++  rep = dashedLine(0, 2);
++  PASS(painted(rep, 11) && !painted(rep, 12) && !painted(rep, 19)
++    && painted(rep, 20), "the lengths are in user space, scaled with the line");
++
++  END_SET("dash pattern")
++  return 0;
++}
++
++#else
++
++int
++main(int argc, const char **argv)
++{
++  START_SET("dash pattern")
++    SKIP("back is not built with the cairo graphics backend")
++  END_SET("dash pattern")
++  return 0;
++}
++
++#endif
+-- 
+2.50.1 (Apple Git-155)
+

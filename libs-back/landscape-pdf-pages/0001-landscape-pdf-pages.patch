@@ -1,0 +1,244 @@
+From 55269ff8ab617b379c4985cfe5bbf817441dbbe3 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Tue, 20 Oct 2026 02:00:44 +0500
+Subject: [PATCH] cairo: landscape PDF pages when gui draws them upright
+
+-beginPrologueBBox:... made every page portrait: when the print info's
+orientation was landscape it swapped the paper size back, because gui
+turned the drawing a quarter round onto a portrait sheet.  gui now draws
+landscape upright into a PDF (landscape-pdf-pages in libs-gui) and says
+so with GSPrintLandscapeSheets in the print info, as macOS makes PDF
+pages: a landscape page has /MediaBox [0 0 842 595] on macOS 15.  Swap
+only when gui has not drawn the page upright, so that PostScript, where
+gui still rotates, keeps its portrait sheets, and a gui without that
+change gets the pages it expects.
+
+The test prints a view to PDF on landscape paper, by size and by
+orientation, and on portrait paper, inflates the document's streams
+(cairo keeps the page objects in compressed object streams; zlib is
+linked for that) and looks for the MediaBox of each.  It passes with the
+libs-gui half of the change; without this one the landscape pages are
+[0 0 595 842].
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/cairo/CairoContext.m      |   6 +-
+ Tests/cairo/GNUmakefile.preamble |   4 +
+ Tests/cairo/pdflandscape.m       | 173 +++++++++++++++++++++++++++++++
+ 3 files changed, 181 insertions(+), 2 deletions(-)
+ create mode 100644 Tests/cairo/pdflandscape.m
+
+diff --git a/Source/cairo/CairoContext.m b/Source/cairo/CairoContext.m
+index 7274476..a2ab012 100644
+--- a/Source/cairo/CairoContext.m
++++ b/Source/cairo/CairoContext.m
+@@ -310,8 +310,10 @@ - (void) beginPrologueBBox: (NSRect)boundingBox
+       // NSPrintInfo also swaps the paperSize to be 11x8.5,
+       // but gui also adds a 90 degree rotation as if it will
+       // be drawing on a 8.5x11 page. So, swap 11x8.5 back to
+-      // 8.5x11 here.
+-      if ([printInfo orientation] == NSLandscapeOrientation)
++      // 8.5x11 here, unless gui draws landscape upright.
++      if ([printInfo orientation] == NSLandscapeOrientation
++        && ![[[printInfo dictionary] objectForKey: @"GSPrintLandscapeSheets"]
++              boolValue])
+ 	{
+ 	  size = NSMakeSize(size.height, size.width);
+ 	}
+diff --git a/Tests/cairo/GNUmakefile.preamble b/Tests/cairo/GNUmakefile.preamble
+index 89bebfd..26a3c88 100644
+--- a/Tests/cairo/GNUmakefile.preamble
++++ b/Tests/cairo/GNUmakefile.preamble
+@@ -15,6 +15,10 @@ ifneq ($(BUILD_GRAPHICS),headless)
+ ADDITIONAL_TOOL_LIBS += -lgnustep-gui
+ endif
+ 
++# The landscape PDF test reads the page size from the document's compressed
++# streams, so it links zlib, which cairo itself depends on.
++pdflandscape_TOOL_LIBS += -lz
++
+ # The shared-memory buffer test compiles the wayland+cairo surface source in
+ # directly, so its headers and libraries are added only for that backend (which
+ # also needs _GNU_SOURCE for memfd_create); a source-level guard keeps it inert
+diff --git a/Tests/cairo/pdflandscape.m b/Tests/cairo/pdflandscape.m
+new file mode 100644
+index 0000000..aa19f07
+--- /dev/null
++++ b/Tests/cairo/pdflandscape.m
+@@ -0,0 +1,173 @@
++/* A landscape page printed to PDF is a landscape page, as on macOS: paper
++ * of 842 by 595 points gives a MediaBox of [0 0 842 595], not a portrait
++ * sheet with the drawing turned onto it.  A portrait page stays portrait.
++ *
++ * cairo keeps the page objects in compressed object streams, so the test
++ * inflates every stream of the document and looks for the MediaBox there.
++ *
++ * It needs a window server (to load the backend), so it skips when no
++ * display server can be reached, and it guards on the cairo graphics backend
++ * being the one built.
++ */
++#import <Foundation/NSObject.h>
++#import "Testing.h"
++#include "config.h"
++
++#if defined(BUILD_GRAPHICS) && defined(GRAPHICS_cairo) \
++  && BUILD_GRAPHICS == GRAPHICS_cairo
++
++#import <AppKit/AppKit.h>
++#import <GNUstepGUI/GSDisplayServer.h>
++#include <string.h>
++#include <zlib.h>
++
++@interface GSLandscapeTestView : NSView
++@end
++
++@implementation GSLandscapeTestView
++- (void) drawRect: (NSRect)r
++{
++  [[NSColor blackColor] set];
++  NSRectFill(NSMakeRect(10, 10, 100, 20));
++}
++@end
++
++/* The document with every Flate stream inflated in place of its data. */
++static NSData *
++inflated(NSData *pdf)
++{
++  NSMutableData *all = [NSMutableData dataWithData: pdf];
++  const char *bytes = [pdf bytes];
++  NSUInteger length = [pdf length];
++  NSUInteger i = 0;
++
++  while (i + 7 < length)
++    {
++      if (memcmp(bytes + i, "stream", 6) == 0
++        && (bytes[i + 6] == '\n' || bytes[i + 6] == '\r'))
++        {
++          z_stream z;
++          unsigned char out[65536];
++          NSUInteger start = i + 7;
++
++          if (bytes[i + 6] == '\r' && bytes[i + 7] == '\n')
++            start++;
++          memset(&z, 0, sizeof(z));
++          if (inflateInit(&z) == Z_OK)
++            {
++              int status;
++
++              z.next_in = (Bytef *)(bytes + start);
++              z.avail_in = length - start;
++              do
++                {
++                  z.next_out = out;
++                  z.avail_out = sizeof(out);
++                  status = inflate(&z, Z_NO_FLUSH);
++                  [all appendBytes: out length: sizeof(out) - z.avail_out];
++                }
++              while (status == Z_OK && z.avail_out == 0);
++              inflateEnd(&z);
++            }
++          i = start;
++        }
++      else
++        {
++          i++;
++        }
++    }
++  return all;
++}
++
++static BOOL
++contains(NSData *d, const char *needle)
++{
++  NSData *n = [NSData dataWithBytes: needle length: strlen(needle)];
++
++  return [d rangeOfData: n
++                options: 0
++                  range: NSMakeRange(0, [d length])].location != NSNotFound;
++}
++
++static NSData *
++printed(NSSize paper, BOOL byOrientation)
++{
++  GSLandscapeTestView *v;
++  NSPrintInfo *info;
++  NSPrintOperation *op;
++  NSMutableData *pdf = [NSMutableData data];
++
++  info = AUTORELEASE([[NSPrintInfo alloc] initWithDictionary: nil]);
++  if (byOrientation)
++    {
++      [info setPaperSize: NSMakeSize(paper.height, paper.width)];
++      [info setOrientation: NSLandscapeOrientation];
++    }
++  else
++    {
++      [info setPaperSize: paper];
++    }
++  [info setLeftMargin: 0];
++  [info setRightMargin: 0];
++  [info setTopMargin: 0];
++  [info setBottomMargin: 0];
++  v = AUTORELEASE([[GSLandscapeTestView alloc]
++    initWithFrame: NSMakeRect(0, 0, paper.width, paper.height)]);
++  op = [NSPrintOperation PDFOperationWithView: v
++                                   insideRect: [v bounds]
++                                       toData: pdf
++                                    printInfo: info];
++  [op setShowsPrintPanel: NO];
++  [op setShowsProgressPanel: NO];
++  [op runOperation];
++  return inflated(pdf);
++}
++
++int
++main(int argc, const char **argv)
++{
++  START_SET("landscape PDF pages")
++  NSData *pdf;
++
++  NS_DURING
++    {
++      [NSApplication sharedApplication];
++      if (nil == GSCurrentServer())
++	{
++	  SKIP("no window server available")
++	}
++    }
++  NS_HANDLER
++    {
++      SKIP("It looks like GNUstep backend is not yet installed")
++    }
++  NS_ENDHANDLER
++
++  pdf = printed(NSMakeSize(842, 595), NO);
++  PASS(contains(pdf, "/MediaBox [ 0 0 842 595 ]"),
++    "landscape paper gives a landscape page");
++
++  pdf = printed(NSMakeSize(842, 595), YES);
++  PASS(contains(pdf, "/MediaBox [ 0 0 842 595 ]"),
++    "landscape orientation gives a landscape page");
++
++  pdf = printed(NSMakeSize(595, 842), NO);
++  PASS(contains(pdf, "/MediaBox [ 0 0 595 842 ]"),
++    "portrait paper gives a portrait page");
++
++  END_SET("landscape PDF pages")
++  return 0;
++}
++
++#else
++
++int
++main(int argc, const char **argv)
++{
++  START_SET("landscape PDF pages")
++    SKIP("back is not built with the cairo graphics backend")
++  END_SET("landscape PDF pages")
++  return 0;
++}
++
++#endif
+-- 
+2.50.1 (Apple Git-155)
+
