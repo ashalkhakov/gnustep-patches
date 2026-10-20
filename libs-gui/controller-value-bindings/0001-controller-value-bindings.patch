@@ -1,0 +1,408 @@
+From c9018e8be5b777e91b73ecc25726abda54215415 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Tue, 20 Oct 2026 17:53:55 +0000
+Subject: [PATCH] NSArrayController: sortDescriptors and filterPredicate
+ bindings
+
+An array controller exposed contentArray, contentSet and selectionIndexes
+only, so binding its sortDescriptors to a key, as Logbook's window does
+for its pick lists, logged "No binding exposed on <NSArrayController>
+for sortDescriptors" and was ignored: the lists stayed in content order.
+
+On macOS 15 an array controller exposes editable, contentArray,
+selectionIndexes, contentArrayForMultipleSelection, contentSet,
+managedObjectContext, sortDescriptors, contentObject and
+filterPredicate, and an object controller editable, contentObject and
+managedObjectContext.  Bound, the controller takes the value when bound
+and whenever it changes, and rearranges for sortDescriptors and
+filterPredicate.  A change the controller makes itself (setting its sort
+descriptors, its filter predicate - cleared on insertion too - or its
+selection, also as an add selects the new object) is set on the bound
+object, unless the bound object already has it.  A nil bound value is
+no sort descriptors: -setSortDescriptors: with nil leaves an empty
+array, and the bound object is not then given one back.  The value
+classes are NSArray, NSPredicate, NSIndexSet and NSNumber.
+
+So sortDescriptors and filterPredicate are exposed by NSArrayController
+and editable by NSObjectController; their value classes are given; the
+setters for the sort descriptors, the filter predicate and the selection
+give a changed value back to a bound object; and
+NSFilterPredicateBinding, which AppKit declares, is declared.
+contentArrayForMultipleSelection is still not exposed.
+
+Tests/gui/NSArrayController/valueBindings.m checks each of these; it
+passes on macOS 15, and without the change 22 of its 30 checks fail
+(with the binding's name written out, as the constant is new).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Headers/AppKit/NSKeyValueBinding.h          |   1 +
+ Source/NSArrayController.m                  |  46 +++++
+ Source/NSObjectController.m                 |  11 ++
+ Source/externs.m                            |   1 +
+ Tests/gui/NSArrayController/valueBindings.m | 199 ++++++++++++++++++++
+ 5 files changed, 258 insertions(+)
+ create mode 100644 Tests/gui/NSArrayController/valueBindings.m
+
+diff --git a/Headers/AppKit/NSKeyValueBinding.h b/Headers/AppKit/NSKeyValueBinding.h
+index fb3eb9e16..6e98d9be7 100644
+--- a/Headers/AppKit/NSKeyValueBinding.h
++++ b/Headers/AppKit/NSKeyValueBinding.h
+@@ -115,6 +115,7 @@ APPKIT_EXPORT NSString *NSEditableBinding;
+ APPKIT_EXPORT NSString *NSEnabledBinding;
+ APPKIT_EXPORT NSString *NSExcludedKeysBinding;
+ APPKIT_EXPORT NSString *NSFetchPredicateBinding;
++APPKIT_EXPORT NSString *NSFilterPredicateBinding;
+ APPKIT_EXPORT NSString *NSFontBinding;
+ APPKIT_EXPORT NSString *NSFontNameBinding;
+ APPKIT_EXPORT NSString *NSFontSizeBinding;
+diff --git a/Source/NSArrayController.m b/Source/NSArrayController.m
+index 10e372279..169882587 100644
+--- a/Source/NSArrayController.m
++++ b/Source/NSArrayController.m
+@@ -168,6 +168,7 @@
+ - (BOOL) _removeFromBoundContent: (NSArray*)removed;
+ - (void) _arrangeAdding: (NSArray*)objects;
+ - (void) _arrangeRemoving: (NSArray*)objects;
++- (void) _reverseSetBinding: (NSString*)binding value: (id)value;
+ @end
+ 
+ static id
+@@ -189,6 +190,8 @@ contentArray(id content)
+       [self exposeBinding: NSContentArrayBinding];
+       [self exposeBinding: NSContentSetBinding];
+       [self exposeBinding: NSSelectionIndexesBinding];
++      [self exposeBinding: NSSortDescriptorsBinding];
++      [self exposeBinding: NSFilterPredicateBinding];
+       [self setKeys: [NSArray arrayWithObjects: NSContentBinding, NSContentObjectBinding, nil]
+ 	    triggerChangeNotificationsForDependentKey: @"arrangedObjects"];
+     }
+@@ -430,6 +433,8 @@ contentArray(id content)
+       [self willChangeValueForKey: NSSelectionIndexesBinding];
+       ASSIGNCOPY(_selection_indexes, idx);
+       [self didChangeValueForKey: NSSelectionIndexesBinding];
++      [self _reverseSetBinding: NSSelectionIndexesBinding
++			 value: _selection_indexes];
+       return YES;
+     }
+ }
+@@ -781,8 +786,13 @@ contentArray(id content)
+ 
+ - (void) setSortDescriptors: (NSArray*)desc
+ {
++  if (desc == nil)
++    {
++      desc = [NSArray array];
++    }
+   ASSIGNCOPY(_sort_descriptors, desc);
+   [self rearrangeObjects];
++  [self _reverseSetBinding: NSSortDescriptorsBinding value: _sort_descriptors];
+ }
+ 
+ - (NSArray*) sortDescriptors
+@@ -794,6 +804,30 @@ contentArray(id content)
+ {
+   ASSIGN(_filter_predicate, filterPredicate);
+   [self rearrangeObjects];
++  [self _reverseSetBinding: NSFilterPredicateBinding value: _filter_predicate];
++}
++
++/* A bound value the controller changed itself goes back to the bound
++ * object, unless it is what that object already has.
++ */
++- (void) _reverseSetBinding: (NSString*)binding value: (id)value
++{
++  GSKeyValueBinding *theBinding;
++  id current;
++
++  theBinding = [GSKeyValueBinding getBinding: binding forObject: self];
++  if (theBinding == nil)
++    {
++      return;
++    }
++  current = [theBinding destinationValue];
++  if (current == value || [current isEqual: value]
++    || (current == nil && [value respondsToSelector: @selector(count)]
++      && [value count] == 0))
++    {
++      return;
++    }
++  [theBinding reverseSetValueFor: binding];
+ }
+ 
+ - (NSPredicate*) filterPredicate
+@@ -947,6 +981,18 @@ atArrangedObjectIndexes: (NSIndexSet*)idx
+     {
+       return [NSSet class];
+     }
++  else if ([binding isEqual: NSSortDescriptorsBinding])
++    {
++      return [NSArray class];
++    }
++  else if ([binding isEqual: NSFilterPredicateBinding])
++    {
++      return [NSPredicate class];
++    }
++  else if ([binding isEqual: NSSelectionIndexesBinding])
++    {
++      return [NSIndexSet class];
++    }
+   else
+     {
+       return [super valueClassForBinding: binding];
+diff --git a/Source/NSObjectController.m b/Source/NSObjectController.m
+index b8d8ca9f2..3e222e181 100644
+--- a/Source/NSObjectController.m
++++ b/Source/NSObjectController.m
+@@ -37,6 +37,7 @@
+ #import <Foundation/NSKeyValueCoding.h>
+ #import <Foundation/NSNotification.h>
+ #import <Foundation/NSRunLoop.h>
++#import <Foundation/NSValue.h>
+ #import "AppKit/NSObjectController.h"
+ #import "AppKit/NSKeyValueBinding.h"
+ #import "GSBindingHelpers.h"
+@@ -154,6 +155,7 @@ static NSString *GSObjectsChangedInManagingContextNotification
+     {
+       [self setVersion: 1];
+ 
++      [self exposeBinding: NSEditableBinding];
+       [self exposeBinding: NSContentObjectBinding];
+       [self exposeBinding: NSManagedObjectContextBinding];
+       [self exposeBinding: NSFetchPredicateBinding];
+@@ -323,6 +325,15 @@ static NSString *GSObjectsChangedInManagingContextNotification
+     }
+ }
+ 
++- (Class) valueClassForBinding: (NSString *)binding
++{
++  if ([binding isEqual: NSEditableBinding])
++    {
++      return [NSNumber class];
++    }
++  return [super valueClassForBinding: binding];
++}
++
+ - (Class) objectClass
+ {
+   return _object_class;
+diff --git a/Source/externs.m b/Source/externs.m
+index 2bea06600..ca9ef6f13 100644
+--- a/Source/externs.m
++++ b/Source/externs.m
+@@ -701,6 +701,7 @@ APPKIT_DECLARE NSString *NSEditableBinding = @"editable";
+ APPKIT_DECLARE NSString *NSEnabledBinding = @"enabled";
+ APPKIT_DECLARE NSString *NSExcludedKeysBinding = @"excludedKeys";
+ APPKIT_DECLARE NSString *NSFetchPredicateBinding = @"fetchPredicate";
++APPKIT_DECLARE NSString *NSFilterPredicateBinding = @"filterPredicate";
+ APPKIT_DECLARE NSString *NSFontBinding = @"font";
+ APPKIT_DECLARE NSString *NSFontNameBinding = @"fontName";
+ APPKIT_DECLARE NSString *NSFontSizeBinding = @"fontSize";
+diff --git a/Tests/gui/NSArrayController/valueBindings.m b/Tests/gui/NSArrayController/valueBindings.m
+new file mode 100644
+index 000000000..f54063b6b
+--- /dev/null
++++ b/Tests/gui/NSArrayController/valueBindings.m
+@@ -0,0 +1,199 @@
++/* An array controller's sortDescriptors, filterPredicate and
++   selectionIndexes bindings, and an object controller's editable binding,
++   as macOS has them: the controller takes the bound value when bound and
++   whenever it changes, and gives its own changes to the sort descriptors,
++   the filter predicate and the selection back to the bound object. */
++#include "Testing.h"
++
++#include <Foundation/NSArray.h>
++#include <Foundation/NSDictionary.h>
++#include <Foundation/NSException.h>
++#include <Foundation/NSIndexSet.h>
++#include <Foundation/NSPredicate.h>
++#include <Foundation/NSSortDescriptor.h>
++#include <Foundation/NSString.h>
++#include <Foundation/NSValue.h>
++
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSArrayController.h>
++#include <AppKit/NSKeyValueBinding.h>
++
++@interface Settings : NSObject
++{
++  NSArray	*order;
++  NSPredicate	*filter;
++  NSIndexSet	*selection;
++  BOOL		editable;
++}
++@end
++
++@implementation Settings
++- (NSArray *) order { return order; }
++- (void) setOrder: (NSArray *)o { ASSIGN(order, o); }
++- (NSPredicate *) filter { return filter; }
++- (void) setFilter: (NSPredicate *)f { ASSIGN(filter, f); }
++- (NSIndexSet *) selection { return selection; }
++- (void) setSelection: (NSIndexSet *)s { ASSIGN(selection, s); }
++- (BOOL) editable { return editable; }
++- (void) setEditable: (BOOL)flag { editable = flag; }
++@end
++
++static NSMutableDictionary *
++named(NSString *name)
++{
++  return [NSMutableDictionary dictionaryWithObject: name forKey: @"name"];
++}
++
++static NSString *
++names(NSArrayController *ac)
++{
++  return [[[ac arrangedObjects] valueForKey: @"name"]
++    componentsJoinedByString: @""];
++}
++
++static NSArray *
++byName(BOOL ascending)
++{
++  return [NSArray arrayWithObject:
++    AUTORELEASE([[NSSortDescriptor alloc] initWithKey: @"name"
++					    ascending: ascending])];
++}
++
++int
++main(int argc, const char **argv)
++{
++  NSArrayController	*ac;
++  NSObjectController	*oc;
++  NSMutableArray	*content;
++  Settings		*settings;
++  NSArray		*exposed;
++
++  START_SET("NSArrayController value bindings")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  content = [NSMutableArray arrayWithObjects:
++    named(@"b"), named(@"c"), named(@"a"), nil];
++  settings = AUTORELEASE([[Settings alloc] init]);
++  [settings setOrder: byName(YES)];
++
++  ac = AUTORELEASE([[NSArrayController alloc] initWithContent: content]);
++  exposed = [ac exposedBindings];
++  PASS([exposed containsObject: NSSortDescriptorsBinding],
++    "an array controller exposes sortDescriptors");
++  PASS([exposed containsObject: NSFilterPredicateBinding],
++    "an array controller exposes filterPredicate");
++  PASS([exposed containsObject: NSSelectionIndexesBinding],
++    "an array controller exposes selectionIndexes");
++  PASS([exposed containsObject: NSEditableBinding],
++    "an array controller exposes editable");
++  PASS([ac valueClassForBinding: NSSortDescriptorsBinding]
++    == [NSArray class], "sortDescriptors takes an array");
++  PASS([ac valueClassForBinding: NSFilterPredicateBinding]
++    == [NSPredicate class], "filterPredicate takes a predicate");
++  PASS([ac valueClassForBinding: NSSelectionIndexesBinding]
++    == [NSIndexSet class], "selectionIndexes takes an index set");
++  PASS([ac valueClassForBinding: NSEditableBinding]
++    == [NSNumber class], "editable takes a number");
++
++  PASS_EQUAL(names(ac), @"bca", "unsorted before binding");
++  [ac bind: NSSortDescriptorsBinding toObject: settings
++    withKeyPath: @"order" options: nil];
++  PASS_EQUAL(names(ac), @"abc", "bound, the controller sorts as the value says");
++  PASS_EQUAL([ac sortDescriptors], byName(YES),
++    "the controller's sort descriptors are the bound value");
++  [settings setOrder: byName(NO)];
++  PASS_EQUAL(names(ac), @"cba", "a change to the bound value rearranges");
++  [ac setSortDescriptors: byName(YES)];
++  PASS_EQUAL(names(ac), @"abc", "the controller's own sort descriptors rearrange");
++  PASS_EQUAL([settings order], byName(YES),
++    "and are given back to the bound object");
++  [settings setOrder: nil];
++  PASS([[ac sortDescriptors] count] == 0,
++    "a nil bound value is no sort descriptors");
++  [ac unbind: NSSortDescriptorsBinding];
++  [settings setOrder: byName(NO)];
++  PASS([[ac sortDescriptors] count] == 0, "unbound, the value is not followed");
++
++  [ac setSortDescriptors: byName(YES)];
++  [ac bind: NSFilterPredicateBinding toObject: settings
++    withKeyPath: @"filter" options: nil];
++  PASS_EQUAL(names(ac), @"abc", "a nil bound filter filters nothing");
++  [settings setFilter: [NSPredicate predicateWithFormat: @"name != 'b'"]];
++  PASS_EQUAL(names(ac), @"ac", "a change to the bound filter rearranges");
++  PASS_EQUAL([ac filterPredicate], [settings filter],
++    "the controller's filter is the bound value");
++  [ac setFilterPredicate: [NSPredicate predicateWithFormat: @"name != 'c'"]];
++  PASS_EQUAL(names(ac), @"ab", "the controller's own filter rearranges");
++  PASS_EQUAL([settings filter], [ac filterPredicate],
++    "and is given back to the bound object");
++  [ac setFilterPredicate: nil];
++  PASS([settings filter] == nil, "so is no filter");
++  [ac unbind: NSFilterPredicateBinding];
++
++  [settings setSelection: [NSIndexSet indexSetWithIndex: 1]];
++  [ac bind: NSSelectionIndexesBinding toObject: settings
++    withKeyPath: @"selection" options: nil];
++  PASS_EQUAL([ac selectionIndexes], [NSIndexSet indexSetWithIndex: 1],
++    "bound, the controller selects as the value says");
++  [settings setSelection: [NSIndexSet indexSetWithIndex: 2]];
++  PASS_EQUAL([ac selectionIndexes], [NSIndexSet indexSetWithIndex: 2],
++    "a change to the bound selection selects");
++  [ac setSelectionIndex: 0];
++  PASS_EQUAL([settings selection], [NSIndexSet indexSetWithIndex: 0],
++    "the controller's own selection is given back to the bound object");
++  [ac unbind: NSSelectionIndexesBinding];
++
++  END_SET("NSArrayController value bindings")
++
++  START_SET("sortDescriptors bound before the content")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  settings = AUTORELEASE([[Settings alloc] init]);
++  [settings setOrder: byName(NO)];
++  ac = AUTORELEASE([[NSArrayController alloc] init]);
++  [ac bind: NSSortDescriptorsBinding toObject: settings
++    withKeyPath: @"order" options: nil];
++  [ac setContent: [NSMutableArray arrayWithObjects:
++    named(@"b"), named(@"c"), named(@"a"), nil]];
++  PASS_EQUAL(names(ac), @"cba", "content set later is arranged as bound");
++  [ac unbind: NSSortDescriptorsBinding];
++
++  END_SET("sortDescriptors bound before the content")
++
++  START_SET("NSObjectController editable binding")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  settings = AUTORELEASE([[Settings alloc] init]);
++  oc = AUTORELEASE([[NSObjectController alloc] initWithContent: nil]);
++  PASS([[oc exposedBindings] containsObject: NSEditableBinding],
++    "an object controller exposes editable");
++  [oc bind: NSEditableBinding toObject: settings
++    withKeyPath: @"editable" options: nil];
++  PASS([oc isEditable] == NO, "bound, the controller is as editable as the value");
++  PASS([oc canAdd] == NO, "and cannot add");
++  [settings setEditable: YES];
++  PASS([oc isEditable] == YES, "a change to the bound value follows");
++  [oc unbind: NSEditableBinding];
++
++  END_SET("NSObjectController editable binding")
++
++  return 0;
++}
+-- 
+2.43.0
+

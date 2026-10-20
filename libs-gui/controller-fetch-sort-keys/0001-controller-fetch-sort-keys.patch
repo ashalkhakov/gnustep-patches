@@ -1,0 +1,185 @@
+From 910f98bc2083da2d2896672f1be5adbffd6ba857 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Tue, 20 Oct 2026 18:05:24 +0000
+Subject: [PATCH] NSArrayController: only sort descriptors a store can sort by
+ in the fetch request
+
+An array controller in entity mode put all its sort descriptors in its
+default fetch request.  A sort descriptor on a key that is not a stored
+attribute (a method of the managed object's class, a transient
+attribute, a key path through a relationship) or with a comparison a
+store cannot do went to the store, which may refuse it: Logbook's pick
+lists, sorted by a computed title through a sortDescriptors binding,
+fetched nothing from its OData store.
+
+On macOS 15 -defaultFetchRequest takes the controller's sort
+descriptors up to the first one that is not on a stored (not transient)
+attribute of the entity by its name, or that compares with anything but
+-compare: (-localizedCaseInsensitiveCompare:, -caseInsensitiveCompare:
+and comparators are left out); the rest are left to the arrangement.
+With sort descriptors on code and on a key that is not an attribute the
+request has the first; the other way round, none.
+
+So -defaultFetchRequest now does the same, reading the entity's
+attributes from the request's entity.
+
+Tests/gui/NSArrayController/entityMode.m checks the three cases (its
+stand-in entity gains attributes, one transient); without the change
+the 3 new checks fail.  The test stands in for Core Data and so cannot
+run on macOS; the behaviour was checked there with a real entity.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/NSArrayController.m               | 31 +++++++++++++-
+ Tests/gui/NSArrayController/entityMode.m | 54 ++++++++++++++++++++++++
+ 2 files changed, 83 insertions(+), 2 deletions(-)
+
+diff --git a/Source/NSArrayController.m b/Source/NSArrayController.m
+index 2aa680bac..b0ff0927c 100644
+--- a/Source/NSArrayController.m
++++ b/Source/NSArrayController.m
+@@ -147,9 +147,15 @@
+ @end
+ 
+ @protocol GSControllerFetchRequest
++- (id) entity;
+ - (void) setSortDescriptors: (NSArray*)sortDescriptors;
+ @end
+ 
++@protocol GSControllerSortEntity
++- (NSDictionary*) attributesByName;
++- (BOOL) isTransient;
++@end
++
+ @interface NSArrayController (Private)
+ - (NSIndexSet*) _indexSetForObjects: (NSArray*)objects;
+ - (void) _setArrangedObjects: (NSArray*)arranged
+@@ -272,8 +278,29 @@
+ - (NSFetchRequest*) defaultFetchRequest
+ {
+   NSFetchRequest *request = [super defaultFetchRequest];
+-
+-  [(id<GSControllerFetchRequest>)request setSortDescriptors: _sort_descriptors];
++  NSDictionary *attributes;
++  NSMutableArray *sortable;
++  NSEnumerator *e;
++  NSSortDescriptor *descriptor;
++
++  /* Only the leading sort descriptors a store can sort by: stored
++     attributes compared with -compare:. */
++  attributes = [(id<GSControllerSortEntity>)[(id<GSControllerFetchRequest>)request
++    entity] attributesByName];
++  sortable = [NSMutableArray array];
++  e = [_sort_descriptors objectEnumerator];
++  while ((descriptor = [e nextObject]) != nil)
++    {
++      id attribute = [attributes objectForKey: [descriptor key]];
++
++      if (attribute == nil || [attribute isTransient]
++	|| !sel_isEqual([descriptor selector], @selector(compare:)))
++	{
++	  break;
++	}
++      [sortable addObject: descriptor];
++    }
++  [(id<GSControllerFetchRequest>)request setSortDescriptors: sortable];
+   return request;
+ }
+ 
+diff --git a/Tests/gui/NSArrayController/entityMode.m b/Tests/gui/NSArrayController/entityMode.m
+index d51db48db..a367c887f 100644
+--- a/Tests/gui/NSArrayController/entityMode.m
++++ b/Tests/gui/NSArrayController/entityMode.m
+@@ -39,6 +39,15 @@
+ + (id) insertNewObjectForEntityForName: (NSString *)n
+ 		inManagedObjectContext: (id)context;
+ - (NSString *) name;
++- (NSDictionary *) attributesByName;
++@end
++
++@interface NSAttributeDescription : NSObject
++{
++@public
++  BOOL	transient;
++}
++- (BOOL) isTransient;
+ @end
+ 
+ @interface NSFetchRequest : NSObject
+@@ -48,6 +57,7 @@
+   NSPredicate	*predicate;
+   NSArray	*sortDescriptors;
+ }
++- (id) entity;
+ - (void) setEntity: (id)e;
+ - (void) setPredicate: (NSPredicate *)p;
+ - (void) setSortDescriptors: (NSArray *)s;
+@@ -93,6 +103,16 @@
+ {
+   return name;
+ }
++/* name is stored, nick transient. */
++- (NSDictionary *) attributesByName
++{
++  NSAttributeDescription	*stored = AUTORELEASE([NSAttributeDescription new]);
++  NSAttributeDescription	*transient = AUTORELEASE([NSAttributeDescription new]);
++
++  transient->transient = YES;
++  return [NSDictionary dictionaryWithObjectsAndKeys:
++    stored, @"name", transient, @"nick", nil];
++}
+ - (BOOL) isKindOfEntity: (NSEntityDescription *)e
+ {
+   NSEntityDescription	*check = self;
+@@ -103,7 +123,18 @@
+ }
+ @end
+ 
++@implementation NSAttributeDescription
++- (BOOL) isTransient
++{
++  return transient;
++}
++@end
++
+ @implementation NSFetchRequest
++- (id) entity
++{
++  return entity;
++}
+ - (void) setEntity: (id)e
+ {
+   ASSIGN(entity, e);
+@@ -297,6 +328,29 @@ main(int argc, const char **argv)
+     "-setFetchPredicate: fetches with the predicate")
+   PASS_EQUAL(context->lastRequest->sortDescriptors, [ac sortDescriptors],
+     "an array controller's default request has its sort descriptors")
++  [ac setSortDescriptors: [NSArray arrayWithObjects:
++    AUTORELEASE([[NSSortDescriptor alloc] initWithKey: @"name"
++					    ascending: YES]),
++    AUTORELEASE([[NSSortDescriptor alloc] initWithKey: @"title"
++					    ascending: YES]), nil]];
++  PASS_EQUAL(((NSFetchRequest *)[ac defaultFetchRequest])->sortDescriptors,
++    [[ac sortDescriptors] subarrayWithRange: NSMakeRange(0, 1)],
++    "the request's sort descriptors stop at a key that is not an attribute")
++  [ac setSortDescriptors: [NSArray arrayWithObjects:
++    AUTORELEASE([[NSSortDescriptor alloc] initWithKey: @"nick"
++					    ascending: YES]),
++    AUTORELEASE([[NSSortDescriptor alloc] initWithKey: @"name"
++					    ascending: YES]), nil]];
++  PASS([((NSFetchRequest *)[ac defaultFetchRequest])->sortDescriptors count] == 0,
++    "or a transient attribute")
++  [ac setSortDescriptors: [NSArray arrayWithObject:
++    AUTORELEASE([[NSSortDescriptor alloc] initWithKey: @"name"
++      ascending: YES selector: @selector(caseInsensitiveCompare:)])]];
++  PASS([((NSFetchRequest *)[ac defaultFetchRequest])->sortDescriptors count] == 0,
++    "or a comparison other than -compare:")
++  [ac setSortDescriptors: [NSArray arrayWithObject:
++    AUTORELEASE([[NSSortDescriptor alloc] initWithKey: @"name"
++					    ascending: YES])]];
+ 
+   [ac setFetchPredicate: nil];
+   spin();
+-- 
+2.43.0
+
