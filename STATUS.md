@@ -774,6 +774,30 @@ RenderBadPicture per closed window; the surface now lets go first.
 `Tests/x11/windowclose.m`.  Not GNUstep's: the New Report panel's radio
 buttons (their states are right; the default theme draws them that way),
 and the scroller on the left, which is GNUstep's interface style default.
+Added on 2026-10-20 for RDLKit's designer UI tests, checked against
+macOS 15, on libs-gui cacd5cb08.  `pasteboard-clear-contents`:
+-clearContents raised; it now clears the pasteboard, tells its owner and
+returns the new change count, and -writeObjects: (which returned NO),
+-readObjectsForClasses:options:, -canReadObjectForClasses:options: and
+-pasteboardItems work, with NSString adopting NSPasteboardWriting and
+NSPasteboardReading; the pasteboard holds one item, so where macOS keeps
+one per object written the first object's types are kept, and URLs,
+images and colours do not adopt the protocols yet.
+`NSPasteboard/clearContents.m`, 14 checks; without the fix the first
+fails and the rest cannot run.  `window-sheet-api`: NSWindow had no
+-endSheet:, -endSheet:returnCode:, -sheets, -isSheet or
+-beginCriticalSheet:completionHandler:, and -sheetParent was nil; they
+end the window's sheet through NSApp (the handler is called while the
+sheet is up, then it is ordered out, as on macOS) and report it.  Sheets
+stay modal: -beginSheet:completionHandler: returns when the sheet ends,
+where macOS returns at once.  `NSWindow/sheetAPI.m`, 6 of 7 fail without
+it.  `colorspace-srgb`: +sRGBColorSpace and the other named spaces
+(extended sRGB, Display P3, Adobe RGB (1998), gamma 2.2 gray and its
+extended form) were missing; they are there with macOS's names, a
++colorWithSRGBRed:... colour is in sRGB, and -colorUsingColorSpace:
+converts to sRGB and gamma 2.2 gray, keeping components since GNUstep
+does no colour management.  `NSColorSpace/standardSpaces.m`, 25 checks,
+all but one failing without it.
 
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
@@ -840,6 +864,9 @@ and the scroller on the left, which is GNUstep's interface style default.
 | `control-state-value-signed` | libs-gui | test | not sent yet | (none: RDLKit will use it from here) |
 | `urlsession-task-state-signed` | libs-base | test | not sent yet | (none: RDLKit will use it from here) |
 | `cairo-window-surface-termination` | libs-back | test | not sent yet | (none: RDLKit will use it from here) |
+| `pasteboard-clear-contents` | libs-gui | test | not sent yet | (none: RDLKit will use it from here) |
+| `window-sheet-api` | libs-gui | test | not sent yet | (none: RDLKit will use it from here) |
+| `colorspace-srgb` | libs-gui | test | not sent yet | (none: RDLKit will use it from here) |
 | `cgrectunion-size` | libs-opal | none | [#71](https://github.com/gnustep/libs-opal/pull/71) | GSXFormsKit |
 | `freetype-advance-without-size` | libs-opal | test | [#72](https://github.com/gnustep/libs-opal/pull/72) | (none: XFormsKit uses it from here) |
 | `cfstring-overrelease` | libs-corebase | none | [#166](https://github.com/gnustep/libs-corebase/pull/166) | gnustep-build |
