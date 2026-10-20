@@ -1,0 +1,254 @@
+From 726fd142eae05f42092f562eb221d7953f6c1bea Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Tue, 20 Oct 2026 11:14:44 +0500
+Subject: [PATCH] NSDate: hash every date by its interval
+
+-isEqual: and -isEqualToDate: compare dates by their intervals, with
+==, whatever their classes, but the hashes were not of the interval:
+a small date's -hash was its pointer, and every other date's (an
+NSCalendarDate, a subclass of the caller's own) was its interval cast
+to NSUInteger.  So equal dates of different classes hashed apart, and a
+set or dictionary keyed by NSDates did not find an equal
+NSCalendarDate.  The cast also put every date within the same second
+(and on some CPUs every date before the reference date) in one hash,
+and converting a negative or out of range double to an unsigned
+integer is undefined behaviour.
+
+Every date now hashes its interval with the function NSNumber hashes
+its doubleValue with (after the manner of CPython, modulo a Mersenne
+prime), which is a function of the value alone, so 0 and -0 hash
+alike, and which keeps distinct fractions apart.  It moves from a
+static function in NSNumber.m to GSPrivateHashDouble(), declared in
+GSPrivate.h, for NSDate to call; NSNumber's hashes are unchanged.
+
+macOS 15 hashes every date by its interval too (the same value for
+__NSTaggedDate, __NSDate, NSCalendarDate and a subclass), with
+CoreFoundation's own double hash.  The values differ from GNUstep's,
+as NSNumber's already did; nothing should depend on them.
+
+Tests/base/NSDate/hash.m checks that every two equal dates among
+NSDates, NSCalendarDates and a subclass made from a table of intervals
+hash alike, that a set of NSDates finds equal dates of the other
+classes, and that dates a millisecond apart hash apart; 3 of its 4
+checks failed before this change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/GSPrivate.h       |   6 ++
+ Source/NSDate.m          |   8 +--
+ Source/NSNumber.m        |   7 ++-
+ Tests/base/NSDate/hash.m | 127 +++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 139 insertions(+), 9 deletions(-)
+ create mode 100644 Tests/base/NSDate/hash.m
+
+diff --git a/Source/GSPrivate.h b/Source/GSPrivate.h
+index e3bcdea6e..162fe3c9c 100644
+--- a/Source/GSPrivate.h
++++ b/Source/GSPrivate.h
+@@ -633,6 +633,12 @@ uint32_t
+ GSPrivateHash(uint32_t seed, const void *bytes, int length)
+   GS_ATTRIB_PRIVATE;
+ 
++/* Hash a double by its value, so that numbers and dates that compare
++ * equal hash alike (0 and -0 included).  Defined in NSNumber.m.
++ */
++NSUInteger
++GSPrivateHashDouble(double value) GS_ATTRIB_PRIVATE;
++
+ /* Incorporate 'l' bytes of data from the buffer pointed to by 'b' into
+  * the hash state information pointed to by p0 and p1.
+  * The hash state variables should have been initialised to zero before
+diff --git a/Source/NSDate.m b/Source/NSDate.m
+index a30e5a05e..d5d5a012a 100644
+--- a/Source/NSDate.m
++++ b/Source/NSDate.m
+@@ -390,11 +390,7 @@ - (id) initWithCoder: (NSCoder*)coder
+ 
+ - (NSUInteger) hash
+ {
+-  #if USE_SMALL_DATE
+-  return (NSUInteger)self;
+-  #else
+-  return (NSUInteger)GET_INTERVAL(self);
+-  #endif
++  return GSPrivateHashDouble(GET_INTERVAL(self));
+ }
+ 
+ - (NSComparisonResult) compare: (NSDate*)otherDate
+@@ -1700,7 +1696,7 @@ - (void) encodeWithCoder: (NSCoder*)coder
+ 
+ - (NSUInteger) hash
+ {
+-  return (NSUInteger)[self timeIntervalSinceReferenceDate];
++  return GSPrivateHashDouble([self timeIntervalSinceReferenceDate]);
+ }
+ 
+ - (instancetype) initWithCoder: (NSCoder*)coder
+diff --git a/Source/NSNumber.m b/Source/NSNumber.m
+index 549b2434e..58594aa0f 100644
+--- a/Source/NSNumber.m
++++ b/Source/NSNumber.m
+@@ -46,6 +46,7 @@
+ #import "Foundation/NSDecimalNumber.h"
+ #import "Foundation/NSException.h"
+ #import "Foundation/NSValue.h"
++#import "GSPrivate.h"
+ #if __has_include(<objc/runtime.h>)
+ #  include <objc/runtime.h>
+ #endif
+@@ -74,8 +75,8 @@
+ #define	GS_HASH_MODULUS	(((NSUInteger)1 << GS_HASH_BITS) - 1)
+ #define	GS_HASH_INF	((NSUInteger)314159)
+ 
+-static NSUInteger
+-GSHashDouble(double value)
++NSUInteger
++GSPrivateHashDouble(double value)
+ {
+   int		e, sign;
+   double	m;
+@@ -798,7 +799,7 @@ - (BOOL) isEqualToValue: (NSValue*)aValue
+ 
+ - (NSUInteger) hash
+ {
+-  return GSHashDouble([self doubleValue]);
++  return GSPrivateHashDouble([self doubleValue]);
+ }
+ 
+ - (NSString*) stringValue
+diff --git a/Tests/base/NSDate/hash.m b/Tests/base/NSDate/hash.m
+new file mode 100644
+index 000000000..690b63fff
+--- /dev/null
++++ b/Tests/base/NSDate/hash.m
+@@ -0,0 +1,127 @@
++#import "ObjectTesting.h"
++#import <Foundation/NSAutoreleasePool.h>
++#import <Foundation/NSArray.h>
++#import <Foundation/NSCalendarDate.h>
++#import <Foundation/NSDate.h>
++#import <Foundation/NSSet.h>
++#import <Foundation/NSValue.h>
++#include <float.h>
++#include <math.h>
++
++/* A date that is not one of NSDate's own. */
++@interface RefDate : NSDate
++{
++  NSTimeInterval	t;
++}
++@end
++
++@implementation RefDate
++- (id) initWithTimeIntervalSinceReferenceDate: (NSTimeInterval)secs
++{
++  t = secs;
++  return self;
++}
++- (NSTimeInterval) timeIntervalSinceReferenceDate
++{
++  return t;
++}
++@end
++
++int main()
++{
++  NSAutoreleasePool	*arp = [NSAutoreleasePool new];
++  NSTimeInterval	table[] = {
++    0.0, -0.0, 0.5, -0.5, 1.0, -1.0, 1.5, -1.5, 2.0, -2.0, 0.001,
++    1e-30, 1e-6, 761234567.0, 761234567.891, -761234567.891, 1e9,
++    4294967296.5, 63113904000.0, -63114076800.0, 1e15, 1e20, 1e33,
++    1e300, DBL_MAX, INFINITY, -INFINITY
++  };
++  unsigned		n = sizeof(table) / sizeof(*table);
++  NSMutableArray	*dates = [NSMutableArray array];
++  NSMutableSet		*set = [NSMutableSet set];
++  NSMutableSet		*hashes = [NSMutableSet set];
++  unsigned		i;
++  unsigned		j;
++  unsigned		bad;
++
++  for (i = 0; i < n; i++)
++    {
++      NSTimeInterval	ti = table[i];
++
++      [dates addObject: [NSDate dateWithTimeIntervalSinceReferenceDate: ti]];
++      [dates addObject: AUTORELEASE([[RefDate alloc]
++	initWithTimeIntervalSinceReferenceDate: ti])];
++      [dates addObject: [NSCalendarDate
++	dateWithTimeIntervalSinceReferenceDate: ti]];
++    }
++
++  START_SET("equal dates have equal hashes")
++    bad = 0;
++    for (i = 0; i < [dates count]; i++)
++      {
++	NSDate	*a = [dates objectAtIndex: i];
++
++	for (j = 0; j < [dates count]; j++)
++	  {
++	    NSDate	*b = [dates objectAtIndex: j];
++
++	    if ([a isEqual: b] && [a hash] != [b hash])
++	      {
++		if (bad++ < 10)
++		  {
++		    fprintf(stderr, "%s %.17g and %s %.17g are equal,"
++		      " with hashes %lu and %lu\n",
++		      object_getClassName(a), [a timeIntervalSinceReferenceDate],
++		      object_getClassName(b), [b timeIntervalSinceReferenceDate],
++		      (unsigned long)[a hash], (unsigned long)[b hash]);
++		  }
++	      }
++	  }
++      }
++    PASS(bad == 0, "dates of different classes that are equal hash alike")
++
++    PASS([[[RefDate alloc] initWithTimeIntervalSinceReferenceDate: 0.0] hash]
++      == [[[RefDate alloc] initWithTimeIntervalSinceReferenceDate: -0.0] hash],
++      "0 and -0 hash alike")
++
++    for (i = 0; i < 1000; i++)
++      {
++	[set addObject: [NSDate
++	  dateWithTimeIntervalSinceReferenceDate: 761234567.0 + i * 0.25]];
++      }
++    bad = 0;
++    for (i = 0; i < 1000; i++)
++      {
++	NSTimeInterval	ti = 761234567.0 + i * 0.25;
++	RefDate		*r;
++
++	r = [[RefDate alloc] initWithTimeIntervalSinceReferenceDate: ti];
++	if (![set containsObject: r])
++	  bad++;
++	if (![set containsObject:
++	  [NSCalendarDate dateWithTimeIntervalSinceReferenceDate: ti]])
++	  bad++;
++	RELEASE(r);
++      }
++    PASS(bad == 0, "a set of dates finds equal dates of other classes")
++  END_SET("equal dates have equal hashes")
++
++  START_SET("dates within a second hash apart")
++    for (i = 0; i < 1000; i++)
++      {
++	NSTimeInterval	ti = 761234567.0 + i / 1000.0;
++	RefDate		*r;
++
++	r = [[RefDate alloc] initWithTimeIntervalSinceReferenceDate: ti];
++	[hashes addObject: [NSNumber numberWithUnsignedLong: [r hash]]];
++	[hashes addObject: [NSNumber numberWithUnsignedLong:
++	  [[NSDate dateWithTimeIntervalSinceReferenceDate: -ti] hash]]];
++	RELEASE(r);
++      }
++    PASS([hashes count] == 2000,
++      "2000 dates a millisecond apart have 2000 hashes")
++  END_SET("dates within a second hash apart")
++
++  [arp release]; arp = nil;
++  return 0;
++}
+-- 
+2.50.1 (Apple Git-155)
+

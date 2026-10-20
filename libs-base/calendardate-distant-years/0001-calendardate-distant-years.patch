@@ -1,0 +1,331 @@
+From 7dd4b1c07addc88dda5d46bcefa4dceb51e794ed Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Tue, 20 Oct 2026 11:18:50 +0500
+Subject: [PATCH] NSCalendarDate: break up dates before the year 1 and in
+ distant years
+
+Breaking a date into its year, month and day searched forward year by
+year from an estimate, and month by month comparing a signed day
+number with the unsigned one absoluteGregorianDay() returned.  So:
+
+- a date more than a day before 1 January of the year 1 (two days
+  before distantPast, an interval of about -6.3e10) never came back
+  from -description, -yearOfCommonEra, -dayOfMonth and the others:
+  the negative day number became a huge unsigned one and the month
+  search never ended;
+- a date some 1e20 seconds away took hours, one year per iteration,
+  and one past 2^63 days converted a double to NSInteger out of range;
+- beyond about 6.7e16 seconds the year no longer fit the int that
+  formats it, and came out as garbage (1e17 as the year -1126091445).
+-[NSDate description] goes through NSCalendarDate, so all of this held
+for NSDate too.
+
+The year is now computed from the number of whole 400, 100, 4 and 1
+year cycles since 1 January 1, with floored division, so the day
+number of any NSInteger is broken up in constant time, and
+absoluteGregorianDay() takes and returns signed numbers.  Years before
+1 are numbered as macOS 15's NSCalendarDate numbers them, proleptic
+Gregorian with a year 0 (a leap year, 1 BC) and -1 before it, and
+GSTime() takes a signed year, so -initWithYear:... and
+-dateByAddingYears:... work there too.  The day of the era is floored
+rather than truncated, which changes nothing from 31 December of the
+year 0 on and gives earlier dates the right day and time of day.  A
+date is held to the years an int holds (on 32-bit systems, those whose
+day numbers an NSInteger holds); outside them it is midnight of the
+first or the last day of those years, where macOS gives the year
+2147483647 and a time of day out of range.  For years below 0, %Y with
+no width pads to four digits after the sign, as it does above.
+
+Not changed: %y of a negative year prints the last two digits without
+the sign (macOS keeps it), and %Y pads where macOS does not.  macOS's
+-[NSDate description] (ICU's calendar, Julian before 1582) is an empty
+string beyond about 5.8 million years either way; GNUstep's prints the
+NSCalendarDate's.
+
+Tests/base/NSCalendarDate/distantYears.m checks dates before the year
+1 and in distant years against what macOS 15 gives, and the parts,
+weekdays and days of the year of 1 March in six years from 1 to -1168;
+before this change it did not return (it stops itself after 60
+seconds).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/NSCalendarDate.m                  |  99 +++++++++++++++-------
+ Tests/base/NSCalendarDate/distantYears.m | 101 +++++++++++++++++++++++
+ 2 files changed, 169 insertions(+), 31 deletions(-)
+ create mode 100644 Tests/base/NSCalendarDate/distantYears.m
+
+diff --git a/Source/NSCalendarDate.m b/Source/NSCalendarDate.m
+index cb51b6c4c..ca1104b8c 100644
+--- a/Source/NSCalendarDate.m
++++ b/Source/NSCalendarDate.m
+@@ -152,7 +152,7 @@ @interface	GSAbsTimeZone : NSObject	// Help the compiler
+ }
+ 
+ static inline NSUInteger
+-lastDayOfGregorianMonth(NSUInteger month, NSUInteger year)
++lastDayOfGregorianMonth(NSUInteger month, NSInteger year)
+ {
+   switch (month)
+     {
+@@ -170,8 +170,14 @@ @interface	GSAbsTimeZone : NSObject	// Help the compiler
+     }
+ }
+ 
+-static inline NSUInteger
+-absoluteGregorianDay(NSUInteger day, NSUInteger month, NSUInteger year)
++static inline NSInteger
++floorDiv(NSInteger a, NSInteger b)
++{
++  return (a >= 0) ? a / b : -((b - 1 - a) / b);
++}
++
++static inline NSInteger
++absoluteGregorianDay(NSInteger day, NSUInteger month, NSInteger year)
+ {
+   if (month > 1)
+     {
+@@ -180,29 +186,48 @@ @interface	GSAbsTimeZone : NSObject	// Help the compiler
+ 	  day = day + lastDayOfGregorianMonth(month, year);
+ 	}
+     }
+-  if (year > 0)
+-    {
+-      year--;
+-    }
++  year--;
+   return
+     (day            // days this year
+      + 365 * year   // days in previous years ignoring leap days
+-     + year/4       // Julian leap days before this year...
+-     - year/100     // ...minus prior century years...
+-     + year/400);   // ...plus prior years divisible by 400
++     + floorDiv(year, 4)       // Julian leap days before this year...
++     - floorDiv(year, 100)     // ...minus prior century years...
++     + floorDiv(year, 400));   // ...plus prior years divisible by 400
++}
++
++/* The years a date is broken into, so that a year fits in an int
++ * and a day number in an NSInteger.
++ */
++#define	MAX_YEAR	((NSInteger)(NSIntegerMax / 366 < INT_MAX \
++  ? NSIntegerMax / 366 : INT_MAX))
++
++static inline NSTimeInterval
++clampTime(NSTimeInterval when)
++{
++  double	first = absoluteGregorianDay(1, 1, -MAX_YEAR);
++  double	last = absoluteGregorianDay(1, 1, MAX_YEAR + 1) - 1;
++
++  first = (first - GREGORIAN_REFERENCE) * 86400.0;
++  last = (last - GREGORIAN_REFERENCE) * 86400.0;
++  if (when < first)
++    {
++      return first;
++    }
++  if (when > last)
++    {
++      return last;
++    }
++  return when;
+ }
+ 
+ static inline NSInteger
+ dayOfCommonEra(NSTimeInterval when)
+ {
+-  NSInteger r;
+-
+   // Get reference date in terms of days
+-  when /= 86400.0;
++  when = clampTime(when) / 86400.0;
+   // Offset by Gregorian reference
+   when += GREGORIAN_REFERENCE;
+-  r = (NSInteger)when;
+-  return r;
++  return (NSInteger)floor(when);
+ }
+ 
+ static void
+@@ -211,13 +236,30 @@ @interface	GSAbsTimeZone : NSObject	// Help the compiler
+ {
+   NSInteger     y;
+   NSInteger     m;
+-
+-  // Search forward year by year from approximate year
+-  y = abs/366;
+-  while (abs >= absoluteGregorianDay(1, 1, y+1))
+-    {
+-      y++;
+-    }
++  NSInteger     n;
++  NSInteger     d;
++
++  // Count whole 400, 100, 4 and 1 year cycles since 1 January 1
++  d = abs - 1;
++  n = floorDiv(d, 146097);
++  d -= n * 146097;
++  y = n * 400;
++  n = d / 36524;
++  if (n == 4)
++    {
++      n = 3;
++    }
++  d -= n * 36524;
++  y += n * 100;
++  n = d / 1461;
++  d -= n * 1461;
++  y += n * 4;
++  n = d / 365;
++  if (n == 4)
++    {
++      n = 3;
++    }
++  y += n + 1;
+   // Search forward month by month from January
+   m = 1;
+   while (abs > absoluteGregorianDay(lastDayOfGregorianMonth(m, y), m, y))
+@@ -234,7 +276,7 @@ @interface	GSAbsTimeZone : NSObject	// Help the compiler
+  * since the reference date.
+  */
+ static NSTimeInterval
+-GSTime(unsigned day, unsigned month, unsigned year, unsigned hour, unsigned minute, unsigned second, unsigned mil)
++GSTime(unsigned day, unsigned month, NSInteger year, unsigned hour, unsigned minute, unsigned second, unsigned mil)
+ {
+   NSTimeInterval	a;
+ 
+@@ -266,14 +308,9 @@ @interface	GSAbsTimeZone : NSObject	// Help the compiler
+   /* The 0.1 constant was experimentally derived to cause our behavior
+    * to match Mac OS X 10.9.1.
+    */
+-  when = floor(when * 1000.0 + 0.1) / 1000.0;
++  when = floor(clampTime(when) * 1000.0 + 0.1) / 1000.0;
+ 
+-  // Get reference date in terms of days
+-  a = when / 86400.0;
+-  // Offset by Gregorian reference
+-  a += GREGORIAN_REFERENCE;
+-  // result is the day of common era.
+-  dayOfEra = (NSInteger)a;
++  dayOfEra = dayOfCommonEra(when);
+ 
+   // Calculate year, month, and day
+   gregorianDateFromAbsolute(dayOfEra, day, month, year);
+@@ -2051,7 +2088,7 @@ - (void) _format: (NSString*)fmt
+ 		      {
+ 			// no format width specified; supply default
+ 			fldfmt[fmtlen++] = '0';
+-			fldfmt[fmtlen++] = '4';
++			fldfmt[fmtlen++] = (v < 0) ? '5' : '4';
+ 		      }
+ 		  }
+ 		else
+diff --git a/Tests/base/NSCalendarDate/distantYears.m b/Tests/base/NSCalendarDate/distantYears.m
+new file mode 100644
+index 000000000..2d56b7c19
+--- /dev/null
++++ b/Tests/base/NSCalendarDate/distantYears.m
+@@ -0,0 +1,101 @@
++#import "ObjectTesting.h"
++#import <Foundation/NSAutoreleasePool.h>
++#import <Foundation/NSCalendarDate.h>
++#import <Foundation/NSTimeZone.h>
++#include <math.h>
++#include <unistd.h>
++
++static NSTimeZone	*gmt;
++
++static NSString *
++describe(NSTimeInterval ti)
++{
++  NSCalendarDate	*d;
++
++  d = [NSCalendarDate dateWithTimeIntervalSinceReferenceDate: ti];
++  [d setTimeZone: gmt];
++  return [d description];
++}
++
++int main()
++{
++  NSAutoreleasePool	*arp = [NSAutoreleasePool new];
++  /* Years with the interval of their 1 March, noon, and the day of the
++   * week and of the year of that date, as macOS 15 gives them.
++   */
++  struct { NSInteger y; NSTimeInterval t; NSInteger dow; NSInteger doy; }
++    years[] = {
++      {1, -63108763200.0, 4, 60},
++      {0, -63140299200.0, 3, 61},
++      {-1, -63171921600.0, 1, 60},
++      {-28, -64023912000.0, 3, 61},
++      {-400, -75763080000.0, 3, 61},
++      {-1168, -99998798400.0, 1, 61}
++    };
++  unsigned		i;
++
++  /* Before years could be negative this did not return. */
++  alarm(60);
++  gmt = [NSTimeZone timeZoneForSecondsFromGMT: 0];
++
++  START_SET("dates before the year 1")
++    PASS_EQUAL(describe(-63113904000.0), @"0001-01-01 00:00:00 +0000",
++      "the first day of the year 1")
++    PASS_EQUAL(describe(-63114076800.0), @"0000-12-30 00:00:00 +0000",
++      "two days before it is in the year 0")
++    PASS_EQUAL(describe(-6.4e10), @"-0028-12-03 06:13:20 +0000",
++      "a date in the year -28")
++    PASS_EQUAL(describe(-1e11), @"-1168-02-16 14:13:20 +0000",
++      "a date in the year -1168")
++    PASS_EQUAL(describe(-1e15), @"-31686738-06-29 22:13:20 +0000",
++      "a date in the year -31686738")
++
++    for (i = 0; i < sizeof(years) / sizeof(*years); i++)
++      {
++	NSCalendarDate	*d;
++	NSCalendarDate	*n;
++
++	d = [NSCalendarDate dateWithYear: years[i].y month: 3 day: 1
++	  hour: 12 minute: 0 second: 0 timeZone: gmt];
++	n = [d dateByAddingYears: 1 months: 0 days: 0
++	  hours: 0 minutes: 0 seconds: 0];
++	PASS([d timeIntervalSinceReferenceDate] == years[i].t,
++	  "1 March %ld is %.0f seconds from the reference date",
++	  (long)years[i].y, years[i].t)
++	PASS([d yearOfCommonEra] == years[i].y
++	  && [d monthOfYear] == 3 && [d dayOfMonth] == 1
++	  && [d hourOfDay] == 12 && [d minuteOfHour] == 0,
++	  "1 March %ld, noon, breaks into its parts", (long)years[i].y)
++	PASS([d dayOfWeek] == years[i].dow && [d dayOfYear] == years[i].doy,
++	  "1 March %ld is day %ld of its week and %ld of its year",
++	  (long)years[i].y, (long)years[i].dow, (long)years[i].doy)
++	PASS([n yearOfCommonEra] == years[i].y + 1 && [n monthOfYear] == 3
++	  && [n dayOfMonth] == 1 && [n hourOfDay] == 12,
++	  "a year after 1 March %ld is 1 March %ld",
++	  (long)years[i].y, (long)years[i].y + 1)
++      }
++    PASS_EQUAL([[NSCalendarDate dateWithYear: 0 month: 2 day: 29
++      hour: 0 minute: 0 second: 0 timeZone: gmt] description],
++      @"0000-02-29 00:00:00 +0000", "the year 0 is a leap year")
++  END_SET("dates before the year 1")
++
++  START_SET("dates in distant years")
++    PASS_EQUAL(describe(1e15), @"31690739-07-06 01:46:40 +0000",
++      "a date in the year 31690739")
++    PASS_EQUAL(describe(1e16), @"316889386-01-25 17:46:40 +0000",
++      "a date in the year 316889386")
++    if (sizeof(NSInteger) < 8)
++      {
++	SKIP("the last year is not the last int")
++      }
++    PASS_EQUAL(describe(1e20), @"2147483647-12-31 00:00:00 +0000",
++      "a date after the last year an int holds is in that year")
++    PASS_EQUAL(describe(INFINITY), @"2147483647-12-31 00:00:00 +0000",
++      "so is an infinitely distant one")
++    PASS_EQUAL(describe(-1e300), @"-2147483647-01-01 00:00:00 +0000",
++      "and one before the first year an int holds is in that year")
++  END_SET("dates in distant years")
++
++  [arp release]; arp = nil;
++  return 0;
++}
+-- 
+2.50.1 (Apple Git-155)
+
