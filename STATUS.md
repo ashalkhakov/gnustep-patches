@@ -880,6 +880,65 @@ exception.  With both, Logbook's `make clean; make -k check` passes
 (self-test done: 0 failed, 269 checks) on the 2026.10.20.4 image with
 every patch here, and the gui suite passes 5368 checks with none failing,
 on libs-gui cacd5cb08.
+Added on 2026-10-20 for Logbook's pick lists, checked against macOS 15
+first: `controller-value-bindings`, `controller-fetch-sort-keys` and
+`objectcontroller-deferred-add`.  An array controller exposed no
+sortDescriptors binding ("No binding exposed on <NSArrayController> for
+sortDescriptors", seven times in Logbook's self-test), nor
+filterPredicate, nor an object controller editable.  On macOS 15 they
+are exposed, the controller follows the bound value, and gives a change
+of its own to the sort descriptors, the filter predicate or the
+selection back to the bound object; `NSArrayController/valueBindings.m`
+passes its 30 checks there, and 22 fail without the fix.
+contentArrayForMultipleSelection is still not exposed.  With the
+binding working, Logbook's pick lists, sorted by a computed title, came
+up empty: the controller sent every sort descriptor in its fetch
+request, and the OData store refused the one that is no attribute.
+macOS 15 sends only the leading sort descriptors on stored attributes
+compared with -compare:, and so does `controller-fetch-sort-keys` (3 new
+checks in `NSArrayController/entityMode.m`, which fail without it; it
+applies after `controller-entity-mode`, whose -defaultFetchRequest it
+changes).  And on macOS 15 -add: and -insert: are done at the next turn
+of the run loop, in the default, modal panel and event tracking modes:
+until then nothing is made, added or selected and observers hear
+nothing; whether the controller can add is asked then; -insert: inserts
+at the selection, or at the end.  They acted at once here and -insert:
+appended.  `NSObjectController/deferredAdd.m` passes its 29 checks on
+macOS 15; 13 fail without the fix.  With all three, Logbook's
+`make clean; make -k check` passes (self-test done: 0 failed, 269
+checks; procedures: 0 failed) on the 2026.10.20.5 image (FreeCoreData
+0.8.2) with every libs-gui patch here, with no "No binding exposed" in
+its log; its self-test already spins the run loop after each click.  The
+gui suite, with every libs-base, libs-gui and libs-back patch here on
+libs-gui cacd5cb08, passes 5427 checks; the 3 failing are
+`NSApplication/stopModalFromTimer.m`'s, which fail the same in that
+container without these patches (its libs-base is older than the
+released stack's; on the released stack they pass, below).
+Then three more, found on the way and checked against macOS 15 first:
+`objectcontroller-when-can-add`: -canInsert was always YES and -canAdd
+was -isEditable; on macOS -canInsert is -canAdd, neither holds when the
+controller is not editable or has an entity and no context, an array
+controller bound through a selection with nothing selected cannot add,
+and an object controller can add only while it has no content
+(`NSObjectController/canAdd.m`, 11 checks, 7 fail without the fix).
+`selection-equal-objects`: objects were looked up with -indexOfObject:,
+so of equal objects only the first was selected, an inserted object
+was selected as the first equal one, and removing by arranged index
+removed every equal object; on macOS selecting by objects takes every
+equal one, inserting selects what was inserted, and removing by index
+removes those objects only (`NSArrayController/equalObjects.m`, 20
+checks, 15 fail without the fix).  `selection-new-content`: a
+controller made with content selected nothing, and every rearrangement
+avoided an empty selection; on macOS new content selects its first
+object when nothing of the selection is left, and rearranging never
+selects (`NSArrayController/initialSelection.m`, 15 checks, 4 fail
+without the fix).  All sort after the other controller patches and
+apply with every patch here to libs-gui master cacd5cb08 with no fuzz.
+On the released stack (ormkit-gnustep, gnustep-patches 2026.10.20.5)
+with libs-gui rebuilt with every patch here, the gui suite passes 5507
+checks with none failing, `stopModalFromTimer.m`'s 6 among them, and
+Logbook's `make clean; make -k check` passes (self-test done: 0 failed,
+269 checks; procedures: 0 failed), with no "No binding exposed".
 
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
@@ -937,6 +996,12 @@ on libs-gui cacd5cb08.
 | `controller-selection-markers` | libs-gui | test | not sent yet | (none: bound controls show AppKit's placeholders from here) |
 | `controller-to-many-content` | libs-gui | test | not sent yet (after `controller-entity-mode`) | (none: Logbook adds records through it) |
 | `controller-to-many-set` | libs-gui | test | not sent yet (after `controller-to-many-content`) | (none: Logbook filters records through it) |
+| `controller-value-bindings` | libs-gui | test | not sent yet | (none: Logbook's pick lists bind their order through it) |
+| `controller-fetch-sort-keys` | libs-gui | test | not sent yet (after `controller-entity-mode`) | (none: Logbook's pick lists fetch through it) |
+| `objectcontroller-deferred-add` | libs-gui | test | not sent yet | (none: Logbook's self-test spins the run loop after Add) |
+| `objectcontroller-when-can-add` | libs-gui | test | not sent yet (after `objectcontroller-deferred-add`) | (none: Add and Insert buttons bound to canAdd and canInsert use it from here) |
+| `selection-equal-objects` | libs-gui | test | not sent yet | (none: Logbook's array controllers use it from here) |
+| `selection-new-content` | libs-gui | test | not sent yet (after `selection-equal-objects`) | (none: Logbook's array controllers use it from here) |
 | `popup-selected-object` | libs-gui | test | not sent yet (after `popup-content-bindings`) | (none: Logbook's pop-ups set their objects through it) |
 | `font-family-names` | libs-gui | test | not sent yet | (none: RDLKit will use it from here) |
 | `cairo-unhinted-metrics` | libs-back | test | not sent yet | (none: RDLKit will use it from here) |

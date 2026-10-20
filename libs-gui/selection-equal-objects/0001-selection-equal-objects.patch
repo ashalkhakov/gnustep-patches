@@ -1,0 +1,481 @@
+From 23739ada3c9ee262769fd872bdca0e6c255f923e Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Tue, 20 Oct 2026 18:33:21 +0000
+Subject: [PATCH] NSArrayController: equal objects in the content, as macOS has
+ them
+
+The controller found objects in its arranged objects with
+-indexOfObject:, so of several equal objects only the first was ever
+selected, an object inserted or added was selected as the first one
+equal to it rather than where it was put, and removing by arranged index
+went through -removeObject:, which removed every equal object from the
+content.  Two new empty dictionaries are equal, so adding a second one
+with Add selected the first, and removing one removed both.
+
+On macOS 15:
+
+- -setSelectedObjects:, -addSelectedObjects: and -removeSelectedObjects:
+  act on every arranged object equal to one given, whether or not the
+  one given is in the content;
+- the selection kept across a rearrangement (sorting, filtering) is
+  every object equal to one that was selected;
+- an object inserted or added is selected at the index it was put at,
+  and only that one;
+- -removeObjectAtArrangedObjectIndex:, -removeObjectsAtArrangedObjectIndexes:
+  and so -remove: remove the objects at those indexes only, and the
+  selection that stays is the selected objects not removed, or the next
+  object; -removeObject: and -removeObjects: remove every object equal
+  to one given.
+
+So objects to select are looked up by equality over all the arranged
+objects (through a set, so by -hash and -isEqual:), inserted ones by
+identity, and removal by index removes those objects by identity from
+the content, a bound content array and the arranged objects.
+
+Tests/gui/NSArrayController/equalObjects.m checks each of these with
+objects of a class equal by name and with empty dictionaries; it passes
+on macOS 15, and without the change 15 of its 20 checks fail.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/NSArrayController.m                 | 135 +++++++++++++---
+ Tests/gui/NSArrayController/equalObjects.m | 178 +++++++++++++++++++++
+ 2 files changed, 291 insertions(+), 22 deletions(-)
+ create mode 100644 Tests/gui/NSArrayController/equalObjects.m
+
+diff --git a/Source/NSArrayController.m b/Source/NSArrayController.m
+index e8c6c37a9..4da7430db 100644
+--- a/Source/NSArrayController.m
++++ b/Source/NSArrayController.m
+@@ -166,13 +166,17 @@
+ 
+ @interface NSArrayController (Private)
+ - (NSIndexSet*) _indexSetForObjects: (NSArray*)objects;
++- (NSIndexSet*) _indexSetForObjectsIdenticalTo: (NSArray*)objects;
+ - (void) _setArrangedObjects: (NSArray*)arranged
+ 		   selecting: (NSArray*)objects
++		   identical: (BOOL)identical
+ 	       avoidingEmpty: (BOOL)avoid;
+ - (id) _boundContent: (id)changed done: (BOOL)done;
+-- (BOOL) _removeFromBoundContent: (NSArray*)removed;
++- (BOOL) _removeFromBoundContent: (NSArray*)removed
++		       identical: (BOOL)identical;
+ - (void) _arrangeAdding: (NSArray*)objects;
+-- (void) _arrangeRemoving: (NSArray*)objects;
++- (void) _arrangeRemoving: (NSArray*)objects identical: (BOOL)identical;
++- (void) _removeObjects: (NSArray*)objects identical: (BOOL)identical;
+ - (void) _reverseSetBinding: (NSString*)binding value: (id)value;
+ @end
+ 
+@@ -260,26 +264,40 @@ contentArray(id content)
+ 
+ - (void) removeObject: (id)obj
+ {
+-  [self willChangeValueForKey: NSContentBinding];
+-  if (![self _removeFromBoundContent: [NSArray arrayWithObject: obj]])
+-    {
+-      [_content removeObject: obj];
+-    }
+-  [self _arrangeRemoving: [NSArray arrayWithObject: obj]];
+-  [self didChangeValueForKey: NSContentBinding];
+-  [self _deleteObjects: [NSArray arrayWithObject: obj]];
++  [self _removeObjects: [NSArray arrayWithObject: obj] identical: NO];
+ }
+ 
+ - (void) removeObjects: (NSArray*)obj
++{
++  [self _removeObjects: obj identical: NO];
++}
++
++/* By the objects, every one equal to them goes; by their arranged
++ * indexes, those objects alone.
++ */
++- (void) _removeObjects: (NSArray*)objects identical: (BOOL)identical
+ {
+   [self willChangeValueForKey: NSContentBinding];
+-  if (![self _removeFromBoundContent: obj])
++  if (![self _removeFromBoundContent: objects identical: identical])
+     {
+-      [_content removeObjectsInArray: obj];
++      if (identical)
++	{
++	  NSEnumerator *e = [objects objectEnumerator];
++	  id o;
++
++	  while ((o = [e nextObject]) != nil)
++	    {
++	      [_content removeObjectIdenticalTo: o];
++	    }
++	}
++      else
++	{
++	  [_content removeObjectsInArray: objects];
++	}
+     }
+-  [self _arrangeRemoving: obj];
++  [self _arrangeRemoving: objects identical: identical];
+   [self didChangeValueForKey: NSContentBinding];
+-  [self _deleteObjects: obj];
++  [self _deleteObjects: objects];
+ }
+ 
+ - (BOOL) canAdd
+@@ -431,13 +449,34 @@ contentArray(id content)
+ }
+ 
+ - (NSIndexSet*) _indexSetForObjects: (NSArray*)objects
++{
++  NSMutableIndexSet *tmp = [NSMutableIndexSet new];
++  NSSet *wanted;
++  NSUInteger count = [_arranged_objects count];
++  NSUInteger i;
++
++  if ([objects count] > 0)
++    {
++      wanted = [NSSet setWithArray: objects];
++      for (i = 0; i < count; i++)
++	{
++	  if ([wanted containsObject: [_arranged_objects objectAtIndex: i]])
++	    {
++	      [tmp addIndex: i];
++	    }
++	}
++    }
++  return AUTORELEASE(tmp);
++}
++
++- (NSIndexSet*) _indexSetForObjectsIdenticalTo: (NSArray*)objects
+ {
+   NSMutableIndexSet *tmp = [NSMutableIndexSet new];
+   id<NSFastEnumeration> enumerator = objects;
+ 
+   FOR_IN (id, obj, enumerator)
+   {
+-    NSUInteger index = [_arranged_objects indexOfObject: obj];
++    NSUInteger index = [_arranged_objects indexOfObjectIdenticalTo: obj];
+     if (NSNotFound != index)
+       {
+ 	[tmp addIndex: index];
+@@ -686,11 +725,13 @@ contentArray(id content)
+ {
+   [self _setArrangedObjects: [self arrangeObjects: _content]
+ 		  selecting: nil
++		  identical: NO
+ 	      avoidingEmpty: [self preservesSelection]];
+ }
+ 
+ - (void) _setArrangedObjects: (NSArray*)arranged
+ 		   selecting: (NSArray*)objects
++		   identical: (BOOL)identical
+ 	       avoidingEmpty: (BOOL)avoid
+ {
+   NSUInteger first = [_selection_indexes firstIndex];
+@@ -716,7 +757,8 @@ contentArray(id content)
+     initWithArray: arranged]));
+   [self didChangeValueForKey: @"arrangedObjects"];
+ 
+-  indexes = [self _indexSetForObjects: objects];
++  indexes = identical ? [self _indexSetForObjectsIdenticalTo: objects]
++    : [self _indexSetForObjects: objects];
+   if ([indexes count] == 0 && avoid && [self avoidsEmptySelection]
+     && [arranged count] > 0)
+     {
+@@ -785,6 +827,7 @@ contentArray(id content)
+ }
+ 
+ - (BOOL) _removeFromBoundContent: (NSArray*)removed
++		       identical: (BOOL)identical
+ {
+   id from = [self _boundContent: nil done: NO];
+ 
+@@ -792,7 +835,17 @@ contentArray(id content)
+     {
+       return NO;
+     }
+-  if ([from isKindOfClass: [NSArray class]])
++  if ([from isKindOfClass: [NSArray class]] && identical)
++    {
++      NSEnumerator *e = [removed objectEnumerator];
++      id o;
++
++      while ((o = [e nextObject]) != nil)
++	{
++	  [from removeObjectIdenticalTo: o];
++	}
++    }
++  else if ([from isKindOfClass: [NSArray class]])
+     {
+       [from removeObjectsInArray: removed];
+     }
+@@ -819,12 +872,31 @@ contentArray(id content)
+     }
+   [self _setArrangedObjects: arranged
+ 		  selecting: [self selectsInsertedObjects] ? objects : nil
++		  identical: YES
+ 	      avoidingEmpty: NO];
+ }
+ 
+-- (void) _arrangeRemoving: (NSArray*)objects
++- (void) _arrangeRemoving: (NSArray*)objects identical: (BOOL)identical
+ {
+   NSMutableArray *arranged;
++  NSMutableArray *kept = nil;
++
++  /* What stays selected is what was selected and is not removed. */
++  if (identical && [self preservesSelection])
++    {
++      NSMutableIndexSet *valid = AUTORELEASE([_selection_indexes mutableCopy]);
++      NSUInteger count = [_arranged_objects count];
++      NSEnumerator *e = [objects objectEnumerator];
++      id o;
++
++      [valid removeIndexesInRange: NSMakeRange(count, NSNotFound - count)];
++      kept = [NSMutableArray arrayWithArray:
++	[_arranged_objects objectsAtIndexes: valid]];
++      while ((o = [e nextObject]) != nil)
++	{
++	  [kept removeObjectIdenticalTo: o];
++	}
++    }
+ 
+   if ([self automaticallyRearrangesObjects] || _arranged_objects == nil)
+     {
+@@ -833,9 +905,25 @@ contentArray(id content)
+   else
+     {
+       arranged = [NSMutableArray arrayWithArray: _arranged_objects];
+-      [arranged removeObjectsInArray: objects];
++      if (identical)
++	{
++	  NSEnumerator *e = [objects objectEnumerator];
++	  id o;
++
++	  while ((o = [e nextObject]) != nil)
++	    {
++	      [arranged removeObjectIdenticalTo: o];
++	    }
++	}
++      else
++	{
++	  [arranged removeObjectsInArray: objects];
++	}
+     }
+-  [self _setArrangedObjects: arranged selecting: nil avoidingEmpty: YES];
++  [self _setArrangedObjects: arranged
++		  selecting: kept
++		  identical: identical
++	      avoidingEmpty: YES];
+ }
+ 
+ - (void) setSortDescriptors: (NSArray*)desc
+@@ -974,18 +1062,21 @@ atArrangedObjectIndexes: (NSIndexSet*)idx
+     }
+   [self _setArrangedObjects: arranged
+ 		  selecting: [self selectsInsertedObjects] ? obj : nil
++		  identical: YES
+ 	      avoidingEmpty: NO];
+   [self didChangeValueForKey: NSContentBinding];
+ }
+ 
+ - (void) removeObjectAtArrangedObjectIndex: (NSUInteger)idx
+ {
+-  [self removeObject: [_arranged_objects objectAtIndex: idx]];
++  [self _removeObjects: [NSArray arrayWithObject:
++    [_arranged_objects objectAtIndex: idx]] identical: YES];
+ }
+ 
+ - (void) removeObjectsAtArrangedObjectIndexes: (NSIndexSet*)idx
+ {
+-  [self removeObjects: [_arranged_objects objectsAtIndexes: idx]];
++  [self _removeObjects: [_arranged_objects objectsAtIndexes: idx]
++	     identical: YES];
+ }
+ 
+ - (void) remove: (id)sender
+diff --git a/Tests/gui/NSArrayController/equalObjects.m b/Tests/gui/NSArrayController/equalObjects.m
+new file mode 100644
+index 000000000..8f97b05c4
+--- /dev/null
++++ b/Tests/gui/NSArrayController/equalObjects.m
+@@ -0,0 +1,178 @@
++/* An array controller's content may hold objects that are equal but not
++   the same.  As on macOS, objects given to select are found by equality,
++   so every equal object is selected, and so is the selection kept across
++   a rearrangement; but what is inserted is selected where it was put, and
++   what is removed by arranged index is the object at that index only. */
++#include "Testing.h"
++
++#include <Foundation/NSArray.h>
++#include <Foundation/NSDictionary.h>
++#include <Foundation/NSException.h>
++#include <Foundation/NSIndexSet.h>
++#include <Foundation/NSPredicate.h>
++#include <Foundation/NSSortDescriptor.h>
++#include <Foundation/NSString.h>
++#include <Foundation/NSValue.h>
++
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSArrayController.h>
++
++/* Equal when their names are; ordered by their order. */
++@interface Item : NSObject
++{
++  NSString	*name;
++  NSInteger	order;
++}
++@end
++
++@implementation Item
+++ (Item *) named: (NSString *)n order: (NSInteger)o
++{
++  Item *item = AUTORELEASE([[self alloc] init]);
++
++  item->name = [n copy];
++  item->order = o;
++  return item;
++}
++- (NSString *) name { return name; }
++- (NSInteger) order { return order; }
++- (BOOL) isEqual: (id)other
++{
++  return [other isKindOfClass: [Item class]]
++    && [((Item *)other)->name isEqual: name];
++}
++- (NSUInteger) hash { return [name hash]; }
++@end
++
++static NSIndexSet *
++indexes(NSUInteger first, NSUInteger second)
++{
++  NSMutableIndexSet	*set = [NSMutableIndexSet indexSetWithIndex: first];
++
++  if (second != NSNotFound)
++    {
++      [set addIndex: second];
++    }
++  return set;
++}
++
++static BOOL
++same(NSArray *a, NSArray *b)
++{
++  NSUInteger	i;
++
++  if ([a count] != [b count])
++    return NO;
++  for (i = 0; i < [a count]; i++)
++    if ([a objectAtIndex: i] != [b objectAtIndex: i])
++      return NO;
++  return YES;
++}
++
++int
++main(int argc, const char **argv)
++{
++  NSArrayController	*ac;
++  NSMutableArray	*content;
++  Item			*a1, *b, *a2;
++  NSMutableDictionary	*d1, *d2, *d3, *d4;
++
++  START_SET("NSArrayController with equal objects")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  a1 = [Item named: @"a" order: 1];
++  b = [Item named: @"b" order: 2];
++  a2 = [Item named: @"a" order: 3];
++  content = [NSMutableArray arrayWithObjects: a1, b, a2, nil];
++  ac = AUTORELEASE([[NSArrayController alloc] initWithContent: content]);
++
++  [ac setSelectedObjects: [NSArray arrayWithObject: a2]];
++  PASS_EQUAL([ac selectionIndexes], indexes(0, 2),
++    "-setSelectedObjects: selects every object equal to one given");
++  [ac setSelectionIndex: 1];
++  [ac setSelectedObjects: [NSArray arrayWithObject: [Item named: @"a" order: 9]]];
++  PASS_EQUAL([ac selectionIndexes], indexes(0, 2),
++    "even when the one given is not in the content");
++  [ac setSelectionIndex: 1];
++  [ac addSelectedObjects: [NSArray arrayWithObject: a1]];
++  PASS_EQUAL([ac selectionIndexes], [NSIndexSet indexSetWithIndexesInRange:
++    NSMakeRange(0, 3)], "-addSelectedObjects: adds every equal object");
++  [ac removeSelectedObjects: [NSArray arrayWithObject: a2]];
++  PASS_EQUAL([ac selectionIndexes], [NSIndexSet indexSetWithIndex: 1],
++    "-removeSelectedObjects: removes every equal object");
++
++  [ac setSelectionIndex: 2];
++  [ac setSortDescriptors: [NSArray arrayWithObject:
++    AUTORELEASE([[NSSortDescriptor alloc] initWithKey: @"order"
++					    ascending: NO])]];
++  PASS(same([ac arrangedObjects], [NSArray arrayWithObjects: a2, b, a1, nil]),
++    "the content is rearranged");
++  PASS_EQUAL([ac selectionIndexes], indexes(0, 2),
++    "the selection kept across it is every object equal to one selected");
++  [ac setSortDescriptors: nil];
++  [ac setSelectionIndex: 0];
++  [ac setFilterPredicate: [NSPredicate predicateWithFormat: @"order != 1"]];
++  PASS_EQUAL([ac selectionIndexes], [NSIndexSet indexSetWithIndex: 1],
++    "filtered, what is equal to the selection stays selected");
++  [ac setFilterPredicate: nil];
++
++  [ac setSelectionIndex: 1];
++  [ac removeObjectAtArrangedObjectIndex: 2];
++  PASS(same([ac arrangedObjects], [NSArray arrayWithObjects: a1, b, nil]),
++    "-removeObjectAtArrangedObjectIndex: removes that object, not the ones equal to it");
++  PASS([[ac content] count] == 2 && [[ac content] indexOfObjectIdenticalTo: a1] != NSNotFound,
++    "from the content too");
++  [ac insertObject: a2 atArrangedObjectIndex: 0];
++  PASS(same([ac arrangedObjects], [NSArray arrayWithObjects: a2, a1, b, nil]),
++    "-insertObject:atArrangedObjectIndex: inserts where asked");
++  PASS_EQUAL([ac selectionIndexes], [NSIndexSet indexSetWithIndex: 0],
++    "and selects the object inserted, not the ones equal to it");
++  [ac setSelectionIndex: 1];
++  [ac removeObjectsAtArrangedObjectIndexes: [NSIndexSet indexSetWithIndex: 1]];
++  PASS(same([ac arrangedObjects], [NSArray arrayWithObjects: a2, b, nil]),
++    "-removeObjectsAtArrangedObjectIndexes: removes those objects only");
++  PASS_EQUAL([ac selectionIndexes], [NSIndexSet indexSetWithIndex: 1],
++    "and the selection goes to the next object, not to one equal to the removed");
++  [ac setSelectionIndex: 0];
++  [ac remove: nil];
++  PASS(same([ac arrangedObjects], [NSArray arrayWithObjects: b, nil]),
++    "so does -remove:");
++  [ac addObject: a1];
++  [ac addObject: a2];
++  PASS_EQUAL([ac selectionIndexes], [NSIndexSet indexSetWithIndex: 2],
++    "-addObject: selects the object added");
++  [ac removeObject: [Item named: @"a" order: 9]];
++  PASS(same([ac arrangedObjects], [NSArray arrayWithObjects: b, nil]),
++    "-removeObject: removes every object equal to the one given");
++
++  d1 = [NSMutableDictionary dictionary];
++  d2 = [NSMutableDictionary dictionary];
++  d3 = [NSMutableDictionary dictionary];
++  content = [NSMutableArray arrayWithObjects: d1, d2, d3, nil];
++  ac = AUTORELEASE([[NSArrayController alloc] initWithContent: content]);
++  [ac setSelectedObjects: [NSArray arrayWithObject: d2]];
++  PASS_EQUAL([ac selectionIndexes], [NSIndexSet indexSetWithIndexesInRange:
++    NSMakeRange(0, 3)], "empty dictionaries are all equal");
++  [ac setSelectionIndex: 1];
++  PASS([[ac selectedObjects] count] == 1
++    && [[ac selectedObjects] objectAtIndex: 0] == d2,
++    "the selected object is the one at the index");
++  d4 = [NSMutableDictionary dictionary];
++  [ac addObject: d4];
++  PASS_EQUAL([ac selectionIndexes], [NSIndexSet indexSetWithIndex: 3],
++    "a new empty dictionary added is the one selected");
++  [ac removeObjectAtArrangedObjectIndex: 3];
++  PASS([[ac arrangedObjects] count] == 3
++    && [[ac arrangedObjects] indexOfObjectIdenticalTo: d4] == NSNotFound,
++    "and removed by its index, it is the only one removed");
++
++  END_SET("NSArrayController with equal objects")
++
++  return 0;
++}
+-- 
+2.43.0
+

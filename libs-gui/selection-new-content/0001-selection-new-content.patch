@@ -1,0 +1,295 @@
+From 5c30fa78bf96812325e42c2af4c6998e592ddc04 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Tue, 20 Oct 2026 18:35:01 +0000
+Subject: [PATCH] NSArrayController: select the first object of new content, as
+ macOS does
+
+-initWithContent: set the content before the selection existed, so a
+controller made with content had nothing selected, where macOS selects
+its first object.  And every rearrangement avoided an empty selection
+from the index selected before: emptying the selection and rearranging
+selected an object again, and new content with nothing of the old
+selection in it kept the old index rather than going to the first.
+
+On macOS 15, with avoidsEmptySelection (the default):
+
+- new content - from -initWithContent:, -setContent:, a bound content
+  that changes - keeps what it can of the selection, and with nothing
+  of it left selects the first object, whatever index was selected;
+  with avoidsEmptySelection NO it selects nothing;
+- rearranging (-rearrangeObjects, a sort or filter change) never
+  selects anything: a selection emptied on purpose, or one filtered
+  away, stays empty, with preservesSelection or without;
+- adding an object without selecting it selects nothing;
+- removing the selected object selects the one now at its index, or the
+  last (unchanged here).
+
+So a content change, and a change followed in a managed object
+context, now arrange with the first object to fall back on,
+-rearrangeObjects with none, removal with the selected index as before,
+and -initWithContent: selects the first of the content it has arranged
+once the selection exists (not through -setContent:, which a subclass
+such as NSDictionaryController takes for something else).
+
+Tests/gui/NSArrayController/initialSelection.m checks each of these; it
+passes on macOS 15, and without the change 4 of its 15 checks fail.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/NSArrayController.m                    |  41 +++---
+ .../gui/NSArrayController/initialSelection.m  | 124 ++++++++++++++++++
+ 2 files changed, 149 insertions(+), 16 deletions(-)
+ create mode 100644 Tests/gui/NSArrayController/initialSelection.m
+
+diff --git a/Source/NSArrayController.m b/Source/NSArrayController.m
+index 4da7430db..1b333c68f 100644
+--- a/Source/NSArrayController.m
++++ b/Source/NSArrayController.m
+@@ -170,7 +170,7 @@
+ - (void) _setArrangedObjects: (NSArray*)arranged
+ 		   selecting: (NSArray*)objects
+ 		   identical: (BOOL)identical
+-	       avoidingEmpty: (BOOL)avoid;
++	    selectingIfEmpty: (NSUInteger)fallback;
+ - (id) _boundContent: (id)changed done: (BOOL)done;
+ - (BOOL) _removeFromBoundContent: (NSArray*)removed
+ 		       identical: (BOOL)identical;
+@@ -226,6 +226,10 @@ contentArray(id content)
+       [self setAvoidsEmptySelection: YES];
+       [self setPreservesSelection: YES];
+       [self setClearsFilterPredicateOnInsertion: YES];
++      if ([_arranged_objects count] > 0)
++	{
++	  ASSIGN(_selection_indexes, [NSIndexSet indexSetWithIndex: 0]);
++	}
+     }
+ 
+   return self;
+@@ -341,10 +345,16 @@ contentArray(id content)
+   return [self keyPathsForValuesAffectingCanAdd];
+ }
+ 
++/* New content keeps what it can of the selection, or selects its first
++ * object.
++ */
+ - (void) setContent: (id)content
+ {
+   [super setContent: contentArray(content)];
+-  [self rearrangeObjects];
++  [self _setArrangedObjects: [self arrangeObjects: _content]
++		  selecting: nil
++		  identical: NO
++	   selectingIfEmpty: 0];
+ }
+ 
+ - (void) prepareContent
+@@ -424,7 +434,10 @@ contentArray(id content)
+   [self willChangeValueForKey: NSContentBinding];
+   ASSIGN(_content, content);
+   [self didChangeValueForKey: NSContentBinding];
+-  [self rearrangeObjects];
++  [self _setArrangedObjects: [self arrangeObjects: _content]
++		  selecting: nil
++		  identical: NO
++	   selectingIfEmpty: 0];
+ }
+ 
+ - (void) _insertNow
+@@ -726,15 +739,14 @@ contentArray(id content)
+   [self _setArrangedObjects: [self arrangeObjects: _content]
+ 		  selecting: nil
+ 		  identical: NO
+-	      avoidingEmpty: [self preservesSelection]];
++	   selectingIfEmpty: NSNotFound];
+ }
+ 
+ - (void) _setArrangedObjects: (NSArray*)arranged
+ 		   selecting: (NSArray*)objects
+ 		   identical: (BOOL)identical
+-	       avoidingEmpty: (BOOL)avoid
++	    selectingIfEmpty: (NSUInteger)fallback
+ {
+-  NSUInteger first = [_selection_indexes firstIndex];
+   NSIndexSet *indexes;
+ 
+   if (_selection_indexes == nil)
+@@ -759,15 +771,11 @@ contentArray(id content)
+ 
+   indexes = identical ? [self _indexSetForObjectsIdenticalTo: objects]
+     : [self _indexSetForObjects: objects];
+-  if ([indexes count] == 0 && avoid && [self avoidsEmptySelection]
+-    && [arranged count] > 0)
++  if ([indexes count] == 0 && fallback != NSNotFound
++    && [self avoidsEmptySelection] && [arranged count] > 0)
+     {
+-      if (first == NSNotFound)
+-	{
+-	  first = 0;
+-	}
+       indexes = [NSIndexSet indexSetWithIndex:
+-	MIN(first, [arranged count] - 1)];
++	MIN(fallback, [arranged count] - 1)];
+     }
+   [self setSelectionIndexes: indexes];
+ }
+@@ -873,7 +881,7 @@ contentArray(id content)
+   [self _setArrangedObjects: arranged
+ 		  selecting: [self selectsInsertedObjects] ? objects : nil
+ 		  identical: YES
+-	      avoidingEmpty: NO];
++	   selectingIfEmpty: NSNotFound];
+ }
+ 
+ - (void) _arrangeRemoving: (NSArray*)objects identical: (BOOL)identical
+@@ -923,7 +931,8 @@ contentArray(id content)
+   [self _setArrangedObjects: arranged
+ 		  selecting: kept
+ 		  identical: identical
+-	      avoidingEmpty: YES];
++	   selectingIfEmpty: [_selection_indexes count] > 0
++    ? [_selection_indexes firstIndex] : 0];
+ }
+ 
+ - (void) setSortDescriptors: (NSArray*)desc
+@@ -1063,7 +1072,7 @@ atArrangedObjectIndexes: (NSIndexSet*)idx
+   [self _setArrangedObjects: arranged
+ 		  selecting: [self selectsInsertedObjects] ? obj : nil
+ 		  identical: YES
+-	      avoidingEmpty: NO];
++	   selectingIfEmpty: NSNotFound];
+   [self didChangeValueForKey: NSContentBinding];
+ }
+ 
+diff --git a/Tests/gui/NSArrayController/initialSelection.m b/Tests/gui/NSArrayController/initialSelection.m
+new file mode 100644
+index 000000000..01b47aaf0
+--- /dev/null
++++ b/Tests/gui/NSArrayController/initialSelection.m
+@@ -0,0 +1,124 @@
++/* What an array controller selects when its content is set, as on macOS:
++   avoiding an empty selection, a controller given content (made with it,
++   set or bound) selects its first object; rearranging, inserting without
++   selecting and a selection emptied on purpose select nothing. */
++#include "Testing.h"
++
++#include <Foundation/NSArray.h>
++#include <Foundation/NSDictionary.h>
++#include <Foundation/NSException.h>
++#include <Foundation/NSIndexSet.h>
++#include <Foundation/NSString.h>
++#include <Foundation/NSValue.h>
++
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSArrayController.h>
++#include <AppKit/NSKeyValueBinding.h>
++
++@interface Holder : NSObject
++{
++  NSArray	*items;
++}
++@end
++
++@implementation Holder
++- (NSArray *) items { return items; }
++- (void) setItems: (NSArray *)i { ASSIGN(items, i); }
++@end
++
++static NSMutableArray *
++three(void)
++{
++  NSMutableArray	*a = [NSMutableArray array];
++  int			i;
++
++  for (i = 1; i <= 3; i++)
++    {
++      [a addObject: [NSMutableDictionary dictionaryWithObject:
++	[NSNumber numberWithInt: i] forKey: @"n"]];
++    }
++  return a;
++}
++
++int
++main(int argc, const char **argv)
++{
++  NSArrayController	*ac;
++  NSIndexSet		*first = [NSIndexSet indexSetWithIndex: 0];
++  NSIndexSet		*none = [NSIndexSet indexSet];
++  Holder		*holder;
++
++  START_SET("NSArrayController initial selection")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  ac = AUTORELEASE([[NSArrayController alloc] initWithContent: three()]);
++  PASS_EQUAL([ac selectionIndexes], first,
++    "-initWithContent: selects the first object");
++  ac = AUTORELEASE([[NSArrayController alloc] init]);
++  [ac setContent: three()];
++  PASS_EQUAL([ac selectionIndexes], first, "so does -setContent:");
++  ac = AUTORELEASE([[NSArrayController alloc] init]);
++  [ac setAvoidsEmptySelection: NO];
++  [ac setContent: three()];
++  PASS_EQUAL([ac selectionIndexes], none,
++    "not when it does not avoid an empty selection");
++  ac = AUTORELEASE([[NSArrayController alloc] initWithContent: nil]);
++  PASS_EQUAL([ac selectionIndexes], none, "with no content nothing is selected");
++  [ac setContent: three()];
++  PASS_EQUAL([ac selectionIndexes], first, "content set later selects the first");
++
++  ac = AUTORELEASE([[NSArrayController alloc] initWithContent: three()]);
++  [ac setSelectionIndexes: none];
++  PASS_EQUAL([ac selectionIndexes], none, "the selection can be emptied");
++  [ac rearrangeObjects];
++  PASS_EQUAL([ac selectionIndexes], none, "and rearranging leaves it empty");
++  [ac setContent: three()];
++  PASS_EQUAL([ac selectionIndexes], first, "new content selects the first");
++
++  [ac setSelectionIndex: 2];
++  [ac setContent: [NSMutableArray arrayWithObjects:
++    [NSMutableDictionary dictionary], [NSMutableDictionary dictionary],
++    [NSMutableDictionary dictionaryWithObject: @"x" forKey: @"n"], nil]];
++  PASS_EQUAL([ac selectionIndexes], first,
++    "new content with nothing selected in it selects the first, not the same index");
++
++  ac = AUTORELEASE([[NSArrayController alloc] initWithContent:
++    [NSMutableArray array]]);
++  PASS_EQUAL([ac selectionIndexes], none, "empty content selects nothing");
++  [ac setSelectsInsertedObjects: NO];
++  [ac addObject: [NSMutableDictionary dictionary]];
++  PASS_EQUAL([ac selectionIndexes], none,
++    "nor does adding an object without selecting it");
++
++  ac = AUTORELEASE([[NSArrayController alloc] initWithContent: three()]);
++  [ac setPreservesSelection: NO];
++  [ac setSelectionIndex: 2];
++  [ac rearrangeObjects];
++  PASS_EQUAL([ac selectionIndexes], none,
++    "not preserving the selection, rearranging empties it");
++  [ac setSelectionIndex: 2];
++  [ac setContent: three()];
++  PASS_EQUAL([ac selectionIndexes], first,
++    "and new content selects the first");
++
++  holder = AUTORELEASE([[Holder alloc] init]);
++  [holder setItems: three()];
++  ac = AUTORELEASE([[NSArrayController alloc] init]);
++  [ac bind: NSContentArrayBinding toObject: holder
++    withKeyPath: @"items" options: nil];
++  PASS_EQUAL([ac selectionIndexes], first, "bound content selects the first");
++  [ac setSelectionIndexes: none];
++  [holder setItems: three()];
++  PASS_EQUAL([ac selectionIndexes], first, "and so does a change to it");
++  [ac unbind: NSContentArrayBinding];
++
++  END_SET("NSArrayController initial selection")
++
++  return 0;
++}
+-- 
+2.43.0
+

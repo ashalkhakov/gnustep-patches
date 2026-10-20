@@ -1,0 +1,255 @@
+From 127973e570733f6adf6beb66f8fa3919bb604fd4 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Tue, 20 Oct 2026 18:31:56 +0000
+Subject: [PATCH] NSObjectController: canAdd and canInsert as macOS has them
+
+-canAdd was -isEditable, and an array controller's -canInsert was
+always YES, so a controller that was not editable still offered and did
+-insert:, and Add stayed enabled where macOS disables it.
+
+On macOS 15:
+
+- an array controller's -canInsert is its -canAdd;
+- neither is YES when the controller is not editable, or has an entity
+  name and no managed object context (it has nowhere to make objects);
+- an array controller with contentArray bound through a selection that
+  has nothing selected (the bound value is the no selection marker)
+  cannot add; with something selected, or bound to nil, it can;
+- an object controller can add only while it has no content: with
+  content its -canAdd is NO and -canRemove YES;
+- observers of canAdd and canInsert hear when editable changes, and of
+  an object controller's canAdd when its content does.
+
+So -canAdd now asks for an editable controller that can make objects,
+an object controller asks for no content, an array controller asks
+that its bound content not be a marker, -canInsert is -canAdd, and
+canAdd and canInsert depend on editable, content, entityName and
+managedObjectContext.
+
+Tests/gui/NSObjectController/canAdd.m checks each of these; it passes
+on macOS 15, and without the change 7 of its 11 checks fail.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/NSArrayController.m            |  39 ++++++++-
+ Source/NSObjectController.m           |  12 ++-
+ Tests/gui/NSObjectController/canAdd.m | 116 ++++++++++++++++++++++++++
+ 3 files changed, 164 insertions(+), 3 deletions(-)
+ create mode 100644 Tests/gui/NSObjectController/canAdd.m
+
+diff --git a/Source/NSArrayController.m b/Source/NSArrayController.m
+index 1590e9a23..e8c6c37a9 100644
+--- a/Source/NSArrayController.m
++++ b/Source/NSArrayController.m
+@@ -151,6 +151,7 @@
+ 
+ @interface NSObjectController (GSDeferredActions)
+ - (void) _performAtNextTurn: (SEL)action;
++- (BOOL) _canMakeObjects;
+ @end
+ 
+ @protocol GSControllerFetchRequest
+@@ -281,9 +282,45 @@ contentArray(id content)
+   [self _deleteObjects: obj];
+ }
+ 
++- (BOOL) canAdd
++{
++  GSKeyValueBinding *binding;
++  id value;
++
++  if (![self _canMakeObjects])
++    {
++      return NO;
++    }
++  binding = [GSKeyValueBinding getBinding: NSContentArrayBinding forObject: self];
++  if (binding == nil)
++    {
++      binding = [GSKeyValueBinding getBinding: NSContentSetBinding
++				    forObject: self];
++    }
++  if (binding == nil)
++    {
++      return YES;
++    }
++  /* Bound through a selection, there is nothing to add to without one. */
++  value = [[binding observedObject] valueForKeyPath:
++    [binding->info objectForKey: NSObservedKeyPathKey]];
++  return value != NSNoSelectionMarker && value != NSNotApplicableMarker;
++}
++
+ - (BOOL) canInsert
+ {
+-  return YES;
++  return [self canAdd];
++}
++
+++ (NSSet*) keyPathsForValuesAffectingCanAdd
++{
++  return [NSSet setWithObjects: @"editable", NSContentBinding,
++    @"entityName", @"managedObjectContext", nil];
++}
++
+++ (NSSet*) keyPathsForValuesAffectingCanInsert
++{
++  return [self keyPathsForValuesAffectingCanAdd];
+ }
+ 
+ - (void) setContent: (id)content
+diff --git a/Source/NSObjectController.m b/Source/NSObjectController.m
+index 1a219e9fb..b4322aa1d 100644
+--- a/Source/NSObjectController.m
++++ b/Source/NSObjectController.m
+@@ -160,7 +160,8 @@ static NSString *GSObjectsChangedInManagingContextNotification
+       [self exposeBinding: NSContentObjectBinding];
+       [self exposeBinding: NSManagedObjectContextBinding];
+       [self exposeBinding: NSFetchPredicateBinding];
+-      [self setKeys: [NSArray arrayWithObject: @"editable"] 
++      [self setKeys: [NSArray arrayWithObjects: @"editable", @"content",
++        @"entityName", @"managedObjectContext", nil]
+             triggerChangeNotificationsForDependentKey: @"canAdd"];
+       [self setKeys: [NSArray arrayWithObject: @"editable"] 
+             triggerChangeNotificationsForDependentKey: @"canRemove"];
+@@ -440,9 +441,16 @@ static NSString *GSObjectsChangedInManagingContextNotification
+     }
+ }
+ 
++/* With an entity, objects are made in a context. */
++- (BOOL) _canMakeObjects
++{
++  return [self isEditable]
++    && (_entity_name_key == nil || _managed_object_context != nil);
++}
++
+ - (BOOL) canAdd
+ {
+-  return [self isEditable];
++  return [self _canMakeObjects] && [self content] == nil;
+ }
+ 
+ - (BOOL) canRemove
+diff --git a/Tests/gui/NSObjectController/canAdd.m b/Tests/gui/NSObjectController/canAdd.m
+new file mode 100644
+index 000000000..b95182d91
+--- /dev/null
++++ b/Tests/gui/NSObjectController/canAdd.m
+@@ -0,0 +1,116 @@
++/* Whether a controller can add, insert and remove, as on macOS: an array
++   controller can insert when it can add, and neither when it is not
++   editable, has an entity but no context, or has its content bound
++   through a selection that has nothing selected; an object controller
++   can add only while it has no content.  Observers of canAdd and
++   canInsert hear when these change. */
++#include "Testing.h"
++
++#include <Foundation/NSArray.h>
++#include <Foundation/NSDictionary.h>
++#include <Foundation/NSException.h>
++#include <Foundation/NSIndexSet.h>
++#include <Foundation/NSKeyValueObserving.h>
++#include <Foundation/NSString.h>
++
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSArrayController.h>
++#include <AppKit/NSKeyValueBinding.h>
++#include <AppKit/NSObjectController.h>
++
++@interface Heard : NSObject
++{
++@public
++  NSMutableArray	*keys;
++}
++@end
++
++@implementation Heard
++- (id) init
++{
++  keys = [NSMutableArray new];
++  return self;
++}
++- (void) observeValueForKeyPath: (NSString *)keyPath
++                       ofObject: (id)object
++                         change: (NSDictionary *)change
++                        context: (void *)context
++{
++  [keys addObject: keyPath];
++}
++@end
++
++int
++main(int argc, const char **argv)
++{
++  NSArrayController	*ac;
++  NSArrayController	*master;
++  NSObjectController	*oc;
++  Heard			*heard;
++  NSMutableDictionary	*item;
++
++  START_SET("NSObjectController canAdd, canInsert and canRemove")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  ac = AUTORELEASE([[NSArrayController alloc] initWithContent:
++    [NSMutableArray array]]);
++  PASS([ac canAdd] && [ac canInsert] && ![ac canRemove],
++    "an editable array controller can add and insert");
++  [ac addObject: [NSMutableDictionary dictionary]];
++  PASS([ac canAdd] && [ac canInsert] && [ac canRemove],
++    "with an object selected it can remove too");
++  heard = AUTORELEASE([[Heard alloc] init]);
++  [ac addObserver: heard forKeyPath: @"canInsert" options: 0 context: NULL];
++  [ac addObserver: heard forKeyPath: @"canAdd" options: 0 context: NULL];
++  [ac setEditable: NO];
++  PASS(![ac canAdd] && ![ac canInsert] && ![ac canRemove],
++    "not editable, it can do none of them");
++  PASS([heard->keys containsObject: @"canInsert"]
++    && [heard->keys containsObject: @"canAdd"],
++    "and observers of canAdd and canInsert hear of it");
++  [ac removeObserver: heard forKeyPath: @"canInsert"];
++  [ac removeObserver: heard forKeyPath: @"canAdd"];
++
++  ac = AUTORELEASE([[NSArrayController alloc] initWithContent: nil]);
++  [ac setEntityName: @"Thing"];
++  PASS(![ac canAdd] && ![ac canInsert],
++    "an array controller with an entity and no context cannot add");
++
++  master = AUTORELEASE([[NSArrayController alloc] initWithContent:
++    [NSMutableArray array]]);
++  ac = AUTORELEASE([[NSArrayController alloc] init]);
++  [ac bind: NSContentArrayBinding toObject: master
++    withKeyPath: @"selection.items" options: nil];
++  PASS(![ac canAdd] && ![ac canInsert],
++    "bound through a selection with nothing selected, it cannot add");
++  item = [NSMutableDictionary dictionaryWithObject: [NSMutableArray array]
++					    forKey: @"items"];
++  [master addObject: item];
++  PASS([ac canAdd] && [ac canInsert],
++    "with something selected, it can");
++  [ac unbind: NSContentArrayBinding];
++
++  oc = AUTORELEASE([[NSObjectController alloc] initWithContent: nil]);
++  PASS([oc canAdd] && ![oc canRemove], "an empty object controller can add");
++  heard = AUTORELEASE([[Heard alloc] init]);
++  [oc addObserver: heard forKeyPath: @"canAdd" options: 0 context: NULL];
++  [oc setContent: [NSMutableDictionary dictionary]];
++  PASS(![oc canAdd] && [oc canRemove],
++    "an object controller with content cannot add, but can remove");
++  PASS([heard->keys containsObject: @"canAdd"],
++    "and observers of canAdd hear of it");
++  [oc removeObserver: heard forKeyPath: @"canAdd"];
++  [oc setContent: nil];
++  [oc setEntityName: @"Thing"];
++  PASS(![oc canAdd], "with an entity and no context it cannot add");
++
++  END_SET("NSObjectController canAdd, canInsert and canRemove")
++
++  return 0;
++}
+-- 
+2.43.0
+
