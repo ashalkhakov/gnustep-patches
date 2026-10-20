@@ -798,6 +798,39 @@ extended form) were missing; they are there with macOS's names, a
 converts to sRGB and gamma 2.2 gray, keeping components since GNUstep
 does no colour management.  `NSColorSpace/standardSpaces.m`, 25 checks,
 all but one failing without it.
+Added on 2026-10-20, the leftovers of `nsdate-tagged-roundtrip`, checked
+against macOS 15 on libs-base d537eac97; each applies alone to master and
+after that one.  `nsdate-small-date-tag`: a small date was recognised by
+(ptr & 6), true for every small object with tag 2 to 7, so a tiny string
+or a small double or float was taken for a date and its bits decoded as an
+interval: `[d isEqual: @"ab"]` was YES for the date @"ab" decodes to, and
+-compare:, -timeIntervalSinceDate:, -laterDate: and -earlierDate: with a
+string or a number answered instead of raising.  The whole tag is
+compared now; those five methods were its only users.
+`NSDate/notADate.m`, 20 of 30 checks fail without it.  The same test of
+one bit is in GSString's literalIsEqual (old string ABI only, not built
+here), left alone.  `nsdate-equal-hash`: -isEqual: compares intervals
+whatever the class, but a small date hashed its pointer and every other
+date (NSCalendarDate, a heap date, a subclass) `(NSUInteger)interval`,
+so equal dates of different classes hashed apart and a set of NSDates
+did not find an equal NSCalendarDate; the cast also gave every date in a
+second one hash, and every negative one 0 on arm64.  Every date now hashes
+its interval with NSNumber's double hash (moved to GSPrivateHashDouble()),
+0 and -0 alike, as macOS hashes every date class by its interval.
+`NSDate/hash.m`, 3 of 4 fail without it.  `calendardate-distant-years`:
+NSCalendarDate (and so NSDate's -description) never returned for a date
+more than a day before the year 1, searched year by year (hours for
+1e20 seconds) and printed garbage years past an int.  The year now comes
+from 400/100/4/1-year cycles in constant time, years before 1 are
+proleptic Gregorian with a year 0, as macOS's NSCalendarDate has them
+(-initWithYear: and -dateByAddingYears: too), and dates are held to the
+years an int holds (midnight of the first or last day; macOS prints the
+year 2147483647 with a garbage time).  `NSCalendarDate/distantYears.m`,
+35 checks, does not return without it.  macOS's NSDate -description is
+an empty string beyond about 5.8 million years (ICU); GNUstep's is the
+NSCalendarDate's.
+With every patch here, the base suite passes 14737 checks with none
+failing (`GSMime/encoded-word-stack.m` aborts, as on unpatched master).
 
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
@@ -818,6 +851,9 @@ all but one failing without it.
 | `nsdateformatter-settings` | libs-base | test | not sent yet (needs `formatter-keyed-attributes`) | (none: ORMKit's apps use it from here) |
 | `nsnumberformatter-settings` | libs-base | test | not sent yet (needs `formatter-keyed-attributes`) | (none: ORMKit's apps use it from here) |
 | `nsdate-tagged-roundtrip` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
+| `nsdate-small-date-tag` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
+| `nsdate-equal-hash` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
+| `calendardate-distant-years` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
 | `popover-placement` | libs-gui | test | not sent yet | (none: UDCodeKit places its own child windows meanwhile) |
 | `arraycontroller-arrange-eagerly` | libs-gui | test | not sent yet | (none: Logbook's LBEntityController will drop its workaround) |
 | `tableview-prototype-copy` | libs-gui | test | not sent yet | (none: UDCodeKit's issues navigator is cell-based meanwhile) |

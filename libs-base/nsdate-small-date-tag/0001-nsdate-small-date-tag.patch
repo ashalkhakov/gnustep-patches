@@ -1,0 +1,118 @@
+From 50d5551dc83a92fa9ed445e7eb74d0a06dc90fd2 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Tue, 20 Oct 2026 11:13:17 +0500
+Subject: [PATCH] NSDate: take only small dates for small dates
+
+isSmallDate() tested (ptr & 6), which is true for every small object
+whose tag has bit 1 or bit 2 set, not just for a small date (tag 6):
+a tiny string (tag 4), a small double (2 and 3) or a small float (5)
+was taken for a date too, and its bits decoded as an interval.  So
+-isEqual: answered YES and -compare: NSOrderedSame when a string or a
+number happened to decode to the receiver's interval, and -compare:,
+-timeIntervalSinceDate:, -laterDate: and -earlierDate: answered
+something instead of raising.  For example @"ab" decodes to
+-6.0984509167416064e-42 and [NSNumber numberWithDouble: 1.5] to
+5.0300375817056143e+33, and the dates with those intervals were equal
+to them.
+
+The check now compares the whole tag with the date's.  Those methods
+are the only users of it (through IS_CONCRETE_CLASS); with anything
+other than a date they now go the way they went for a heap object: -isEqual:
+answers NO, the others send -timeIntervalSinceReferenceDate, which
+raises NSInvalidArgumentException, as macOS 15 does.
+
+Tests/base/NSDate/notADate.m takes, for a tiny string, a small double
+and a small float, the date their bits decode to and checks that it is
+not equal to them and that the four methods raise; 20 of its 30 checks
+failed before this change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/NSDate.m              |  2 +-
+ Tests/base/NSDate/notADate.m | 61 ++++++++++++++++++++++++++++++++++++
+ 2 files changed, 62 insertions(+), 1 deletion(-)
+ create mode 100644 Tests/base/NSDate/notADate.m
+
+diff --git a/Source/NSDate.m b/Source/NSDate.m
+index a30e5a05e..21ef86ca2 100644
+--- a/Source/NSDate.m
++++ b/Source/NSDate.m
+@@ -205,7 +205,7 @@ static __attribute__((always_inline)) BOOL isSmallDate(id obj) {
+   // libobjc2 guarantees that the classes are 16-byte (word) aligned.
+   #pragma clang diagnostic push
+   #pragma clang diagnostic ignored "-Wdeprecated-objc-pointer-introspection"
+-  return !!((uintptr_t)obj & SMALL_DATE_MASK);
++  return ((uintptr_t)obj & OBJC_SMALL_OBJECT_MASK) == SMALL_DATE_MASK;
+   #pragma clang diagnostic pop
+ }
+ 
+diff --git a/Tests/base/NSDate/notADate.m b/Tests/base/NSDate/notADate.m
+new file mode 100644
+index 000000000..395943cb8
+--- /dev/null
++++ b/Tests/base/NSDate/notADate.m
+@@ -0,0 +1,61 @@
++#import "ObjectTesting.h"
++#import <Foundation/NSAutoreleasePool.h>
++#import <Foundation/NSDate.h>
++#import <Foundation/NSException.h>
++#import <Foundation/NSString.h>
++#import <Foundation/NSValue.h>
++
++/* Returns a date whose interval is what o's bits would decode to if it
++ * were taken for a small date, or a plain date when there are none.
++ */
++static NSDate *
++lookalike(id o)
++{
++  uintptr_t	one = (uintptr_t)[NSDate dateWithTimeIntervalSinceReferenceDate: 1];
++  uintptr_t	tag = one & 7;
++  uintptr_t	bits = (uintptr_t)o;
++
++  if (tag == 0 || (bits & 7) == 0)
++    {
++      return [NSDate dateWithTimeIntervalSinceReferenceDate: 1];
++    }
++  return [NSDate dateWithTimeIntervalSinceReferenceDate:
++    [(NSDate*)((bits & ~(uintptr_t)7) | tag) timeIntervalSinceReferenceDate]];
++}
++
++int main()
++{
++  NSAutoreleasePool	*arp = [NSAutoreleasePool new];
++  id			objs[] = {
++    @"ab",
++    [NSString stringWithUTF8String: "abc"],
++    [NSNumber numberWithDouble: 1.5],
++    [NSNumber numberWithFloat: 1.5],
++    [NSNumber numberWithDouble: 1.0 / 3],
++    [NSNumber numberWithInt: 7]
++  };
++  unsigned		i;
++
++  START_SET("a date is not equal to an object that is not a date")
++    for (i = 0; i < sizeof(objs) / sizeof(*objs); i++)
++      {
++	id	o = objs[i];
++	NSDate	*d = lookalike(o);
++
++	PASS(![d isEqual: o],
++	  "a date is not equal to %s %s", object_getClassName(o),
++	  [[o description] UTF8String])
++	PASS_EXCEPTION([d compare: o], NSInvalidArgumentException,
++	  "-compare: %s raises", object_getClassName(o))
++	PASS_EXCEPTION([d timeIntervalSinceDate: o], NSInvalidArgumentException,
++	  "-timeIntervalSinceDate: %s raises", object_getClassName(o))
++	PASS_EXCEPTION([d laterDate: o], NSInvalidArgumentException,
++	  "-laterDate: %s raises", object_getClassName(o))
++	PASS_EXCEPTION([d earlierDate: o], NSInvalidArgumentException,
++	  "-earlierDate: %s raises", object_getClassName(o))
++      }
++  END_SET("a date is not equal to an object that is not a date")
++
++  [arp release]; arp = nil;
++  return 0;
++}
+-- 
+2.50.1 (Apple Git-155)
+
