@@ -1,0 +1,262 @@
+From 20ac9b0399551c5f397b0b0aa424697e0a001441 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Tue, 20 Oct 2026 13:46:03 +0000
+Subject: [PATCH] NSArrayController: hold set content as an array
+
+An array controller whose content was a set (bound with contentSet, as a
+Core Data to-many is, or given to -setContent:) kept the set as its
+content and arranged it as an array: with a filter predicate set,
+-arrangeObjects: sent -filteredArrayUsingPredicate: to the set, which
+raised ("GSSet does not recognize filteredArrayUsingPredicate:"), so
+Logbook's records, bound to the vehicles' selection.records and
+filtered, could not be shown.  Unbound, -addObject: and -removeObject:
+would equally have sent array methods to a set.
+
+On macOS 15 an array controller's content is always an array: given a
+set, by -setContent: or through contentSet, -content returns a mutable
+array of the set's objects (a new one each time the set changes), and
+everything else works on that:
+
+- with no sort descriptors the objects are arranged in the order of the
+  set's -allObjects; a filter predicate and sort descriptors work as for
+  an array, and objects are selected by arranged index;
+- a bound set that changes is arranged again, keeping the selection;
+- adding, inserting and removing with contentSet bound change a copy of
+  the bound set and set it back (as for bound arrays), so it stays a set;
+- a mutable set given to -setContent: is not changed by adding or
+  removing through the controller; the array is.
+
+-setContent: now takes a set's objects as a mutable array, and so does
+the content read back from the bound set after a change.  A set handed
+to -arrangeObjects: directly is still not arranged; AppKit returns a set
+from it then, and nothing in the controller calls it with one.
+
+Tests/gui/NSArrayController/setContent.m checks each of these; it passes
+on macOS 15, and without the change 3 of its first 6 checks fail and the
+set then stops at the exception, leaving 17 unrun.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/NSArrayController.m               |  14 +-
+ Tests/gui/NSArrayController/setContent.m | 170 +++++++++++++++++++++++
+ 2 files changed, 182 insertions(+), 2 deletions(-)
+ create mode 100644 Tests/gui/NSArrayController/setContent.m
+
+diff --git a/Source/NSArrayController.m b/Source/NSArrayController.m
+index 282e58064..f9f4f5776 100644
+--- a/Source/NSArrayController.m
++++ b/Source/NSArrayController.m
+@@ -164,6 +164,16 @@
+ - (void) _arrangeRemoving: (NSArray*)objects;
+ @end
+ 
++static id
++contentArray(id content)
++{
++  if ([content isKindOfClass: [NSSet class]])
++    {
++      return [NSMutableArray arrayWithArray: [content allObjects]];
++    }
++  return content;
++}
++
+ @implementation NSArrayController
+ 
+ + (void) initialize
+@@ -265,7 +275,7 @@
+ 
+ - (void) setContent: (id)content
+ {
+-  [super setContent: content];
++  [super setContent: contentArray(content)];
+   [self rearrangeObjects];
+ }
+ 
+@@ -672,7 +682,7 @@
+ 	}
+       NS_ENDHANDLER
+       binding->inReverseSet = NO;
+-      ASSIGN(_content, [binding destinationValue]);
++      ASSIGN(_content, contentArray([binding destinationValue]));
+       return nil;
+     }
+   value = [observed valueForKeyPath: keyPath];
+diff --git a/Tests/gui/NSArrayController/setContent.m b/Tests/gui/NSArrayController/setContent.m
+new file mode 100644
+index 000000000..c0490735d
+--- /dev/null
++++ b/Tests/gui/NSArrayController/setContent.m
+@@ -0,0 +1,170 @@
++/* An array controller's content may be a set: bound with contentSet (a
++   to-many, as Core Data gives it) or set with -setContent:.  As in AppKit,
++   the controller holds it as an array of the set's objects, so it is
++   filtered, sorted and selected by index like any other, and adding or
++   removing through it changes the bound set, which stays a set. */
++#include "Testing.h"
++
++#include <Foundation/NSArray.h>
++#include <Foundation/NSAutoreleasePool.h>
++#include <Foundation/NSDictionary.h>
++#include <Foundation/NSException.h>
++#include <Foundation/NSIndexSet.h>
++#include <Foundation/NSPredicate.h>
++#include <Foundation/NSSet.h>
++#include <Foundation/NSSortDescriptor.h>
++#include <Foundation/NSString.h>
++
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSArrayController.h>
++#include <AppKit/NSKeyValueBinding.h>
++
++static NSArray *
++sorted(id objects)
++{
++  if ([objects isKindOfClass: [NSSet class]])
++    {
++      objects = [objects allObjects];
++    }
++  return [[NSArray arrayWithArray: objects]
++    sortedArrayUsingSelector: @selector(compare:)];
++}
++
++static NSString *
++joined(id objects)
++{
++  return [[NSArray arrayWithArray: objects] componentsJoinedByString: @","];
++}
++
++int
++main(int argc, const char **argv)
++{
++  NSAutoreleasePool	*pool = [NSAutoreleasePool new];
++  NSArrayController	*ac;
++  NSArrayController	*vehicles;
++  NSMutableDictionary	*owner;
++  NSMutableDictionary	*car;
++  NSMutableSet		*given;
++  NSSet			*things;
++  BOOL			raised;
++
++  START_SET("NSArrayController set content")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  things = [NSSet setWithObjects: @"a", @"bb", @"ccc", @"dd", nil];
++  owner = [NSMutableDictionary dictionaryWithObject: things forKey: @"things"];
++  ac = AUTORELEASE([[NSArrayController alloc] init]);
++  [ac bind: NSContentSetBinding toObject: owner withKeyPath: @"things"
++   options: nil];
++  PASS([[ac content] isKindOfClass: [NSArray class]],
++    "bound with contentSet, the content is an array")
++  PASS_EQUAL(sorted([ac content]), sorted(things),
++    "of the set's objects")
++  PASS_EQUAL(joined([ac arrangedObjects]), joined([things allObjects]),
++    "unsorted, they are arranged in the set's order")
++  PASS_EQUAL([ac selectedObjects],
++    [NSArray arrayWithObject: [[things allObjects] objectAtIndex: 0]],
++    "and the first is selected")
++
++  raised = NO;
++  NS_DURING
++    [ac setFilterPredicate: [NSPredicate predicateWithFormat: @"length > 1"]];
++  NS_HANDLER
++    raised = YES;
++  NS_ENDHANDLER
++  PASS(raised == NO, "a filter predicate is taken")
++  PASS_EQUAL(sorted([ac arrangedObjects]),
++    ([NSArray arrayWithObjects: @"bb", @"ccc", @"dd", nil]),
++    "and filters the set's objects")
++
++  [ac setSortDescriptors: [NSArray arrayWithObject:
++    AUTORELEASE([[NSSortDescriptor alloc] initWithKey: @"self"
++					    ascending: NO])]];
++  PASS_EQUAL(joined([ac arrangedObjects]), @"dd,ccc,bb",
++    "sort descriptors sort them")
++  [ac setSelectionIndex: 1];
++  PASS_EQUAL([ac selectedObjects], [NSArray arrayWithObject: @"ccc"],
++    "an object is selected by its arranged index")
++
++  [owner setValue: [things setByAddingObject: @"eeee"] forKey: @"things"];
++  PASS_EQUAL(joined([ac arrangedObjects]), @"eeee,dd,ccc,bb",
++    "a changed set is arranged again")
++  PASS_EQUAL([ac selectedObjects], [NSArray arrayWithObject: @"ccc"],
++    "keeping the selection")
++
++  [ac addObject: @"ff"];
++  PASS([[owner valueForKey: @"things"] isKindOfClass: [NSSet class]]
++    && [[owner valueForKey: @"things"] containsObject: @"ff"],
++    "an added object is added to the bound set")
++  PASS([[ac arrangedObjects] containsObject: @"ff"]
++    && [[ac selectedObjects] isEqual: [NSArray arrayWithObject: @"ff"]],
++    "arranged and selected")
++  PASS([[ac content] isKindOfClass: [NSArray class]]
++    && [[ac content] containsObject: @"ff"],
++    "and the content is an array again")
++
++  [ac insertObject: @"g" atArrangedObjectIndex: 0];
++  PASS([[owner valueForKey: @"things"] containsObject: @"g"]
++    && [[[ac arrangedObjects] objectAtIndex: 0] isEqual: @"g"],
++    "an object inserted at an arranged index goes into the set")
++
++  [ac removeObjectAtArrangedObjectIndex: 0];
++  [ac removeObjects: [NSArray arrayWithObjects: @"ff", @"eeee", nil]];
++  PASS_EQUAL(sorted([owner valueForKey: @"things"]), sorted(things),
++    "removed objects are removed from the bound set")
++  PASS([[owner valueForKey: @"things"] isKindOfClass: [NSSet class]],
++    "which is still a set")
++  PASS_EQUAL(joined([ac arrangedObjects]), @"dd,ccc,bb,a",
++    "and from the arranged objects (the insertion cleared the filter)")
++
++  given = [NSMutableSet setWithObjects: @"a", @"bb", @"ccc", nil];
++  ac = AUTORELEASE([[NSArrayController alloc] init]);
++  [ac setContent: given];
++  PASS([[ac content] isKindOfClass: [NSArray class]]
++    && [sorted([ac content]) isEqual: sorted(given)],
++    "a set given as content is held as an array of its objects")
++  [ac setFilterPredicate: [NSPredicate predicateWithFormat: @"length > 1"]];
++  PASS_EQUAL(sorted([ac arrangedObjects]),
++    ([NSArray arrayWithObjects: @"bb", @"ccc", nil]),
++    "which is filtered")
++  [ac addObject: @"dd"];
++  [ac removeObject: @"a"];
++  PASS_EQUAL(sorted([ac content]),
++    ([NSArray arrayWithObjects: @"bb", @"ccc", @"dd", nil]),
++    "added to and removed from")
++  PASS_EQUAL(sorted(given),
++    ([NSArray arrayWithObjects: @"a", @"bb", @"ccc", nil]),
++    "leaving the set given unchanged")
++
++  car = [NSMutableDictionary dictionaryWithObject:
++    [NSSet setWithObjects: @"r1", @"r22", nil] forKey: @"records"];
++  vehicles = AUTORELEASE([[NSArrayController alloc] init]);
++  [vehicles setContent: [NSMutableArray arrayWithObject: car]];
++  ac = AUTORELEASE([[NSArrayController alloc] init]);
++  [ac bind: NSContentSetBinding toObject: vehicles
++    withKeyPath: @"selection.records" options: nil];
++  raised = NO;
++  NS_DURING
++    [ac setFilterPredicate: [NSPredicate predicateWithFormat: @"length > 2"]];
++  NS_HANDLER
++    raised = YES;
++  NS_ENDHANDLER
++  PASS(raised == NO
++    && [[ac arrangedObjects] isEqual: [NSArray arrayWithObject: @"r22"]],
++    "a to-many through a selection is filtered")
++  [ac addObject: @"r333"];
++  PASS_EQUAL(sorted([car objectForKey: @"records"]),
++    ([NSArray arrayWithObjects: @"r1", @"r22", @"r333", nil]),
++    "and added to")
++
++  END_SET("NSArrayController set content")
++
++  [pool release];
++  return 0;
++}
+-- 
+2.43.0
+
