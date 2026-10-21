@@ -1,0 +1,222 @@
+From 707a5f07684facfca483b91993716f45dbead401 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Wed, 21 Oct 2026 17:41:55 +0500
+Subject: [PATCH] KVO keeps the value a nested key path is observed on
+
+Observing a key path such as selectedObjects.@count attaches the rest
+of the path (@count) to the value the first key has at the time.  The
+key observer kept that value unretained.  When the getter makes a new
+object on each call, as NSArrayController's -selectedObjects does, the
+only reference to it was the autorelease pool it came from: once the
+pool drained the object was freed, and the next change detached the
+old observation from it, sending to freed memory.  This crashed AppKit
+apps that bind a control to a controller's selectedObjects.@count, and
+three array controllers chained by contentSet bindings to
+selection.<to-many key> with such a binding at the end.
+
+The key observer now retains the value while the rest of the key path
+is observed on it, and lets it go when that observation is detached.
+On OS X the same bindings work.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/NSKVOInternal.h                        |   3 +
+ Source/NSKVOSupport.m                         |   4 +
+ Tests/base/NSKVOSupport/nestedComputedValue.m | 128 ++++++++++++++++++
+ 3 files changed, 135 insertions(+)
+ create mode 100644 Tests/base/NSKVOSupport/nestedComputedValue.m
+
+diff --git a/Source/NSKVOInternal.h b/Source/NSKVOInternal.h
+index 49a6e21be..a154bdc16 100644
+--- a/Source/NSKVOInternal.h
++++ b/Source/NSKVOInternal.h
+@@ -75,6 +75,7 @@
+   _NSKVOKeypathObserver	*_keypathObserver;
+   _NSKVOKeyObserver     *_restOfKeypathObserver;
+   _NSKVOForwardingRelay *_restOfKeypathRelay;
++  id                     _restOfKeypathValue;
+   NSArray               *_dependentObservers;
+   id                     _object;
+   NSString              *_key;
+@@ -93,6 +94,8 @@
+ @property (nonatomic, retain) _NSKVOKeypathObserver	*keypathObserver;
+ @property (nonatomic, retain) _NSKVOKeyObserver     	*restOfKeypathObserver;
+ @property (nonatomic, retain) _NSKVOForwardingRelay 	*restOfKeypathRelay;
++/* The value the rest of the key path is observed on, kept while it is. */
++@property (nonatomic, retain) id                     	restOfKeypathValue;
+ @property (nonatomic, retain) NSArray               	*dependentObservers;
+ @property (nonatomic, assign) id                     	object;
+ @property (nonatomic, copy) NSString                	*key;
+diff --git a/Source/NSKVOSupport.m b/Source/NSKVOSupport.m
+index f0916cdca..35fe97166 100644
+--- a/Source/NSKVOSupport.m
++++ b/Source/NSKVOSupport.m
+@@ -71,6 +71,7 @@ @implementation _NSKVOKeyObserver
+ @synthesize keypathObserver = _keypathObserver;
+ @synthesize restOfKeypathObserver = _restOfKeypathObserver;
+ @synthesize restOfKeypathRelay = _restOfKeypathRelay;
++@synthesize restOfKeypathValue = _restOfKeypathValue;
+ @synthesize dependentObservers = _dependentObservers;
+ @synthesize object = _object;
+ @synthesize key = _key;
+@@ -103,6 +104,7 @@ - (void)dealloc
+   [_dependentObservers release];
+   [_restOfKeypathObserver release];
+   [_restOfKeypathRelay release];
++  [_restOfKeypathValue release];
+   [_affectedObservers release];
+   [super dealloc];
+ }
+@@ -631,6 +633,7 @@ - (BOOL) isEmpty
+       return;
+     }
+ 
++  keyObserver.restOfKeypathValue = value;
+   if (_registersObservationsItself(value))
+     {
+       _NSKVOForwardingRelay *relay;
+@@ -664,6 +667,7 @@ - (BOOL) isEmpty
+       _removeKeyObserver(keyObserver.restOfKeypathObserver);
+       keyObserver.restOfKeypathObserver = nil;
+     }
++  keyObserver.restOfKeypathValue = nil;
+ }
+ 
+ // Add all observers with declared dependencies on this one:
+diff --git a/Tests/base/NSKVOSupport/nestedComputedValue.m b/Tests/base/NSKVOSupport/nestedComputedValue.m
+new file mode 100644
+index 000000000..abd849ad2
+--- /dev/null
++++ b/Tests/base/NSKVOSupport/nestedComputedValue.m
+@@ -0,0 +1,128 @@
++#import <Foundation/Foundation.h>
++#import "ObjectTesting.h"
++
++/* A key path observed through a key whose getter makes a new object on
++ * every call, as NSArrayController's selectedObjects does, with the key's
++ * changes announced by hand.  The object the rest of the key path is
++ * observed on must outlive the autorelease pool it came from, for as long
++ * as it is observed: a change detaches the old one's observation, and must
++ * not send to an object already freed.
++ */
++
++static int made = 0;
++static int freed = 0;
++
++@interface Counted : NSObject
++{
++  NSUInteger _n;
++}
++- (id) initWithCount: (NSUInteger)n;
++- (NSUInteger) n;
++@end
++
++@implementation Counted
++- (id) initWithCount: (NSUInteger)n
++{
++  if ((self = [super init]) != nil)
++    {
++      _n = n;
++      made++;
++    }
++  return self;
++}
++- (NSUInteger) n
++{
++  return _n;
++}
++- (void) dealloc
++{
++  freed++;
++  [super dealloc];
++}
++@end
++
++@interface Holder : NSObject
++{
++  NSUInteger _count;
++}
++- (Counted *) value;
++- (void) setCount: (NSUInteger)count;
++@end
++
++@implementation Holder
+++ (BOOL) automaticallyNotifiesObserversForKey: (NSString *)key
++{
++  return NO;
++}
++- (Counted *) value
++{
++  return [[[Counted alloc] initWithCount: _count] autorelease];
++}
++- (void) setCount: (NSUInteger)count
++{
++  [self willChangeValueForKey: @"value"];
++  _count = count;
++  [self didChangeValueForKey: @"value"];
++}
++@end
++
++@interface Watcher : NSObject
++{
++@public
++  int seen;
++  NSUInteger last;
++}
++@end
++
++@implementation Watcher
++- (void) observeValueForKeyPath: (NSString *)keyPath
++                       ofObject: (id)object
++                         change: (NSDictionary *)change
++                        context: (void *)context
++{
++  seen++;
++  last = [[object valueForKeyPath: keyPath] unsignedIntegerValue];
++}
++@end
++
++int
++main(int argc, char *argv[])
++{
++  NSAutoreleasePool *arp = [NSAutoreleasePool new];
++  Holder            *holder = [Holder new];
++  Watcher           *watcher = [Watcher new];
++  int               i;
++
++  START_SET("a key path through a value made on each read")
++
++  NSAutoreleasePool *pool = [NSAutoreleasePool new];
++  [holder addObserver: watcher
++           forKeyPath: @"value.n"
++              options: 0
++              context: NULL];
++  [pool release];
++  PASS(made - freed == 1,
++    "the value the rest of the key path is observed on outlives its pool")
++
++  for (i = 1; i <= 3; i++)
++    {
++      pool = [NSAutoreleasePool new];
++      [holder setCount: i];
++      [pool release];
++    }
++  PASS(watcher->seen == 3, "each change is reported")
++  PASS(watcher->last == 3, "with the new value")
++  PASS(made - freed == 1, "only the value observed now is kept")
++
++  pool = [NSAutoreleasePool new];
++  [holder removeObserver: watcher forKeyPath: @"value.n"];
++  [pool release];
++  PASS(made == freed, "and it is let go when the observation is removed")
++
++  END_SET("a key path through a value made on each read")
++
++  [watcher release];
++  [holder release];
++  [arp release];
++  return 0;
++}
+-- 
+2.50.1 (Apple Git-155)
+

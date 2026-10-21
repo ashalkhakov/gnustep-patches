@@ -967,6 +967,29 @@ check reads `Records(<id>)` after each round and saw the first round's
 row; -dataWithContentsOfURL:options:NSDataReadingUncached error: reads it
 afresh here.
 
+Added on 2026-10-21 for Logbook's desktop app: `kvo-nested-value-kept`.
+Observing a key path like `selectedObjects.@count` attaches the rest of
+it (`@count`) to the value the first key has then, and the key observer
+kept that value unretained.  NSArrayController's -selectedObjects makes a
+new array on each call, so once the autorelease pool it came from
+drained, the array was freed, and the next change detached the old
+observation from freed memory.  Logbook's main window crashed on its
+first vehicle: its Open button's enabled binding is to the attachments
+controller's `selectedObjects.@count`, and that controller's contentSet
+is bound to the records controller's `selection.attachments`, itself
+bound to the vehicles' `selection.records`.  On macOS it works.  The
+patch keeps the value retained while the rest of the key path is
+observed on it.  `NSKVOSupport/nestedComputedValue.m` in libs-base's
+suite, 5 checks, fails its first on master 1534933 and then crashes, and
+passes with the fix (NSKVOSupport 530 of 530).  With every libs-base
+patch here applied, the whole suite passes 15256 tests; what fails,
+NSAutoreleasePool/dispatch.m and GSMime/encoded-word-stack.m, fails the
+same without it.  A stand-alone program
+with that chain of three controllers and the button reads freed memory
+under valgrind and crashes without it and runs clean with it; Logbook,
+with both bindings back, crashes three checks into its self-test on
+2026.10.20.7 and passes all 113 with this base.
+
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
 | `autoreleased-return-value` | libobjc2 | test | [#426](https://github.com/gnustep/libobjc2/pull/426) closed unmerged | (none: ODataStore works around it) |
@@ -1054,6 +1077,7 @@ afresh here.
 | `mingw-blocksruntime-name` | libdispatch | none (libdispatch.dll does not load on MinGW; the Windows stack check is the test) | not sent yet | (none: the Windows stack uses it from here) |
 | `windows-listening-socket-read` | libdispatch | none (GCDWebServer's Windows smoke test is the check: it listens but never accepts without it) | not sent yet | (none: the Windows stack uses it from here) |
 | `uuid-secure-coding` | libs-base | test | not sent yet | (none: ODataKit's apps, Logbook first, use it from here) |
+| `kvo-nested-value-kept` | libs-base | test | not sent yet | (none: Logbook uses it from here) |
 
 Re-run that check before sending anything: `Scripts/apply-patches.sh` on a
 fresh checkout is the quickest form of it.
