@@ -990,6 +990,26 @@ under valgrind and crashes without it and runs clean with it; Logbook,
 with both bindings back, crashes three checks into its self-test on
 2026.10.20.7 and passes all 113 with this base.
 
+Added on 2026-10-21 for Logbook's desktop app: `tablecolumn-binds-table`.
+On macOS a table column whose value is bound to an array controller binds
+its table view's content, selectionIndexes and sortDescriptors to that
+controller, unless the table's content is bound already (checked there:
+an own selection binding is replaced, an own content binding kept, an
+object controller binds nothing). Here nothing was bound, so a
+controller's selection set in code never reached the table: Logbook's
+lists window adds a kind of expense, chooses it and edits its name in
+place, and -editColumn:row:withEvent:select: raised "Attempted to edit
+unselected row". The patch binds the table so, when the column's value is
+bound or the column is added to a table, and the table, told a selection
+past the rows it has counted (a controller says its selection before the
+table has reloaded), counts them again first. The header click does not
+send the table's sort descriptors back to the controller here (not
+patched). `NSTableView/boundSelection.m` in libs-gui's suite, 10 checks,
+every one also run against AppKit on macOS: 7 fail on master fdc5cfe8
+with every libs-gui patch here applied, all pass with the fix; the whole
+gui suite passes 5481. Logbook's desktop self-test, its lists window
+among it, passes with this gui and fails without it.
+
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
 | `autoreleased-return-value` | libobjc2 | test | [#426](https://github.com/gnustep/libobjc2/pull/426) closed unmerged | (none: ODataStore works around it) |
@@ -1078,6 +1098,7 @@ with both bindings back, crashes three checks into its self-test on
 | `windows-listening-socket-read` | libdispatch | none (GCDWebServer's Windows smoke test is the check: it listens but never accepts without it) | not sent yet | (none: the Windows stack uses it from here) |
 | `uuid-secure-coding` | libs-base | test | not sent yet | (none: ODataKit's apps, Logbook first, use it from here) |
 | `kvo-nested-value-kept` | libs-base | test | not sent yet | (none: Logbook uses it from here) |
+| `tablecolumn-binds-table` | libs-gui | test | not sent yet | (none: Logbook uses it from here) |
 
 Re-run that check before sending anything: `Scripts/apply-patches.sh` on a
 fresh checkout is the quickest form of it.

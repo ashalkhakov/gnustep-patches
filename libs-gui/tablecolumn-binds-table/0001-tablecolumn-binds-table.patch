@@ -1,0 +1,284 @@
+From 7e16dc9f960bd0554f7ff9120cc5accd7656adc9 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Wed, 21 Oct 2026 19:55:19 +0500
+Subject: [PATCH] A column bound to an array controller binds its table view to
+ it
+
+On OS X, binding a table column's value to an array controller binds
+the table view's content to the controller's arrangedObjects, and its
+selectionIndexes and sortDescriptors to the controller's, unless the
+table view's content is bound already.  Here the table view was bound
+to nothing, so a controller's selection changed in code (an object
+added and chosen, -setSelectionIndex:) never reached the table: its
+selected row stayed as it was, and -editColumn:row:withEvent:select: on
+the chosen row raised "Attempted to edit unselected row".
+
+NSTableColumn now binds its table view so, when its value is bound and
+when it is added to a table view (a column bound first).  The table
+view, told a selection past the rows it has counted (the controller
+says its new selection as soon as it has it, before the table has
+reloaded), counts its rows again before selecting.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/NSTableColumn.m                 |  55 ++++++++++
+ Source/NSTableView.m                   |   9 ++
+ Tests/gui/NSTableView/boundSelection.m | 139 +++++++++++++++++++++++++
+ 3 files changed, 203 insertions(+)
+ create mode 100644 Tests/gui/NSTableView/boundSelection.m
+
+diff --git a/Source/NSTableColumn.m b/Source/NSTableColumn.m
+index 5138027a0..52251b129 100644
+--- a/Source/NSTableColumn.m
++++ b/Source/NSTableColumn.m
+@@ -67,6 +67,7 @@
+ #import <Foundation/NSNotification.h>
+ #import <Foundation/NSValue.h>
+ #import <Foundation/NSSortDescriptor.h>
++#import "AppKit/NSArrayController.h"
+ #import "AppKit/NSImage.h"
+ #import "AppKit/NSKeyValueBinding.h"
+ #import "AppKit/NSTableHeaderCell.h"
+@@ -78,6 +79,10 @@ @interface NSTableView (__NSTableColumnPrivate__)
+ - (void) _registerPrototypeViews: (NSArray *)prototypeViews;
+ @end
+ 
++@interface NSTableColumn (Private)
++- (void) _bindTableViewToController;
++@end
++
+ 
+ /**
+   <p>
+@@ -191,6 +196,7 @@ - (void) setTableView: (NSTableView*)aTableView
+   // We do *not* RETAIN aTableView. 
+   // On the contrary, aTableView is supposed to RETAIN us.
+   _tableView = aTableView;
++  [self _bindTableViewToController];
+ }
+ 
+ /**
+@@ -748,6 +754,55 @@ - (void) _applyBindingsToCell: (NSCell *)cell
+     }
+ }
+ 
++- (void) bind: (NSString *)binding
++     toObject: (id)anObject
++  withKeyPath: (NSString *)keyPath
++      options: (NSDictionary *)options
++{
++  [super bind: binding toObject: anObject withKeyPath: keyPath options: options];
++  if ([binding isEqual: NSValueBinding])
++    {
++      [self _bindTableViewToController];
++    }
++}
++
++/* As in Cocoa: a column whose value is bound to an array controller
++ * binds its table view's content to the controller's arrangedObjects, and
++ * its selectionIndexes and sortDescriptors to the controller's, unless the
++ * table view's content is bound already; so that the table's selection
++ * follows the controller's as well as the other way round.
++ */
++- (void) _bindTableViewToController
++{
++  id controller;
++
++  if (_tableView == nil
++    || [GSKeyValueBinding infoForBinding: NSContentBinding
++			       forObject: _tableView] != nil)
++    {
++      return;
++    }
++  controller = [[GSKeyValueBinding infoForBinding: NSValueBinding
++					forObject: self]
++		 objectForKey: NSObservedObjectKey];
++  if (![controller isKindOfClass: [NSArrayController class]])
++    {
++      return;
++    }
++  [_tableView bind: NSContentBinding
++	  toObject: controller
++       withKeyPath: @"arrangedObjects"
++	   options: nil];
++  [_tableView bind: NSSelectionIndexesBinding
++	  toObject: controller
++       withKeyPath: @"selectionIndexes"
++	   options: nil];
++  [_tableView bind: NSSortDescriptorsBinding
++	  toObject: controller
++       withKeyPath: @"sortDescriptors"
++	   options: nil];
++}
++
+ - (void) setValue: (id)anObject forKey: (NSString*)aKey
+ {
+   if ([aKey isEqual: NSValueBinding])
+diff --git a/Source/NSTableView.m b/Source/NSTableView.m
+index f1c47dfde..601fa18fc 100644
+--- a/Source/NSTableView.m
++++ b/Source/NSTableView.m
+@@ -7713,6 +7713,15 @@ - (void) setValue: (id)anObject forKey: (NSString*)aKey
+ 	    }
+ 	  else
+ 	    {
++	      /* A controller says its new selection as soon as it has it,
++		 which may be before the table has heard of the rows it
++		 chose (an object added and chosen): the rows counted again
++		 first. */
++	      if ([anObject count] > 0
++		&& (NSInteger)[anObject lastIndex] >= _numberOfRows)
++		{
++		  [self noteNumberOfRowsChanged];
++		}
+ 	      return [self selectRowIndexes: anObject
+ 		       byExtendingSelection: NO];
+ 	    }
+diff --git a/Tests/gui/NSTableView/boundSelection.m b/Tests/gui/NSTableView/boundSelection.m
+new file mode 100644
+index 000000000..e260c36e7
+--- /dev/null
++++ b/Tests/gui/NSTableView/boundSelection.m
+@@ -0,0 +1,139 @@
++/* A table view whose column is bound to an array controller follows the
++   controller's selection, as well as the controller following the
++   table's: AppKit binds the table view's content, selectionIndexes and
++   sortDescriptors to that controller unless its content is bound already.
++   Every assertion matches AppKit (checked on macOS). */
++#include "Testing.h"
++
++#include <Foundation/NSAutoreleasePool.h>
++#include <Foundation/NSDictionary.h>
++#include <Foundation/NSIndexSet.h>
++#include <Foundation/NSString.h>
++
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSArrayController.h>
++#include <AppKit/NSObjectController.h>
++#include <AppKit/NSKeyValueBinding.h>
++#include <AppKit/NSTableView.h>
++#include <AppKit/NSTableColumn.h>
++
++static NSArrayController *
++controllerOf(NSArray *names)
++{
++  NSMutableArray *content = [NSMutableArray array];
++  NSEnumerator *e = [names objectEnumerator];
++  NSString *name;
++
++  while ((name = [e nextObject]) != nil)
++    {
++      [content addObject: [NSMutableDictionary dictionaryWithObject: name
++							     forKey: @"name"]];
++    }
++  return AUTORELEASE([[NSArrayController alloc] initWithContent: content]);
++}
++
++static NSTableView *
++tableWithColumn(NSTableColumn **column)
++{
++  NSTableView *tv = AUTORELEASE([[NSTableView alloc]
++    initWithFrame: NSMakeRect(0, 0, 200, 200)]);
++
++  *column = AUTORELEASE([[NSTableColumn alloc] initWithIdentifier: @"name"]);
++  return tv;
++}
++
++int main()
++{
++  NSAutoreleasePool *arp = [NSAutoreleasePool new];
++  NSArrayController *ac;
++  NSArrayController *other;
++  NSObjectController *oc;
++  NSDictionary *names;
++  NSTableView *tv;
++  NSTableColumn *col;
++
++  START_SET("NSTableView selection bound through a column")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  ac = controllerOf([NSArray arrayWithObjects: @"a", @"b", @"c", nil]);
++  tv = tableWithColumn(&col);
++  [tv addTableColumn: col];
++  [col bind: NSValueBinding
++   toObject: ac
++withKeyPath: @"arrangedObjects.name"
++    options: nil];
++  PASS([tv numberOfRows] == 3, "the table has the controller's rows");
++  PASS([tv infoForBinding: NSContentBinding] != nil,
++    "the table's content is bound to the controller");
++  PASS([tv infoForBinding: NSSelectionIndexesBinding] != nil,
++    "and its selection indexes");
++  PASS([tv infoForBinding: NSSortDescriptorsBinding] != nil,
++    "and its sort descriptors");
++
++  [ac setSelectionIndex: 2];
++  PASS([tv selectedRow] == 2, "the table follows the controller's selection");
++
++  [tv selectRowIndexes: [NSIndexSet indexSetWithIndex: 0]
++    byExtendingSelection: NO];
++  PASS([ac selectionIndex] == 0, "the controller follows the table's");
++
++  [ac addObject: [NSMutableDictionary dictionaryWithObject: @"d"
++						    forKey: @"name"]];
++  [ac setSelectedObjects: [NSArray arrayWithObject: [[ac arrangedObjects] lastObject]]];
++  PASS([tv numberOfRows] == 4 && [tv selectedRow] == 3,
++    "an object added and chosen is the table's selected row");
++
++  /* Bound before the column is in a table. */
++  ac = controllerOf([NSArray arrayWithObjects: @"a", @"b", nil]);
++  tv = tableWithColumn(&col);
++  [col bind: NSValueBinding
++   toObject: ac
++withKeyPath: @"arrangedObjects.name"
++    options: nil];
++  [tv addTableColumn: col];
++  [ac setSelectionIndex: 1];
++  PASS([tv selectedRow] == 1,
++    "a column bound before it was added binds its table as it is added");
++
++  /* A table whose content is bound already is left as it is. */
++  ac = controllerOf([NSArray arrayWithObjects: @"a", @"b", @"c", nil]);
++  other = controllerOf([NSArray arrayWithObjects: @"x", @"y", @"z", nil]);
++  tv = tableWithColumn(&col);
++  [tv addTableColumn: col];
++  [tv bind: NSContentBinding
++  toObject: other
++withKeyPath: @"arrangedObjects"
++   options: nil];
++  [col bind: NSValueBinding
++   toObject: ac
++withKeyPath: @"arrangedObjects.name"
++    options: nil];
++  PASS([[tv infoForBinding: NSContentBinding]
++	 objectForKey: NSObservedObjectKey] == other
++    && [tv infoForBinding: NSSelectionIndexesBinding] == nil,
++    "a table's own content binding is kept, and nothing else bound");
++
++  /* Only an array controller binds the table. */
++  names = [NSDictionary dictionaryWithObject:
++    [NSArray arrayWithObjects: @"a", @"b", nil] forKey: @"names"];
++  oc = AUTORELEASE([[NSObjectController alloc] initWithContent: names]);
++  tv = tableWithColumn(&col);
++  [tv addTableColumn: col];
++  [col bind: NSValueBinding
++   toObject: oc
++withKeyPath: @"selection.names"
++    options: nil];
++  PASS([tv infoForBinding: NSContentBinding] == nil,
++    "a column bound to an object controller binds nothing of its table");
++
++  END_SET("NSTableView selection bound through a column")
++
++  [arp release];
++  return 0;
++}
+-- 
+2.50.1 (Apple Git-155)
+
