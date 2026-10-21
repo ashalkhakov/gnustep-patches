@@ -940,6 +940,33 @@ checks with none failing, `stopModalFromTimer.m`'s 6 among them, and
 Logbook's `make clean; make -k check` passes (self-test done: 0 failed,
 269 checks; procedures: 0 failed), with no "No binding exposed".
 
+Added on 2026-10-21 for Logbook's sync on GNUstep: `uuid-secure-coding`.
+NSUUID adopted NSCoding only, so a keyed archive holding a UUID could not
+be read with any secure decode, even with NSUUID allowed: the decode
+returned nil ("class 'NSUUID' does not support secure coding").
+ODataSync keeps each waiting change's key as such an archive and reads
+it with +unarchivedObjectOfClasses:fromData:error:, so every object
+keyed by a UUID attribute was dropped from its outbox unsent (Logbook's
+vehicles, fill-ups, services and reminders never left the device); on
+macOS, where NSUUID adopts NSSecureCoding, they go.  The patch adopts it
+here and answers YES to +supportsSecureCoding.  `NSUUID/secure.m` in
+libs-base's suite, 5 checks, fails all 5 on master 555420c and passes
+with the fix (NSUUID 26 of 26); with every libs-base patch here applied,
+NSPredicate passes 446 of 446 and NSKeyedArchiver 110 of 110.  With the
+same two methods given to NSUUID in a stand-in (a category, never
+committed), ODataKit's GNUstep suite passes 428 of 428, its new test of
+UUID-keyed objects among them, and so does Logbook's
+`make clean; make -k check` once its sync check reads the server's row
+uncached (below).
+
+Found beside it, not patched yet: libs-base's +[NSData
+dataWithContentsOfURL:] reads an http URL with
+-resourceDataUsingCache: YES, so a second read of the same URL answers
+the first one's bytes; on macOS it reads the URL again.  Logbook's sync
+check reads `Records(<id>)` after each round and saw the first round's
+row; -dataWithContentsOfURL:options:NSDataReadingUncached error: reads it
+afresh here.
+
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
 | `autoreleased-return-value` | libobjc2 | test | [#426](https://github.com/gnustep/libobjc2/pull/426) closed unmerged | (none: ODataStore works around it) |
@@ -1026,6 +1053,7 @@ Logbook's `make clean; make -k check` passes (self-test done: 0 failed,
 | `mingw-mode-t` | libdispatch | none (a header that does not compile on MinGW; the Windows stack build is the check) | not sent yet | (none: the Windows stack uses it from here) |
 | `mingw-blocksruntime-name` | libdispatch | none (libdispatch.dll does not load on MinGW; the Windows stack check is the test) | not sent yet | (none: the Windows stack uses it from here) |
 | `windows-listening-socket-read` | libdispatch | none (GCDWebServer's Windows smoke test is the check: it listens but never accepts without it) | not sent yet | (none: the Windows stack uses it from here) |
+| `uuid-secure-coding` | libs-base | test | not sent yet | (none: ODataKit's apps, Logbook first, use it from here) |
 
 Re-run that check before sending anything: `Scripts/apply-patches.sh` on a
 fresh checkout is the quickest form of it.
