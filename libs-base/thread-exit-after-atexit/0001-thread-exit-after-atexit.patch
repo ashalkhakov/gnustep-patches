@@ -1,0 +1,131 @@
+From a9877cf2feb61383682b84850dcb333fc642b695 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Thu, 22 Oct 2026 00:08:55 +0500
+Subject: [PATCH] A thread ending after NSValue's exit clean-up does not abort
+
+A thread GNUstep knows of that ends while the process exits, after
+NSValue's +atExit has destroyed its placeholders, is cleaned up by
+exitedThread, which boxes the thread's pthread in an NSValue to look it
+up by.  No NSValue can be made any more: the box is nil, NSMapInsert
+raises on its nil key, and the exception, raised where no handler can
+be, aborts the process.  An application whose worker threads (an HTTP
+client's, say) are still finishing as it quits ends with SIGABRT
+instead of its exit status.
+
+exitedThread now lets such a thread end with the process, as it is,
+when the box cannot be made.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/NSThread.m                       | 10 +++-
+ Tests/base/NSThread/exit_after_atexit.m | 76 +++++++++++++++++++++++++
+ 2 files changed, 85 insertions(+), 1 deletion(-)
+ create mode 100644 Tests/base/NSThread/exit_after_atexit.m
+
+diff --git a/Source/NSThread.m b/Source/NSThread.m
+index 6f52d8515..97ed86541 100644
+--- a/Source/NSThread.m
++++ b/Source/NSThread.m
+@@ -635,8 +635,16 @@ static inline void _didLateUnregisterCurrentThread(NSValue *boxedThread)
+ 	      return;	// no thread info
+ 	    }
+ 	}
+-      RETAIN((NSThread*)thread);
+       ref = NSValueCreateFromPthread(GS_THREAD_ID_SELF());
++      if (nil == ref)
++	{
++	  /* The process is exiting, and NSValue's exit clean-up (+atExit)
++	   * has run: no value can be made to look the thread up by while
++	   * it is cleaned up.  It ends with the process, as it is.
++	   */
++	  return;
++	}
++      RETAIN((NSThread*)thread);
+       _willLateUnregisterThread(ref, (NSThread*)thread);
+ 
+       {
+diff --git a/Tests/base/NSThread/exit_after_atexit.m b/Tests/base/NSThread/exit_after_atexit.m
+new file mode 100644
+index 000000000..5e54765c5
+--- /dev/null
++++ b/Tests/base/NSThread/exit_after_atexit.m
+@@ -0,0 +1,76 @@
++#import "ObjectTesting.h"
++#import <Foundation/NSThread.h>
++#import <Foundation/NSValue.h>
++
++/* A thread GNUstep knows of (one that asked for its NSThread) may end
++ * while the process exits, after the exit clean-up of NSValue (+atExit)
++ * has destroyed its placeholders: an application's worker thread, say,
++ * finishing as the application quits.  Its pthread clean-up must not abort
++ * the process because no NSValue can be made any more.
++ */
++
++#if defined(_WIN32)
++int main(void)
++{
++  START_SET("A thread ending after NSValue's exit clean-up")
++  SKIP("pthreads only")
++  END_SET("A thread ending after NSValue's exit clean-up")
++  return 0;
++}
++
++#else
++
++#include <pthread.h>
++
++static pthread_mutex_t  lock = PTHREAD_MUTEX_INITIALIZER;
++static pthread_cond_t   changed = PTHREAD_COND_INITIALIZER;
++static int              registered = 0;
++static int              mayEnd = 0;
++
++static void *
++worker(void *unused)
++{
++  /* Known to GNUstep from here on: ending, it is cleaned up. */
++  [NSThread currentThread];
++  pthread_mutex_lock(&lock);
++  registered = 1;
++  pthread_cond_broadcast(&changed);
++  while (!mayEnd)
++    {
++      pthread_cond_wait(&changed, &lock);
++    }
++  pthread_mutex_unlock(&lock);
++  return NULL;
++}
++
++int main(void)
++{
++  NSAutoreleasePool     *arp = [NSAutoreleasePool new];
++  pthread_t             thread;
++
++  START_SET("A thread ending after NSValue's exit clean-up")
++
++  pthread_create(&thread, NULL, worker, NULL);
++  pthread_mutex_lock(&lock);
++  while (!registered)
++    {
++      pthread_cond_wait(&changed, &lock);
++    }
++  pthread_mutex_unlock(&lock);
++
++  /* What exiting does first. */
++  [NSValue performSelector: @selector(atExit)];
++
++  pthread_mutex_lock(&lock);
++  mayEnd = 1;
++  pthread_cond_broadcast(&changed);
++  pthread_mutex_unlock(&lock);
++  pthread_join(thread, NULL);
++  PASS(YES, "the thread ended, and the process goes on")
++
++  END_SET("A thread ending after NSValue's exit clean-up")
++  [arp release];
++  return 0;
++}
++
++#endif
+-- 
+2.50.1 (Apple Git-155)
+

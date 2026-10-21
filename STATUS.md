@@ -1005,6 +1005,24 @@ under valgrind and crashes without it and runs clean with it; Logbook,
 with both bindings back, crashes three checks into its self-test on
 2026.10.20.7 and passes all 113 with this base.
 
+Added on 2026-10-22 for Logbook's desktop app: `thread-exit-after-atexit`.
+A thread GNUstep knows of that ends while the process exits, after
+NSValue's +atExit has destroyed its placeholders, is cleaned up by
+exitedThread (NSThread.m), which boxes its pthread in an NSValue to look
+it up by: none can be made any more, NSMapInsert raises on the nil key,
+and the exception, where no handler can be, aborts the process. Logbook's
+desktop self-test passed and then ended with SIGABRT every time once its
+calendar had read twelve months ahead (more of ODataKit's HTTP worker
+threads finishing as it quit). The patch lets such a thread end with the
+process, as it is, when the box cannot be made. `NSThread/exit_after_atexit.m`
+in libs-base's suite registers a pthread, runs NSValue's +atExit, and
+lets the thread end: on master 1534933 with every libs-base patch here
+applied it aborts; with the fix it passes, NSThread's tests all pass, and
+the whole suite passes 15245, the two files that fail
+(NSAutoreleasePool/dispatch.m, GSMime/encoded-word-stack.m) failing the
+same without it. Logbook's app check, three runs over this base, exits 0
+each time.
+
 Added on 2026-10-21 for Logbook's desktop app: `tablecolumn-binds-table`.
 On macOS a table column whose value is bound to an array controller binds
 its table view's content, selectionIndexes and sortDescriptors to that
@@ -1114,6 +1132,7 @@ among it, passes with this gui and fails without it.
 | `uuid-secure-coding` | libs-base | test | not sent yet | (none: ODataKit's apps, Logbook first, use it from here) |
 | `kvo-nested-value-kept` | libs-base | test | not sent yet | (none: Logbook uses it from here) |
 | `tablecolumn-binds-table` | libs-gui | test | not sent yet | (none: Logbook uses it from here) |
+| `thread-exit-after-atexit` | libs-base | test | not sent yet | (none: Logbook uses it from here) |
 
 Re-run that check before sending anything: `Scripts/apply-patches.sh` on a
 fresh checkout is the quickest form of it.
