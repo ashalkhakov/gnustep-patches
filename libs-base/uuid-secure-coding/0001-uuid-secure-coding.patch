@@ -1,0 +1,106 @@
+From 5b97cc4034bc83cc998f01aff56f9032de74c0f9 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Wed, 21 Oct 2026 11:14:14 +0000
+Subject: [PATCH] NSUUID supports secure coding
+
+NSUUID adopted NSCoding only, so a keyed archive with a UUID in it
+could not be read with +unarchivedObjectOfClasses:fromData:error: or
+any other secure decode, even with NSUUID among the allowed classes:
+the unarchiver refused it ("class NSUUID does not support secure
+coding") and the whole decode returned nil.  On OS X NSUUID adopts
+NSSecureCoding (10.8).
+
+It now adopts NSSecureCoding and answers YES to +supportsSecureCoding.
+Its -initWithCoder: decodes only its bytes, so it needs no change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Headers/Foundation/NSUUID.h |  2 +-
+ Source/NSUUID.m             |  5 +++++
+ Tests/base/NSUUID/secure.m  | 45 +++++++++++++++++++++++++++++++++++++
+ 3 files changed, 51 insertions(+), 1 deletion(-)
+ create mode 100644 Tests/base/NSUUID/secure.m
+
+diff --git a/Headers/Foundation/NSUUID.h b/Headers/Foundation/NSUUID.h
+index 5451ca7..7dbb185 100644
+--- a/Headers/Foundation/NSUUID.h
++++ b/Headers/Foundation/NSUUID.h
+@@ -44,7 +44,7 @@ typedef uint8_t gsuuid_t[16];
+ @class NSString;
+ 
+ GS_EXPORT_CLASS
+-@interface NSUUID : NSObject <NSCopying, NSCoding>
++@interface NSUUID : NSObject <NSCopying, NSSecureCoding>
+ {
+   @private
+   gsuuid_t uuid;
+diff --git a/Source/NSUUID.m b/Source/NSUUID.m
+index eb54c25..8856a75 100644
+--- a/Source/NSUUID.m
++++ b/Source/NSUUID.m
+@@ -139,6 +139,11 @@ static const int UUIDByteCount = 16;
+ 
+ static NSString *uuidKey = @"uuid";
+ 
+++ (BOOL) supportsSecureCoding
++{
++  return YES;
++}
++
+ - (void) encodeWithCoder: (NSCoder *)aCoder
+ {
+   if ([aCoder allowsKeyedCoding])
+diff --git a/Tests/base/NSUUID/secure.m b/Tests/base/NSUUID/secure.m
+new file mode 100644
+index 0000000..c19e5f4
+--- /dev/null
++++ b/Tests/base/NSUUID/secure.m
+@@ -0,0 +1,45 @@
++#include <Foundation/NSAutoreleasePool.h>
++#include <Foundation/NSDictionary.h>
++#include <Foundation/NSKeyedArchiver.h>
++#include <Foundation/NSSet.h>
++#include <Foundation/NSString.h>
++#include <Foundation/NSUUID.h>
++#include "Testing.h"
++
++int main(int argc, char **argv)
++{
++  NSAutoreleasePool *arp = [NSAutoreleasePool new];
++  NSUUID *uuid = [NSUUID UUID];
++  NSDictionary *key = [NSDictionary dictionaryWithObject: uuid forKey: @"id"];
++  NSData *coded;
++  NSSet *classes;
++  NSError *error = nil;
++  id decoded;
++
++  PASS([NSUUID supportsSecureCoding], "NSUUID supports secure coding");
++  PASS([NSUUID conformsToProtocol: @protocol(NSSecureCoding)],
++       "NSUUID conforms to NSSecureCoding");
++
++  coded = [NSKeyedArchiver archivedDataWithRootObject: uuid
++                                requiringSecureCoding: YES
++                                                error: &error];
++  PASS(coded != nil && error == nil, "a UUID is archived with secure coding");
++
++  decoded = [NSKeyedUnarchiver unarchivedObjectOfClass: [NSUUID class]
++                                              fromData: coded
++                                                 error: &error];
++  PASS_EQUAL(decoded, uuid, "a UUID is unarchived with secure coding");
++
++  coded = [NSKeyedArchiver archivedDataWithRootObject: key
++                                requiringSecureCoding: NO
++                                                error: &error];
++  classes = [NSSet setWithObjects: [NSDictionary class], [NSString class],
++    [NSUUID class], nil];
++  decoded = [NSKeyedUnarchiver unarchivedObjectOfClasses: classes
++                                                fromData: coded
++                                                   error: &error];
++  PASS_EQUAL(decoded, key, "a dictionary of a UUID is unarchived with secure coding");
++
++  [arp release];
++  return 0;
++}
+-- 
+2.43.0
+
