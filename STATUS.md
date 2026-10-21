@@ -532,7 +532,8 @@ or prepares.  Once it has fetched, it follows its context's
 NSObjectsChangedInManagingContextNotification as macOS 15 does: inserted
 objects of the entity that match the fetch predicate are added, deleted
 and invalidated ones dropped, updated ones added or dropped as they now
-match, refreshed ones left alone, and invalidatedAll empties the content
+match, refreshed ones left in it but said of the arranged objects (since
+2026-10-21, below), and invalidatedAll empties the content
 (see its NOTES.md).  Core Data is reached by class name at run time, not
 linked; the notification and its keys are named by their values, which
 FreeCoreData shares with Apple's from FreeCoreData#90.
@@ -546,6 +547,20 @@ the stack the ormkit-gnustep image has and passes all with every libs-gui
 patch here.  A program following a context of FreeCoreData's fails 4 of 7
 checks over FreeCoreData master and passes all over FreeCoreData#90.  It
 applies after `arraycontroller-arrange-eagerly` (see its NOTES.md).
+
+Changed on 2026-10-21, for Logbook's pick lists: a refreshed object of
+the content is said of the arranged objects (will/didChange
+arrangedObjects), as macOS 15 does (checked there over Core Data: one
+notification for each refreshed object, the content as it was, nothing
+filtered or sorted anew), so that what shows them reads them again.  A
+kind of expense added in Logbook's lists window and named before it was
+saved kept its first name in every pop-up of it: the window reads its
+objects again after saving (refreshes them), which on macOS rebuilds the
+pop-ups and here did not.  `entityMode.m` has a check of it, which fails
+without the change and passes with it; with every libs-gui patch here
+applied (they all still apply after the change), NSArrayController's
+tests all pass, and Logbook's desktop self-test, 302 checks, passes over
+this gui.
 
 Added the same day, also for FreeCoreData:
 `predicate-ordering-without-compare`.  <, <=, >, >= and BETWEEN with a
