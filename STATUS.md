@@ -1005,6 +1005,33 @@ under valgrind and crashes without it and runs clean with it; Logbook,
 with both bindings back, crashes three checks into its self-test on
 2026.10.20.7 and passes all 113 with this base.
 
+Added on 2026-10-22 for Logbook's desktop app: `locale-currency-name`.
+-[NSLocale displayNameForKey:value:] answered nil for NSLocaleCurrencyCode
+and NSLocaleCurrencySymbol, keys it did not handle, where macOS names the
+currency in the locale's language ("Japanese Yen", "dollar des
+États-Unis") and says its symbol ("$"). Logbook's currency field lists
+and finds currencies by those names, so on GNUstep "yen" found nothing.
+The patch takes both from ICU's ucurr_getName and answers nil for a code
+ICU does not know, as macOS does. `NSLocale/currencyName.m` in
+libs-base's suite: on master 1534933 with every libs-base patch here
+applied, four of its five checks fail; with the fix all pass, and the
+whole suite passes 15250, the two files that fail
+(NSAutoreleasePool/dispatch.m, GSMime/encoded-word-stack.m) failing the
+same without it.
+
+Added on 2026-10-22 for Logbook's desktop app: `xib-custom-view-identifier`.
+A custom view of a xib is made by NSCustomView (GSNibLoading.m), which
+gives the view its frame, autoresizing, hidden flag, key views and
+subviews but not the identifier NSView's own -initWithCoder: decodes, so
+every view of a xib but its custom views had the identifier Interface
+Builder gave it. Logbook's UDQuantityField, an amount and its unit in one
+custom view, names its number field and unit box by its identifier; on
+GNUstep they had none, and its self-test found none of the 29 on its
+forms. `GSXib5KeyedUnarchiver/customViewIdentifier.m` in libs-gui's suite
+loads a window with a custom view of no class and one of NSControl: both
+identifier checks fail without the fix and pass with it, and the whole gui
+suite passes with it.
+
 Added on 2026-10-22 for Logbook's desktop app: `thread-exit-after-atexit`.
 A thread GNUstep knows of that ends while the process exits, after
 NSValue's +atExit has destroyed its placeholders, is cleaned up by
@@ -1133,6 +1160,8 @@ among it, passes with this gui and fails without it.
 | `kvo-nested-value-kept` | libs-base | test | not sent yet | (none: Logbook uses it from here) |
 | `tablecolumn-binds-table` | libs-gui | test | not sent yet | (none: Logbook uses it from here) |
 | `thread-exit-after-atexit` | libs-base | test | not sent yet | (none: Logbook uses it from here) |
+| `xib-custom-view-identifier` | libs-gui | test | not sent yet | (none: Logbook uses it from here) |
+| `locale-currency-name` | libs-base | test | not sent yet | (none: Logbook uses it from here) |
 
 Re-run that check before sending anything: `Scripts/apply-patches.sh` on a
 fresh checkout is the quickest form of it.
