@@ -1,0 +1,104 @@
+From 842b979b8f057a6b59ffc669c44686bf263a3e8d Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Thu, 22 Oct 2026 06:32:08 +0000
+Subject: [PATCH] Name a currency in a locale's language
+
+-[NSLocale displayNameForKey:value:] answered nil for NSLocaleCurrencyCode
+and NSLocaleCurrencySymbol, which it did not handle: a program could not
+say "Japanese Yen" for JPY, or "$" for USD, as it can on macOS, where an
+application lists currencies by the names the user reads.
+
+Take both from ICU's ucurr_getName, the long name and the symbol in the
+locale's language.  ICU answers with the code itself, and a default
+warning, for a code it knows nothing of; answer nil then, as macOS does.
+
+Tests/base/NSLocale/currencyName.m names JPY and EUR in en_US and USD in
+fr_FR, says USD's symbol, and names no XYZ; the first four fail without
+the change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/NSLocale.m                  | 21 +++++++++++++++++
+ Tests/base/NSLocale/currencyName.m | 38 ++++++++++++++++++++++++++++++
+ 2 files changed, 59 insertions(+)
+ create mode 100644 Tests/base/NSLocale/currencyName.m
+
+diff --git a/Source/NSLocale.m b/Source/NSLocale.m
+index c46ef2c..3deb782 100644
+--- a/Source/NSLocale.m
++++ b/Source/NSLocale.m
+@@ -683,6 +683,27 @@ static NSRecursiveLock *classLock = nil;
+         (UChar *)buffer, sizeof(buffer)/sizeof(unichar),
+         &status);
+     }
++  else if ([key isEqualToString: NSLocaleCurrencyCode]
++    || [key isEqualToString: NSLocaleCurrencySymbol])
++    {
++      unichar		code[4];
++      const UChar	*name;
++      UBool		isChoiceFormat = 0;
++
++      if ([value length] != 3)
++        return nil;
++      [value getCharacters: code range: NSMakeRange(0, 3)];
++      code[3] = 0;
++      name = ucurr_getName((const UChar *)code, locale,
++        [key isEqualToString: NSLocaleCurrencyCode]
++        ? UCURR_LONG_NAME : UCURR_SYMBOL_NAME,
++        &isChoiceFormat, &length, &status);
++      /* ICU answers with the code itself for a currency it does not know. */
++      if (U_FAILURE(status) || status == U_USING_DEFAULT_WARNING)
++        return nil;
++      return [NSString stringWithCharacters: (const unichar *)name
++                                     length: (NSUInteger)length];
++    }
+   else if ([key isEqualToString: NSLocaleCalendar])
+     {
+       keyword = ICUCalendarKeyword;
+diff --git a/Tests/base/NSLocale/currencyName.m b/Tests/base/NSLocale/currencyName.m
+new file mode 100644
+index 0000000..96a15e2
+--- /dev/null
++++ b/Tests/base/NSLocale/currencyName.m
+@@ -0,0 +1,38 @@
++/* A locale names a currency, and says its symbol, in its own language. */
++#import <Foundation/NSAutoreleasePool.h>
++#import <Foundation/NSLocale.h>
++#import "ObjectTesting.h"
++
++#if	defined(GS_USE_ICU)
++#define	NSLOCALE_SUPPORTED	GS_USE_ICU
++#else
++#define	NSLOCALE_SUPPORTED	1 /* Assume Apple support */
++#endif
++
++int main(void)
++{
++  START_SET("NSLocale currency names")
++
++  NSLocale	*english;
++  NSLocale	*french;
++
++  if (!NSLOCALE_SUPPORTED)
++    SKIP("NSLocale not supported\nThe ICU library was not available when GNUstep-base was built")
++
++  english = AUTORELEASE([[NSLocale alloc] initWithLocaleIdentifier: @"en_US"]);
++  french = AUTORELEASE([[NSLocale alloc] initWithLocaleIdentifier: @"fr_FR"]);
++  PASS_EQUAL(([english displayNameForKey: NSLocaleCurrencyCode value: @"JPY"]),
++    @"Japanese Yen", "en_US names JPY")
++  PASS_EQUAL(([english displayNameForKey: NSLocaleCurrencyCode value: @"EUR"]),
++    @"Euro", "en_US names EUR")
++  PASS_EQUAL(([french displayNameForKey: NSLocaleCurrencyCode value: @"USD"]),
++    @"dollar des États-Unis", "fr_FR names USD in French")
++  PASS_EQUAL(([english displayNameForKey: NSLocaleCurrencySymbol value: @"USD"]),
++    @"$", "en_US says the symbol of USD")
++
++  PASS([english displayNameForKey: NSLocaleCurrencyCode value: @"XYZ"] == nil,
++    "no currency is named by a code of none")
++
++  END_SET("NSLocale currency names")
++  return 0;
++}
+-- 
+2.43.0
+
