@@ -1,0 +1,124 @@
+From 6a895548337b890b89387892dc0aa0019a3382bc Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Mon, 26 Oct 2026 18:41:30 +0000
+Subject: [PATCH] NSBundle: an application's executable found on Windows (.exe)
+
+-executablePath looked for <name>, and on Windows, when that was not
+there, was meant to look for <name>.dll, a library bundle's or a
+framework's binary. That fallback never ran: it was guarded by
+[name pathExtension] == nil, and -pathExtension answers an empty string,
+not nil, for a name without an extension. And an application's binary is
+<name>.exe, which was not tried at all: for an application bundle other
+than the main one, -executablePath answered a path to a file that does
+not exist, and code that starts another application by its bundle (a
+launcher) found nothing to start. The guard checks for an empty
+extension, and .exe is tried after .dll.
+
+Tests/base/NSBundle/executableExe.m makes an application bundle whose
+executable is Foo.exe and asks for its executable path; it is skipped
+off Windows. On Windows (MSYS2 CLANG64) it fails without this change and
+passes with it; Tests/base/NSBundle passes (89 tests).
+---
+ Source/NSBundle.m                   | 33 ++++++++++++++--------
+ Tests/base/NSBundle/executableExe.m | 44 +++++++++++++++++++++++++++++
+ 2 files changed, 65 insertions(+), 12 deletions(-)
+ create mode 100644 Tests/base/NSBundle/executableExe.m
+
+diff --git a/Source/NSBundle.m b/Source/NSBundle.m
+index 5c720db..3a17c4f 100644
+--- a/Source/NSBundle.m
++++ b/Source/NSBundle.m
+@@ -918,19 +918,28 @@ bundle_object_name(NSString *path, NSString* executable)
+     return path0;
+ #if defined(_WIN32)
+   /* If we couldn't find the binary, and we are on windows, and the name
+-   * has no path extension, then let's try looking for a dll.
++   * has no path extension, then let's try looking for a dll, and for an
++   * application's exe.  (-pathExtension is empty, not nil, for a name
++   * without one.)
+    */
+-  if ([name pathExtension] == nil)
+-    {
+-      if ([mgr isReadableFileAtPath:
+-	[path2 stringByAppendingPathExtension: @"dll"]] == YES)
+-	return [path2 stringByAppendingPathExtension: @"dll"];
+-      else if ([mgr isReadableFileAtPath:
+-	[path1 stringByAppendingPathExtension: @"dll"]] == YES)
+-	return [path1 stringByAppendingPathExtension: @"dll"];
+-      else if ([mgr isReadableFileAtPath:
+-	[path0 stringByAppendingPathExtension: @"dll"]] == YES)
+-	return [path0 stringByAppendingPathExtension: @"dll"];
++  if ([[name pathExtension] length] == 0)
++    {
++      NSEnumerator	*e = [[NSArray arrayWithObjects: @"dll", @"exe", nil]
++	objectEnumerator];
++      NSString		*ext;
++
++      while ((ext = [e nextObject]) != nil)
++	{
++	  if ([mgr isReadableFileAtPath:
++	    [path2 stringByAppendingPathExtension: ext]] == YES)
++	    return [path2 stringByAppendingPathExtension: ext];
++	  else if ([mgr isReadableFileAtPath:
++	    [path1 stringByAppendingPathExtension: ext]] == YES)
++	    return [path1 stringByAppendingPathExtension: ext];
++	  else if ([mgr isReadableFileAtPath:
++	    [path0 stringByAppendingPathExtension: ext]] == YES)
++	    return [path0 stringByAppendingPathExtension: ext];
++	}
+     }
+ #endif
+   return path0;
+diff --git a/Tests/base/NSBundle/executableExe.m b/Tests/base/NSBundle/executableExe.m
+new file mode 100644
+index 0000000..07142f9
+--- /dev/null
++++ b/Tests/base/NSBundle/executableExe.m
+@@ -0,0 +1,44 @@
++/* On Windows an application's executable is <name>.exe: -executablePath
++   finds it, as it finds a library bundle's <name>.dll. */
++#import "Testing.h"
++#import "ObjectTesting.h"
++#import <Foundation/NSBundle.h>
++#import <Foundation/NSDictionary.h>
++#import <Foundation/NSFileManager.h>
++#import <Foundation/NSProcessInfo.h>
++
++int main()
++{
++  START_SET("NSBundle executablePath of an application on Windows")
++#if defined(_WIN32)
++  NSAutoreleasePool	*arp = [NSAutoreleasePool new];
++  NSFileManager		*mgr = [NSFileManager defaultManager];
++  NSString		*dir = [NSTemporaryDirectory()
++    stringByAppendingPathComponent: [[NSProcessInfo processInfo]
++      globallyUniqueString]];
++  NSString		*app = [dir stringByAppendingPathComponent: @"Foo.app"];
++  NSString		*res = [app stringByAppendingPathComponent: @"Resources"];
++  NSString		*exe = [app stringByAppendingPathComponent: @"Foo.exe"];
++  NSDictionary		*info = [NSDictionary dictionaryWithObject: @"Foo"
++					      forKey: @"NSExecutable"];
++  NSBundle		*bundle;
++
++  [mgr createDirectoryAtPath: res withIntermediateDirectories: YES
++    attributes: nil error: NULL];
++  [info writeToFile: [res stringByAppendingPathComponent: @"Info-gnustep.plist"]
++	 atomically: NO];
++  [mgr createFileAtPath: exe contents: [NSData data] attributes: nil];
++
++  bundle = [NSBundle bundleWithPath: app];
++  PASS(bundle != nil, "the application is a bundle");
++  PASS_EQUAL([[bundle executablePath] lastPathComponent], @"Foo.exe",
++    "its executable path is its .exe");
++
++  [mgr removeItemAtPath: dir error: NULL];
++  [arp release];
++#else
++  SKIP("an application's executable has no .exe here")
++#endif
++  END_SET("NSBundle executablePath of an application on Windows")
++  return 0;
++}
+-- 
+2.43.0
+

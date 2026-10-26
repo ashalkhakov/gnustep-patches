@@ -1025,6 +1025,22 @@ whole suite passes 15250, the two files that fail
 (NSAutoreleasePool/dispatch.m, GSMime/encoded-word-stack.m) failing the
 same without it.
 
+Added on 2026-10-26 for FreeCoreData's Windows installer, whose launcher
+starts Model Builder and the samples: `nsbundle-windows-exe` and
+`nstask-windows-gui-shown`. On Windows -[NSBundle executablePath] answered
+<name> for another application's bundle, a file that does not exist: its
+.dll fallback was guarded by `[name pathExtension] == nil`, which an empty
+extension never is, and .exe was never tried. And NSTask started every
+program with STARTF_USESHOWWINDOW and SW_HIDE (meant for consoles), which
+Windows applies to a GUI program's first window too: an app a launcher
+started ran with no window. The first now tries .dll and .exe when the name
+has no extension; the second sets the show state only for a program whose
+PE header says it is not a GUI program. `NSBundle/executableExe.m` and
+`NSTask/guiShown.m` (with a helper built as a console and as a GUI program)
+in libs-base's suite: on Windows, MSYS2 CLANG64, with every libs-base patch
+here applied to master 1acaaef, each fails without its fix and passes with
+it, and NSBundle (89) and NSTask (88) pass; on Linux both are skipped and
+NSTask passes (92).
 Added on 2026-10-22 for Logbook's desktop app: `xib-custom-view-identifier`.
 A custom view of a xib is made by NSCustomView (GSNibLoading.m), which
 gives the view its frame, autoresizing, hidden flag, key views and
@@ -1168,6 +1184,8 @@ among it, passes with this gui and fails without it.
 | `thread-exit-after-atexit` | libs-base | test | not sent yet | (none: Logbook uses it from here) |
 | `xib-custom-view-identifier` | libs-gui | test | not sent yet | (none: Logbook uses it from here) |
 | `locale-currency-name` | libs-base | test | not sent yet | (none: Logbook uses it from here) |
+| `nsbundle-windows-exe` | libs-base | test | not sent yet | (none: FreeCoreData's CDLauncher has a workaround until the stack has it) |
+| `nstask-windows-gui-shown` | libs-base | test | not sent yet | (none: FreeCoreData uses it from here) |
 
 Re-run that check before sending anything: `Scripts/apply-patches.sh` on a
 fresh checkout is the quickest form of it.
