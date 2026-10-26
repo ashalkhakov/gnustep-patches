@@ -714,6 +714,12 @@ takes its selected range for the range to replace.
 `NSTextView/insertTextReplacementRange.m` passes 18 of 18 with the fix and
 on AppKit (macOS 15); without it the conformance check fails and the set
 stops at the first -insertText:replacementRange:.  On libs-gui 5c43a94.
+Amended on 2026-10-26: a text view decoded from a nib had no marked range
+set (-initWithCoder: left it {0, 0}, -initWithFrame: sets NSNotFound), so
+it said it had marked text, and with -insertText: now replacing marked
+text everything typed went to its start: SimpleNotes' typing on Linux.
+-initWithCoder: sets it too; two checks on a decoded text view, now 20 of
+20, fail without that line.  On libs-gui d340fc5e2.
 Added on 2026-10-19 for Logbook, which quit when its connect window
 closed and its logbook window opened in the same event:
 `last-window-closed`.  -applicationShouldTerminateAfterLastWindowClosed:

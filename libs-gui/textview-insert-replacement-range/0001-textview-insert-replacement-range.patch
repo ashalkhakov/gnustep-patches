@@ -1,4 +1,4 @@
-From 87be8d556940fe6258fd7482ebe5f1f0b0fb7cd0 Mon Sep 17 00:00:00 2001
+From 208b315dfa0b17f26dfa5a47d50ab1583fe5b879 Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Mon, 19 Oct 2026 16:35:45 +0000
 Subject: [PATCH] NSTextView: conform to NSTextInputClient
@@ -30,16 +30,22 @@ They now exist, as on macOS:
 - -attributedString (an optional method of the protocol) is the text
   storage.
 
-Tests/gui/NSTextView/insertTextReplacementRange.m passes 18 of 18 with
+A text view decoded from a nib had no marked range set: -initWithCoder:
+left _markedRange at {0, 0} where -initWithFrame: sets it to NSNotFound,
+so -hasMarkedText said YES.  With -insertText: now replacing marked text,
+everything typed into such a text view went to its start.  -initWithCoder:
+sets the marked range as -initWithFrame: does.
+
+Tests/gui/NSTextView/insertTextReplacementRange.m passes 20 of 20 with
 this and on AppKit (macOS 15); without it the conformance check fails
 and the rest stop at -insertText:replacementRange: not being recognised.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  Headers/AppKit/NSTextView.h                   |   3 +-
- Source/NSTextView.m                           | 107 +++++++++++++-
- .../NSTextView/insertTextReplacementRange.m   | 137 ++++++++++++++++++
- 3 files changed, 241 insertions(+), 6 deletions(-)
+ Source/NSTextView.m                           | 108 ++++++++++++-
+ .../NSTextView/insertTextReplacementRange.m   | 149 ++++++++++++++++++
+ 3 files changed, 254 insertions(+), 6 deletions(-)
  create mode 100644 Tests/gui/NSTextView/insertTextReplacementRange.m
 
 diff --git a/Headers/AppKit/NSTextView.h b/Headers/AppKit/NSTextView.h
@@ -64,10 +70,18 @@ index 9374dc089..2c84edff4 100644
    /* These attributes are shared by all text views attached to a layout
    manager. Any changes must be replicated in all those text views. */
 diff --git a/Source/NSTextView.m b/Source/NSTextView.m
-index fb42d939d..3367b8207 100644
+index fb42d939d..45c0dd620 100644
 --- a/Source/NSTextView.m
 +++ b/Source/NSTextView.m
-@@ -2179,15 +2179,61 @@ here. */
+@@ -980,6 +980,7 @@ that makes decoding and encoding compatible with the old code.
+   if (!self)
+     return nil;
+ 
++  _markedRange = NSMakeRange(NSNotFound, 0);
+   if ([aDecoder allowsKeyedCoding])
+     {  
+       if ([aDecoder containsValueForKey: @"NSDelegate"])
+@@ -2179,15 +2180,61 @@ here. */
  - (void) setMarkedText: (id)aString 
           selectedRange: (NSRange)selRange
  {
@@ -84,7 +98,8 @@ index fb42d939d..3367b8207 100644
    NSAttributedString *as;
 +  NSString *string;
 +  NSRange range;
-+
+ 
+-  _markedRange = selRange;
 +  if (replacementRange.location != NSNotFound)
 +    {
 +      range = replacementRange;
@@ -98,7 +113,10 @@ index fb42d939d..3367b8207 100644
 +      range = [self selectedRange];
 +    }
  
--  _markedRange = selRange;
+-  as = [[NSAttributedString alloc] initWithString: aString
+-                                   attributes: [self markedTextAttributes]];
+-  [self replaceCharactersInRange: selRange
+-        withAttributedString: as];
 +  if ([aString isKindOfClass: [NSAttributedString class]])
 +    {
 +      string = [(NSAttributedString *)aString string];
@@ -107,11 +125,7 @@ index fb42d939d..3367b8207 100644
 +    {
 +      string = aString;
 +    }
- 
--  as = [[NSAttributedString alloc] initWithString: aString
--                                   attributes: [self markedTextAttributes]];
--  [self replaceCharactersInRange: selRange
--        withAttributedString: as];
++
 +  attributes = [NSMutableDictionary dictionaryWithDictionary:
 +    [self typingAttributes]];
 +  [attributes addEntriesFromDictionary: [self markedTextAttributes]];
@@ -134,7 +148,7 @@ index fb42d939d..3367b8207 100644
  }
  
  - (BOOL) hasMarkedText
-@@ -2205,6 +2251,31 @@ here. */
+@@ -2205,6 +2252,31 @@ here. */
    _markedRange = NSMakeRange(NSNotFound, 0);
  }
  
@@ -166,7 +180,7 @@ index fb42d939d..3367b8207 100644
  - (NSArray *) validAttributesForMarkedText
  {
    return [NSArray arrayWithObjects: NSBackgroundColorAttributeName, 
-@@ -2216,6 +2287,16 @@ here. */
+@@ -2216,6 +2288,16 @@ here. */
    return (NSInteger)_textStorage;
  }
  
@@ -183,7 +197,7 @@ index fb42d939d..3367b8207 100644
  - (NSRect) firstRectForCharacterRange: (NSRange)theRange
  {
    NSUInteger rectCount = 0;
-@@ -2270,6 +2351,13 @@ attributes.
+@@ -2270,6 +2352,13 @@ attributes.
  This method is for user changes; see NSTextView_actions.m.
  */
  - (void) insertText: (id)insertString
@@ -197,7 +211,7 @@ index fb42d939d..3367b8207 100644
  {
    NSRange insertRange = [self rangeForUserTextChange];
    NSString *string;
-@@ -2280,6 +2368,14 @@ This method is for user changes; see NSTextView_actions.m.
+@@ -2280,6 +2369,14 @@ This method is for user changes; see NSTextView_actions.m.
        NSBeep();
        return;
      }
@@ -212,7 +226,7 @@ index fb42d939d..3367b8207 100644
  
    if (insertString == nil)
      {
-@@ -2327,6 +2423,7 @@ This method is for user changes; see NSTextView_actions.m.
+@@ -2327,6 +2424,7 @@ This method is for user changes; see NSTextView_actions.m.
  	    withString: insertString];
  	}
      }
@@ -222,10 +236,10 @@ index fb42d939d..3367b8207 100644
  }
 diff --git a/Tests/gui/NSTextView/insertTextReplacementRange.m b/Tests/gui/NSTextView/insertTextReplacementRange.m
 new file mode 100644
-index 000000000..ba8eb577f
+index 000000000..f414a0645
 --- /dev/null
 +++ b/Tests/gui/NSTextView/insertTextReplacementRange.m
-@@ -0,0 +1,137 @@
+@@ -0,0 +1,149 @@
 +/* NSTextView is an NSTextInputClient: -insertText:replacementRange:
 +   replaces the given range, or the marked text or else the selection when
 +   the range's location is NSNotFound, as a user's typing does; marked text
@@ -234,6 +248,7 @@ index 000000000..ba8eb577f
 +#include "Testing.h"
 +
 +#include <Foundation/NSAutoreleasePool.h>
++#include <Foundation/NSKeyedArchiver.h>
 +#include <Foundation/NSString.h>
 +
 +#include <AppKit/NSApplication.h>
@@ -343,6 +358,17 @@ index 000000000..ba8eb577f
 +      PASS(![tv hasMarkedText], "and unmarks it");
 +      PASS(NSEqualRanges([tv selectedRange], NSMakeRange(4, 0)),
 +        "the insertion point is after it");
++
++      /* a text view decoded, as one from a nib is */
++      tv = [NSKeyedUnarchiver unarchiveObjectWithData:
++        [NSKeyedArchiver archivedDataWithRootObject:
++          textView(@"", NSMakeRange(0, 0))]];
++      PASS(![tv hasMarkedText], "a decoded text view has no marked text");
++      [tv setString: @"hello"];
++      [tv setSelectedRange: NSMakeRange(5, 0)];
++      [tv insertText: @" world" replacementRange: none];
++      PASS_EQUAL([tv string], @"hello world",
++        "and inserts at the selection");
 +
 +      tv = textView(@"hello world", NSMakeRange(0, 0));
 +      sub = [tv attributedSubstringForProposedRange: NSMakeRange(6, 100)
