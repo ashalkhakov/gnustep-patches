@@ -1,0 +1,201 @@
+From 81a3740247d7e98e007ef7433aa32d16ecc5a5d8 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Mon, 26 Oct 2026 18:42:32 +0000
+Subject: [PATCH] NSTask: a GUI program started on Windows shows its windows
+
+A task was started with STARTF_USESHOWWINDOW and SW_HIDE, so that a
+console program shows no console window. Windows applies that show state
+to a GUI program's first ShowWindow too, whatever the program asks for:
+an application started by another (a launcher) ran with its window
+hidden, and could only be found in Task Manager. The show state is now
+set only when the program is not a GUI program, which its PE header's
+subsystem says (read directly: no shell32).
+
+Tests/base/NSTask/guiShown.m starts a helper that reports its
+STARTUPINFO, built as a console program and as a GUI program: the first
+is started hidden, the second with no show state. Skipped off Windows.
+---
+ Source/NSTask.m                         | 50 ++++++++++++++++++++--
+ Tests/base/NSTask/Helpers/GNUmakefile   |  9 ++++
+ Tests/base/NSTask/Helpers/startupinfo.c | 17 ++++++++
+ Tests/base/NSTask/guiShown.m            | 55 +++++++++++++++++++++++++
+ 4 files changed, 128 insertions(+), 3 deletions(-)
+ create mode 100644 Tests/base/NSTask/Helpers/startupinfo.c
+ create mode 100644 Tests/base/NSTask/guiShown.m
+
+diff --git a/Source/NSTask.m b/Source/NSTask.m
+index d3466c3..ffd862c 100644
+--- a/Source/NSTask.m
++++ b/Source/NSTask.m
+@@ -1082,6 +1082,46 @@ pty_slave(const char* name)
+ @end
+ 
+ #ifdef _WIN32
++/* Whether the program at path is a Windows GUI program: its PE header's
++ * subsystem.  A GUI program creates its own windows, and the show state a
++ * parent puts in STARTUPINFO applies to the first of them.
++ */
++static BOOL
++GSIsWindowsGUIProgram(const wchar_t *path)
++{
++  HANDLE		file;
++  IMAGE_DOS_HEADER	dos;
++  DWORD			signature;
++  BYTE			headers[sizeof(IMAGE_FILE_HEADER) + 70];
++  DWORD			got;
++  BOOL			gui = NO;
++
++  file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
++    NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
++  if (file == INVALID_HANDLE_VALUE)
++    {
++      return NO;
++    }
++  if (ReadFile(file, &dos, sizeof(dos), &got, NULL) && got == sizeof(dos)
++    && dos.e_magic == IMAGE_DOS_SIGNATURE
++    && SetFilePointer(file, dos.e_lfanew, NULL, FILE_BEGIN)
++      != INVALID_SET_FILE_POINTER
++    && ReadFile(file, &signature, sizeof(signature), &got, NULL)
++    && got == sizeof(signature) && signature == IMAGE_NT_SIGNATURE
++    && ReadFile(file, headers, sizeof(headers), &got, NULL)
++    && got == sizeof(headers))
++    {
++      /* Subsystem is at offset 68 of the optional header, PE32 and PE32+.  */
++      WORD	subsystem;
++
++      memcpy(&subsystem, headers + sizeof(IMAGE_FILE_HEADER) + 68,
++	sizeof(subsystem));
++      gui = (subsystem == IMAGE_SUBSYSTEM_WINDOWS_GUI);
++    }
++  CloseHandle(file);
++  return gui;
++}
++
+ @implementation NSConcreteWindowsTask
+ 
+ BOOL
+@@ -1418,10 +1458,14 @@ quotedFromString(NSString *aString)
+     }
+   hErr = start_info.hStdError;
+ 
+-  /* Tell the system not to show a window for the subtask.
++  /* Tell the system not to show a window for the subtask, unless it is a
++   * GUI program: then the show state would hide its first window.
+    */
+-  start_info.wShowWindow = SW_HIDE;
+-  start_info.dwFlags |= STARTF_USESHOWWINDOW;
++  if (GSIsWindowsGUIProgram(wexecutable) == NO)
++    {
++      start_info.wShowWindow = SW_HIDE;
++      start_info.dwFlags |= STARTF_USESHOWWINDOW;
++    }
+ 
+   /* Make the handles inheritable only temporarily while launching the
+    * child task.  This section must be lock protected so we don't have
+diff --git a/Tests/base/NSTask/Helpers/GNUmakefile b/Tests/base/NSTask/Helpers/GNUmakefile
+index a337954..667ee44 100644
+--- a/Tests/base/NSTask/Helpers/GNUmakefile
++++ b/Tests/base/NSTask/Helpers/GNUmakefile
+@@ -23,6 +23,15 @@ testenvvar_OBJC_FILES = testenvvar.m
+ 
+ testsimple_OBJC_FILES = testsimple.m
+ 
++# Windows: how a task was started (STARTUPINFO), as a console program and
++# as a GUI program (guiShown.m).
++ifneq ($(filter mingw% windows%,$(GNUSTEP_TARGET_OS)),)
++TOOL_NAME += startupinfo startupinfogui
++startupinfo_C_FILES = startupinfo.c
++startupinfogui_C_FILES = startupinfo.c
++startupinfogui_LDFLAGS += -mwindows
++endif
++
+ -include GNUmakefile.preamble
+ include $(GNUSTEP_MAKEFILES)/tool.make
+ -include GNUmakefile.postamble
+diff --git a/Tests/base/NSTask/Helpers/startupinfo.c b/Tests/base/NSTask/Helpers/startupinfo.c
+new file mode 100644
+index 0000000..1a17a75
+--- /dev/null
++++ b/Tests/base/NSTask/Helpers/startupinfo.c
+@@ -0,0 +1,17 @@
++/* Says how it was started: whether its parent set a show state in
++   STARTUPINFO (STARTF_USESHOWWINDOW), and which (wShowWindow). Built twice
++   on Windows, as a console program and as a GUI program. */
++#include <windows.h>
++#include <stdio.h>
++
++int
++main(void)
++{
++  STARTUPINFOW	si;
++
++  GetStartupInfoW(&si);
++  printf("%d %u\n", (si.dwFlags & STARTF_USESHOWWINDOW) ? 1 : 0,
++    (unsigned)si.wShowWindow);
++  fflush(stdout);
++  return 0;
++}
+diff --git a/Tests/base/NSTask/guiShown.m b/Tests/base/NSTask/guiShown.m
+new file mode 100644
+index 0000000..3345078
+--- /dev/null
++++ b/Tests/base/NSTask/guiShown.m
+@@ -0,0 +1,55 @@
++/* On Windows a task is started with its window hidden (SW_HIDE), so that a
++   console program shows no console; but a GUI program's first window would
++   take that show state too.  A GUI program is started without one. */
++#import <Foundation/NSTask.h>
++#import <Foundation/NSFileHandle.h>
++#import <Foundation/NSFileManager.h>
++#import <Foundation/NSData.h>
++#import <Foundation/NSString.h>
++#import <Foundation/NSCharacterSet.h>
++#import <Foundation/NSAutoreleasePool.h>
++#import "ObjectTesting.h"
++
++#if defined(_WIN32)
++static NSString *
++startedAs(NSString *helper)
++{
++  NSString	*path = [[[[[NSFileManager defaultManager] currentDirectoryPath]
++    stringByAppendingPathComponent: @"Helpers"]
++    stringByAppendingPathComponent: @"obj"]
++    stringByAppendingPathComponent: helper];
++  NSTask	*task = AUTORELEASE([[NSTask alloc] init]);
++  NSPipe	*pipe = [NSPipe pipe];
++  NSData	*data;
++
++  [task setLaunchPath: path];
++  [task setStandardOutput: pipe];
++  [task launch];
++  data = [[pipe fileHandleForReading] readDataToEndOfFile];
++  [task waitUntilExit];
++  /* Its first line, without the \r a console's text mode adds. */
++  return [[[AUTORELEASE([[NSString alloc] initWithData: data
++    encoding: NSASCIIStringEncoding]) componentsSeparatedByString: @"\n"]
++    objectAtIndex: 0] stringByTrimmingCharactersInSet:
++    [NSCharacterSet whitespaceAndNewlineCharacterSet]];
++}
++#endif
++
++int main()
++{
++  START_SET("NSTask show state on Windows")
++#if defined(_WIN32)
++  NSAutoreleasePool	*arp = [NSAutoreleasePool new];
++  NSString		*console = startedAs(@"startupinfo.exe");
++  NSString		*gui = startedAs(@"startupinfogui.exe");
++
++  /* SW_HIDE is 0 */
++  PASS_EQUAL(console, @"1 0", "a console program is started hidden");
++  PASS([gui hasPrefix: @"0 "], "a GUI program is started with no show state");
++  [arp release];
++#else
++  SKIP("STARTUPINFO is Windows'")
++#endif
++  END_SET("NSTask show state on Windows")
++  return 0;
++}
+-- 
+2.43.0
+
