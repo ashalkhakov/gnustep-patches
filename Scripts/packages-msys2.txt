@@ -14,6 +14,7 @@ clang
 lld
 cmake
 ninja
+meson
 pkgconf
 gnutls
 libffi
@@ -23,7 +24,9 @@ libxml2
 libxslt
 zlib
 curl
+# cairo's dependencies: cairo itself is built (build-gnustep.sh's cairo).
 cairo
+pixman
 freetype
 fontconfig
 libjpeg-turbo
