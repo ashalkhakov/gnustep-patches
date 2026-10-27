@@ -1047,9 +1047,13 @@ GSFileHandle took a standard input to be a console's whatever it was, and
 peeked at a pipe's with PeekConsoleInput, which failed; the failure did
 not end the read, so it was retried and logged without end. A standard
 stream is a console's now only when GetFileType says so, and a failed peek
-ends the read. `Tests/base/NSFileHandle/stdinPipe.m` (a helper reading its
-piped stdin): on Windows, MSYS2 CLANG64, both checks fail without the fix
-and pass with it; the NSFileHandle tests pass (41). Its commit says "Patch
+ends the read. Extended on 2026-10-27: such a stream is also put in binary
+mode, as the C runtime opens the standard streams in text mode and each
+`\n` written to a piped stdout came out as `\r\n` (a debug adapter's
+Content-Length frames never arrived whole). `Tests/base/NSFileHandle/stdinPipe.m`
+(a helper reading its piped stdin and writing it back to its piped stdout):
+on Windows, MSYS2 CLANG64, the bytes check fails without the fix and both
+pass with it; the NSFileHandle tests pass (41). Its commit says "Patch
 done with help of AI." and carries no Claude trailer.
 
 Added on 2026-10-27 for SimpleNotes on Windows, whose Sign In said the

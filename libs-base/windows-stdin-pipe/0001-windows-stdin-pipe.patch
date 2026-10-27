@@ -1,4 +1,4 @@
-From eae73a94d9d14b18c0d2dbe930e50e6bcb47124b Mon Sep 17 00:00:00 2001
+From 28022213bdc8e3ee14a3c7d15f6cff5006ce41db Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Tue, 27 Oct 2026 19:33:10 +0500
 Subject: [PATCH] win32: a standard stream is a console's only when it is a
@@ -18,48 +18,66 @@ character device; a pipe or a file is read and written as any other.
 And a failed console peek ends the read with its error instead of
 leaving it pending.
 
+Such a stream is also put in binary mode.  The C runtime opens the
+standard streams in text mode, and a handle writes with write(), so each
+\n written to a piped standard output came out as \r\n: a debug adapter's
+Content-Length frames ("...\r\n\r\n") arrived as "...\r\r\n\r\r\n" and
+were never whole.
+
 Tests/base/NSFileHandle/stdinPipe.m runs a helper (Helpers/stdinread)
-that reads its standard input in the background, with that input a pipe:
-on Windows (MSYS2 CLANG64) both checks fail without the change and pass
-with it, and the NSFileHandle tests all pass (41).
+that reads its standard input in the background, with that input a pipe,
+and writes what it read back through its standard output, also a pipe:
+on Windows (MSYS2 CLANG64) the first check fails without the change
+(first nothing is read; with the reading fixed alone, the line ends come
+back changed) and both pass with it, and the NSFileHandle tests all pass
+(41).
 
 Patch done with help of AI.
 ---
- Source/win32/GSFileHandle.m                  | 19 +++++--
+ Source/win32/GSFileHandle.m                  | 28 ++++++++--
  Tests/base/NSFileHandle/GNUmakefile.preamble |  4 ++
  Tests/base/NSFileHandle/Helpers/GNUmakefile  | 12 +++++
- Tests/base/NSFileHandle/Helpers/stdinread.m  | 50 ++++++++++++++++++
- Tests/base/NSFileHandle/stdinPipe.m          | 54 ++++++++++++++++++++
- 5 files changed, 136 insertions(+), 3 deletions(-)
+ Tests/base/NSFileHandle/Helpers/stdinread.m  | 49 +++++++++++++++++
+ Tests/base/NSFileHandle/stdinPipe.m          | 57 ++++++++++++++++++++
+ 5 files changed, 147 insertions(+), 3 deletions(-)
  create mode 100644 Tests/base/NSFileHandle/GNUmakefile.preamble
  create mode 100644 Tests/base/NSFileHandle/Helpers/GNUmakefile
  create mode 100644 Tests/base/NSFileHandle/Helpers/stdinread.m
  create mode 100644 Tests/base/NSFileHandle/stdinPipe.m
 
 diff --git a/Source/win32/GSFileHandle.m b/Source/win32/GSFileHandle.m
-index 08c914e..5e43173 100644
+index 08c914e..6285c67 100644
 --- a/Source/win32/GSFileHandle.m
 +++ b/Source/win32/GSFileHandle.m
-@@ -1070,6 +1070,18 @@ - (id) initForUpdatingAtPath: (NSString*)path
+@@ -1070,6 +1070,27 @@ - (id) initForUpdatingAtPath: (NSString*)path
      }
  }
  
 +/* A standard stream that is a console's (a character device): one that is
 + * a pipe or a file (redirected, or a child's that a parent gave it) is
-+ * read and written as any other.
++ * read and written as any other, and as bytes.  The C runtime opens the
++ * standard streams in text mode, which writes each \n as \r\n and reads
++ * each \r\n as \n: a protocol spoken over them (one framed by
++ * Content-Length, as a language server's or a debug adapter's) would not
++ * be what was sent.
 + */
 +static BOOL
 +isConsole(int descriptor)
 +{
 +  HANDLE	h = (HANDLE)_get_osfhandle(descriptor);
 +
-+  return h != INVALID_HANDLE_VALUE && GetFileType(h) == FILE_TYPE_CHAR;
++  if (h != INVALID_HANDLE_VALUE && GetFileType(h) == FILE_TYPE_CHAR)
++    {
++      return YES;
++    }
++  _setmode(descriptor, O_BINARY);
++  return NO;
 +}
 +
  - (id) initWithStandardError
  {
    if (fh_stderr != nil)
-@@ -1083,7 +1095,7 @@ - (id) initWithStandardError
+@@ -1083,7 +1104,7 @@ - (id) initWithStandardError
        if (self)
          {
            readOK = NO;
@@ -68,7 +86,7 @@ index 08c914e..5e43173 100644
          }
      }
    return self;
-@@ -1102,7 +1114,7 @@ - (id) initWithStandardInput
+@@ -1102,7 +1123,7 @@ - (id) initWithStandardInput
        if (self)
          {
            writeOK = NO;
@@ -77,7 +95,7 @@ index 08c914e..5e43173 100644
            isStandardInput = YES;
          }
      }
-@@ -1122,7 +1134,7 @@ - (id) initWithStandardOutput
+@@ -1122,7 +1143,7 @@ - (id) initWithStandardOutput
        if (self)
          {
            readOK = NO;
@@ -86,7 +104,7 @@ index 08c914e..5e43173 100644
          }
      }
    return self;
-@@ -2243,6 +2255,7 @@ - (void) receivedEventRead
+@@ -2243,6 +2264,7 @@ - (void) receivedEventRead
                [readInfo setObject: s forKey: GSFileHandleNotificationError];
  
                NSLog(@"%@", s);
@@ -124,16 +142,16 @@ index 0000000..97555df
 +-include GNUmakefile.postamble
 diff --git a/Tests/base/NSFileHandle/Helpers/stdinread.m b/Tests/base/NSFileHandle/Helpers/stdinread.m
 new file mode 100644
-index 0000000..a6b0842
+index 0000000..30497c6
 --- /dev/null
 +++ b/Tests/base/NSFileHandle/Helpers/stdinread.m
-@@ -0,0 +1,50 @@
+@@ -0,0 +1,49 @@
 +/* Reads its standard input in the background, as a program that serves
-+ * requests on it does, and writes what it read to its standard output: 0
-+ * when something was read, 1 when nothing came within five seconds.
++ * requests on it does, and writes what it read to its standard output,
++ * both through NSFileHandle: 0 when something was read, 1 when nothing came
++ * within five seconds.
 + */
 +#import <Foundation/Foundation.h>
-+#include <stdio.h>
 +
 +@interface	Reader : NSObject
 +{
@@ -172,22 +190,23 @@ index 0000000..a6b0842
 +    }
 +  if ([reader->got length] > 0)
 +    {
-+      fwrite([reader->got bytes], 1, [reader->got length], stdout);
-+      fflush(stdout);
++      [[NSFileHandle fileHandleWithStandardOutput] writeData: reader->got];
 +    }
 +  [arp release];
 +  return [reader->got length] > 0 ? 0 : 1;
 +}
 diff --git a/Tests/base/NSFileHandle/stdinPipe.m b/Tests/base/NSFileHandle/stdinPipe.m
 new file mode 100644
-index 0000000..6f6232e
+index 0000000..121ce6d
 --- /dev/null
 +++ b/Tests/base/NSFileHandle/stdinPipe.m
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,57 @@
 +/* A program whose standard input is a pipe (a server a parent talks to over
-+ * one) reads it in the background as any other.  On Windows the standard
++ * one) reads it in the background as any other, and what it writes to a
++ * standard output that is a pipe is what it wrote.  On Windows the standard
 + * input was taken to be a console's whatever it was, and a pipe's could not
-+ * be read: peeking at it as a console failed, again and again.
++ * be read: peeking at it as a console failed, again and again.  And the
++ * standard streams were in text mode, each \n written becoming \r\n.
 + */
 +#import <Foundation/NSTask.h>
 +#import <Foundation/NSFileHandle.h>
@@ -224,14 +243,15 @@ index 0000000..6f6232e
 +  [task setStandardOutput: output];
 +  [task launch];
 +  [[input fileHandleForWriting] writeData:
-+    [@"hello" dataUsingEncoding: NSASCIIStringEncoding]];
++    [@"hello\r\n\r\nworld\n" dataUsingEncoding: NSASCIIStringEncoding]];
 +  [[input fileHandleForWriting] closeFile];
 +  data = [[output fileHandleForReading] readDataToEndOfFile];
 +  [task waitUntilExit];
 +  read = AUTORELEASE([[NSString alloc] initWithData: data
 +    encoding: NSASCIIStringEncoding]);
 +
-+  PASS_EQUAL(read, @"hello", "what was written to its pipe is read")
++  PASS_EQUAL(read, @"hello\r\n\r\nworld\n",
++    "what was written to its pipe is read, and written back, byte for byte")
 +  PASS([task terminationStatus] == 0, "and it ends as having read it")
 +
 +  END_SET("NSFileHandle standard input from a pipe")
