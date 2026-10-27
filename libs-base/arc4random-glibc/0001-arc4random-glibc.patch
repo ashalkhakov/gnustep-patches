@@ -1,32 +1,41 @@
-From 54934964aaa1dd80476a4c173c23522906d1f809 Mon Sep 17 00:00:00 2001
+From 284939b2af603ac558a37b83b78ae2d580cbcdd6 Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Tue, 13 Oct 2026 12:23:54 +0500
-Subject: [PATCH] Provide arc4random() and its companions where glibc has none
+Subject: [PATCH] Provide arc4random() and its companions where the C library
+ has none
 
 glibc has had arc4random(), arc4random_uniform() and arc4random_buf()
-only since 2.36 (2022).  Code written for Apple's C library or a BSD's
-calls them freely, and on an older glibc, such as Ubuntu 22.04's 2.35
-(the oldest LTS still supported, which AppImages are built on so they
-run on older systems), it builds with an implicit declaration and then
-fails to link.
+only since 2.36 (2022), and Windows' C runtime has none of them.  Code
+written for Apple's C library or a BSD's calls them freely, and on an
+older glibc, such as Ubuntu 22.04's 2.35 (the oldest LTS still
+supported, which AppImages are built on so they run on older systems),
+it builds with an implicit declaration and then fails to link; on
+Windows (MSYS2 CLANG64) it does not build at all.
 
-On such a glibc the base library now declares them (GSArc4Random.h,
-imported by NSObjCRuntime.h, so with Foundation) and provides them in
-Source/Additions/GSArc4Random.c: bytes from getrandom(), or /dev/urandom
-on a kernel without it, and arc4random_uniform() without modulo bias.
-On any other C library, glibc 2.36 and later among them, the header
-declares nothing and the file compiles to nothing.
+Where they are missing the base library now declares them
+(GSArc4Random.h, imported by NSObjCRuntime.h, so with Foundation),
+exported from its DLL on Windows, and provides them in
+Source/Additions/GSArc4Random.c: bytes from getrandom(), or
+/dev/urandom on a kernel without it, on glibc; from the C runtime's
+rand_s() (the system's generator) on Windows; and arc4random_uniform()
+without modulo bias.  On any other C library, glibc 2.36 and later
+among them, the header declares nothing and the file compiles to
+nothing.
 
 The test calls the three functions through Foundation: on glibc 2.35 it
-fails to link without this change and passes with it.
+fails to link without this change and passes with it; on Windows it
+fails to build without it and passes with it, and the Functions suite
+passes.
+
+Patch done with help of AI.
 ---
  Headers/Foundation/NSObjCRuntime.h |   1 +
- Headers/GNUstepBase/GSArc4Random.h |  51 +++++++++++++
+ Headers/GNUstepBase/GSArc4Random.h |  54 +++++++++++
  Source/Additions/GNUmakefile       |   1 +
- Source/Additions/GSArc4Random.c    | 114 +++++++++++++++++++++++++++++
+ Source/Additions/GSArc4Random.c    | 148 +++++++++++++++++++++++++++++
  Source/GNUmakefile                 |   1 +
- Tests/base/Functions/arc4random.m  |  67 +++++++++++++++++
- 6 files changed, 235 insertions(+)
+ Tests/base/Functions/arc4random.m  |  67 +++++++++++++
+ 6 files changed, 272 insertions(+)
  create mode 100644 Headers/GNUstepBase/GSArc4Random.h
  create mode 100644 Source/Additions/GSArc4Random.c
  create mode 100644 Tests/base/Functions/arc4random.m
@@ -45,10 +54,10 @@ index d30bb96..ddfa1fd 100644
  #include <limits.h>
 diff --git a/Headers/GNUstepBase/GSArc4Random.h b/Headers/GNUstepBase/GSArc4Random.h
 new file mode 100644
-index 0000000..0784aa2
+index 0000000..3d72688
 --- /dev/null
 +++ b/Headers/GNUstepBase/GSArc4Random.h
-@@ -0,0 +1,51 @@
+@@ -0,0 +1,54 @@
 +/** arc4random() and its companions where the C library has none
 +   Copyright (C) 2026 Free Software Foundation, Inc.
 +
@@ -76,32 +85,35 @@ index 0000000..0784aa2
 +
 +#include <stdint.h>
 +#include <stdlib.h>
++#include <GNUstepBase/GSVersionMacros.h>
 +
 +/* glibc has had arc4random(), arc4random_uniform() and arc4random_buf()
-+ * only since 2.36; code written for Apple's or a BSD's C library calls them
-+ * freely.  Before that, the base library provides them.
++ * only since 2.36, and Windows' C runtime has none of them; code written
++ * for Apple's or a BSD's C library calls them freely.  Where they are
++ * missing, the base library provides them.
 + */
-+#if defined(__GLIBC__) \
-+  && (__GLIBC__ < 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ < 36))
++#if (defined(__GLIBC__) \
++  && (__GLIBC__ < 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ < 36))) \
++  || defined(_WIN32)
 +#define GS_PROVIDES_ARC4RANDOM 1
 +
 +#if defined(__cplusplus)
 +extern "C" {
 +#endif
 +
-+extern uint32_t arc4random(void);
-+extern uint32_t arc4random_uniform(uint32_t upper_bound);
-+extern void arc4random_buf(void *buf, size_t nbytes);
++GS_EXPORT uint32_t arc4random(void);
++GS_EXPORT uint32_t arc4random_uniform(uint32_t upper_bound);
++GS_EXPORT void arc4random_buf(void *buf, size_t nbytes);
 +
 +#if defined(__cplusplus)
 +}
 +#endif
 +
-+#endif /* glibc before 2.36 */
++#endif /* glibc before 2.36, or Windows */
 +
 +#endif /* __GSArc4Random_h_GNUSTEP_BASE_INCLUDE */
 diff --git a/Source/Additions/GNUmakefile b/Source/Additions/GNUmakefile
-index 1c7f8b4..0b42e97 100644
+index 8475e1e..717a1f6 100644
 --- a/Source/Additions/GNUmakefile
 +++ b/Source/Additions/GNUmakefile
 @@ -31,6 +31,7 @@ include ../../config.mak
@@ -114,10 +126,10 @@ index 1c7f8b4..0b42e97 100644
  Additions_OBJC_FILES =\
 diff --git a/Source/Additions/GSArc4Random.c b/Source/Additions/GSArc4Random.c
 new file mode 100644
-index 0000000..50f4f0d
+index 0000000..9f3434f
 --- /dev/null
 +++ b/Source/Additions/GSArc4Random.c
-@@ -0,0 +1,114 @@
+@@ -0,0 +1,148 @@
 +/* arc4random() and its companions where the C library has none
 +   Copyright (C) 2026 Free Software Foundation, Inc.
 +
@@ -138,9 +150,41 @@ index 0000000..50f4f0d
 +   Software Foundation, Inc., 31 Milk Street #960789 Boston, MA 02196 USA.
 +   */
 +
++/* Before stdlib.h, for rand_s() on Windows. */
++#define _CRT_RAND_S
++
 +#include "GNUstepBase/GSArc4Random.h"
 +
 +#if defined(GS_PROVIDES_ARC4RANDOM)
++
++#if defined(_WIN32)
++
++#include <string.h>
++
++/* Bytes from the system's generator through the C runtime's rand_s(), four
++ * at a time.  Like the BSDs' arc4random, this cannot fail.
++ */
++void
++arc4random_buf(void *buf, size_t nbytes)
++{
++  unsigned char	*p = buf;
++
++  while (nbytes > 0)
++    {
++      unsigned int	value;
++      size_t		n = nbytes < sizeof(value) ? nbytes : sizeof(value);
++
++      if (rand_s(&value) != 0)
++	{
++	  abort();
++	}
++      memcpy(p, &value, n);
++      p += n;
++      nbytes -= n;
++    }
++}
++
++#else
 +
 +#include <errno.h>
 +#include <fcntl.h>
@@ -200,6 +244,8 @@ index 0000000..50f4f0d
 +    }
 +}
 +
++#endif
++
 +uint32_t
 +arc4random(void)
 +{
@@ -233,10 +279,10 @@ index 0000000..50f4f0d
 +
 +#endif /* GS_PROVIDES_ARC4RANDOM */
 diff --git a/Source/GNUmakefile b/Source/GNUmakefile
-index fd03995..15df3bc 100644
+index 01c199a..67a4502 100644
 --- a/Source/GNUmakefile
 +++ b/Source/GNUmakefile
-@@ -121,6 +121,7 @@ libgnustep-base.def
+@@ -124,6 +124,7 @@ libgnustep-base.def
  
  GNUSTEPBASE_HEADERS = \
  GCObject.h \
@@ -246,7 +292,7 @@ index fd03995..15df3bc 100644
  GSVersionMacros.h \
 diff --git a/Tests/base/Functions/arc4random.m b/Tests/base/Functions/arc4random.m
 new file mode 100644
-index 0000000..0f11137
+index 0000000..ac46781
 --- /dev/null
 +++ b/Tests/base/Functions/arc4random.m
 @@ -0,0 +1,67 @@
@@ -256,7 +302,7 @@ index 0000000..0f11137
 +/* arc4random(), arc4random_uniform() and arc4random_buf(), which code
 + * written for Apple's C library calls freely: declared and present with
 + * Foundation on every C library, the base library providing them where it
-+ * has none (glibc before 2.36).
++ * has none (glibc before 2.36, Windows).
 + */
 +int main(void)
 +{

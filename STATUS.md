@@ -1041,6 +1041,15 @@ in libs-base's suite: on Windows, MSYS2 CLANG64, with every libs-base patch
 here applied to master 1acaaef, each fails without its fix and passes with
 it, and NSBundle (89) and NSTask (88) pass; on Linux both are skipped and
 NSTask passes (92).
+Extended on 2026-10-27 for UDCalc and HomeRow on Windows: `arc4random-glibc`
+now provides arc4random(), arc4random_uniform() and arc4random_buf() on
+Windows too, whose C runtime has none, exported from the base DLL and
+drawn from rand_s(). Its name is kept. `Tests/base/Functions/arc4random.m`
+on Windows, MSYS2 CLANG64, every libs-base patch here applied: fails to
+build without the change, passes with it, and the Functions suite passes.
+Its commit says "Patch done with help of AI." and carries no Claude
+trailer, ready to send upstream.
+
 Added on 2026-10-27 for SimpleNotes on Windows, whose Export as PDF
 aborted on any note with a picture: `pdf-lent-image`, in cairo itself, the
 first patch here that is not GNUstep's. The stack has taken cairo from
@@ -1130,7 +1139,7 @@ among it, passes with this gui and fails without it.
 | `predicate-aggregate-of-nil` | libs-base | test | not sent yet | (none: FreeCoreData will use it from here) |
 | `predicate-ordering-without-compare` | libs-base | test | not sent yet | (none: FreeCoreData will use it from here) |
 | `predicate-string-escapes` | libs-base | test | not sent yet | (none: FreeCoreData and ORMKit's apps use it from here) |
-| `arc4random-glibc` | libs-base | test | not sent yet | (none: every app built on the stack uses it from here; HomeRow's and UDCalc's shims are gone) |
+| `arc4random-glibc` | libs-base | test | not sent yet | (none: every app built on the stack uses it from here, on glibc before 2.36 and on Windows; HomeRow's and UDCalc's shims are gone) |
 | `collection-copy-is-shallow` | libs-base | test | not sent yet | (none: FreeCoreData uses it from here) |
 | `nonretained-value-identity` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
 | `xml-detached-namespaces` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
