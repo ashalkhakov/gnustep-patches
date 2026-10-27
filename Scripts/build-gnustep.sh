@@ -21,7 +21,7 @@
 #   PREFIX           where the stack is installed (also accepted: INSTALL_PATH)
 #   SOURCES          where the checkouts live (also accepted: DEPS_PATH)
 #   COMPONENTS       build these, in this order (default: the full stack;
-#                    on Windows, winuxtheme in place of eau)
+#                    on Windows, cairo first, and winuxtheme in place of eau)
 #   PATCHES          "all" (default), "none", or a list of <project>/<topic>
 #   CC, CXX          default clang / clang++
 #   LIBRARY_COMBO    default ng-gnu-gnu
@@ -33,19 +33,26 @@
 #   EAU_REF          default a commit of dev, the branch Gershwin merges into
 #                    and the patches here are made against: pinned, so a
 #                    change on dev cannot stop a build; moved on purpose
+#   CAIRO_REF        default 1.18.6, the release MSYS2 packages: the same
+#                    cairo as theirs, with the patches here
 set -eu
 
 EAU_REF=${EAU_REF:-01be00b5216b0ad508f30d66fa0d6734f44052c2}
+CAIRO_REF=${CAIRO_REF:-1.18.6}
 
 PATCHES_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 
 PREFIX=${PREFIX:-${INSTALL_PATH:-}}
 SOURCES=${SOURCES:-${DEPS_PATH:-}}
+# On Windows cairo is built here too, patched (cairo/), and installed into
+# the prefix, whose bin comes before MSYS2's on PATH: MSYS2's own cairo
+# aborts gnustep-back's PDFs (cairo/pdf-lent-image). On Linux the
+# distribution's cairo has no Win32 surfaces, and is used as it is.
 case "$(uname -s)" in
-    MINGW*|MSYS*) theme=winuxtheme ;;
-    *)            theme=eau ;;
+    MINGW*|MSYS*) theme=winuxtheme; cairo=cairo ;;
+    *)            theme=eau; cairo= ;;
 esac
-COMPONENTS=${COMPONENTS:-"libobjc2 libdispatch tools-make libs-base libs-gui libs-back $theme tools-xctest"}
+COMPONENTS=${COMPONENTS:-"$cairo libobjc2 libdispatch tools-make libs-base libs-gui libs-back $theme tools-xctest"}
 PATCHES=${PATCHES:-all}
 CC=${CC:-clang}
 CXX=${CXX:-clang++}
@@ -117,6 +124,7 @@ RPATH="-Wl,-rpath,$PREFIX/lib"
 native() { echo "$1"; }
 if [ "$WINDOWS" = 1 ]; then
     export PATH="$PREFIX/bin:$PATH"
+    export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
     export LDFLAGS="-L$(cygpath -m "$PREFIX/lib")${LDFLAGS:+ $LDFLAGS} -lc++"
     export MSYS2_ARG_CONV_EXCL="--prefix="
     export OBJCFLAGS="${OBJCFLAGS:+$OBJCFLAGS }-Wno-error=incompatible-pointer-types -Wno-error=int-conversion"
@@ -193,6 +201,18 @@ cmake_generator() {
 # ------------------------------------------------------------------ #
 # Components
 # ------------------------------------------------------------------ #
+# The features MSYS2's package has that gnustep-back uses: Win32 surfaces,
+# FreeType and fontconfig fonts, PNG, PDF and PostScript.
+build_cairo() {
+    fetch cairo https://gitlab.freedesktop.org/cairo/cairo.git
+    apply_patches_for cairo "$SOURCES/cairo"
+    (cd "$SOURCES/cairo" && meson setup build --prefix="$(native "$PREFIX")" \
+        --buildtype=release -Dtests=disabled -Dgtk_doc=false \
+        -Dfreetype=enabled -Dfontconfig=enabled -Dpng=enabled \
+        -Dxlib=disabled -Dxcb=disabled -Dquartz=disabled \
+        && meson compile -C build -j "$JOBS" && meson install -C build)
+}
+
 build_libobjc2() {
     fetch libobjc2 https://github.com/gnustep/libobjc2.git
     apply_patches_for libobjc2 "$SOURCES/libobjc2"
@@ -467,6 +487,17 @@ verify() {
             ;;
     esac
 
+    # Built here, cairo must be the one the prefix carries: MSYS2's, found
+    # instead, would abort gnustep-back's PDFs.
+    case " $COMPONENTS " in
+        *" cairo "*)
+            if [ "$WINDOWS" = 1 ] && [ ! -f "$PREFIX/bin/libcairo-2.dll" ]; then
+                echo "verify: no libcairo-2.dll in $PREFIX/bin" >&2
+                failed=1
+            fi
+            ;;
+    esac
+
     # A theme bundle that is asked for and not installed would leave every
     # application with GNUstep's own look, and nothing would say so.
     for theme in eau:Eau winuxtheme:WinUXTheme; do
@@ -510,6 +541,7 @@ mkdir -p "$PREFIX" "$SOURCES"
 for component in $COMPONENTS; do
     say "$component"
     case "$component" in
+        cairo)          build_cairo ;;
         libobjc2)       build_libobjc2 ;;
         libdispatch)    build_libdispatch ;;
         tools-make)     build_tools_make ;;

@@ -1041,6 +1041,23 @@ in libs-base's suite: on Windows, MSYS2 CLANG64, with every libs-base patch
 here applied to master 1acaaef, each fails without its fix and passes with
 it, and NSBundle (89) and NSTask (88) pass; on Linux both are skipped and
 NSTask passes (92).
+Added on 2026-10-27 for SimpleNotes on Windows, whose Export as PDF
+aborted on any note with a picture: `pdf-lent-image`, in cairo itself, the
+first patch here that is not GNUstep's. The stack has taken cairo from
+MSYS2 until now; on Windows it is built here instead (cairo 1.18.6,
+MSYS2's version, with this patch) and installed in the prefix's bin, ahead
+of MSYS2's. cairo's PDF surface adds an image pattern with
+CAIRO_EXTEND_PAD (gnustep-back's for every picture) through
+_cairo_pdf_surface_add_padded_image_surface, which, needing no padding,
+keeps the image its source lent it and then releases it; a Win32 surface
+lends one it maps, and the release finishes it, so show_page asserts
+"!surface->finished". The patch keeps a copy when the image is lent.
+Upstream master has the same code. No test in cairo's suite (it needs a
+Win32 surface): `pdf-pad-win32.c` beside the patch, 30 lines of cairo
+alone, aborts with MSYS2's cairo and writes its page with the patched one;
+gnustep-back printing a picture to PDF does the same. To be upstreamed by
+hand, not from here.
+
 Added on 2026-10-22 for Logbook's desktop app: `xib-custom-view-identifier`.
 A custom view of a xib is made by NSCustomView (GSNibLoading.m), which
 gives the view its frame, autoresizing, hidden flag, key views and
@@ -1186,6 +1203,7 @@ among it, passes with this gui and fails without it.
 | `locale-currency-name` | libs-base | test | not sent yet | (none: Logbook uses it from here) |
 | `nsbundle-windows-exe` | libs-base | test | not sent yet | (none: FreeCoreData's CDLauncher has a workaround until the stack has it) |
 | `nstask-windows-gui-shown` | libs-base | test | not sent yet | (none: FreeCoreData uses it from here) |
+| `pdf-lent-image` | cairo | repro (`pdf-pad-win32.c`) | not sent yet (by hand) | (none: the Windows stack builds cairo with it) |
 
 Re-run that check before sending anything: `Scripts/apply-patches.sh` on a
 fresh checkout is the quickest form of it.

@@ -1,0 +1,87 @@
+From a201f05aa14e1f49a4b027fe33bebe45b852ba98 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Tue, 27 Oct 2026 11:52:30 +0500
+Subject: [PATCH] pdf: keep a copy of an image its source only lends
+
+A surface pattern with CAIRO_EXTEND_PAD is added to the page by
+_cairo_pdf_surface_add_padded_image_surface, which acquires the source's
+image and, when no padding is needed, adds that image itself as the
+page's source surface, then releases it. The page is written later, at
+show_page. For an image surface, acquiring gives the surface itself and
+releasing does nothing. A surface of another kind that has no
+acquire_source_image of its own (a Win32 display surface) lends an image
+it maps for the occasion, and releasing it unmaps it, which finishes it:
+show_page then finds a finished image and aborts on the assertion in
+_cairo_surface_acquire_source_image ("!surface->finished").
+
+When the acquired image is not the source's own (not what
+_cairo_surface_get_source gives for the pattern's surface), add a copy of
+it instead, made as the padded image is. An image surface's source is
+still added as itself, so repeated images still share one PDF object. The
+padded image's offset is applied only to a padded image.
+
+pdf-pad-win32.c (beside this patch) paints a Win32 DIB surface with
+CAIRO_EXTEND_PAD into a PDF: with MSYS2's cairo 1.18.6 it aborts in
+cairo_show_page; with this it writes the page. No test in cairo's suite:
+the lent image needs a Win32 surface. Seen first as gnustep-back's
+printing to PDF on Windows aborting on any picture, gnustep-back drawing
+pictures from a Win32 surface with CAIRO_EXTEND_PAD.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/cairo-pdf-surface.c | 25 ++++++++++++++++++++++++-
+ 1 file changed, 24 insertions(+), 1 deletion(-)
+
+diff --git a/src/cairo-pdf-surface.c b/src/cairo-pdf-surface.c
+index 5c57973..b367c77 100644
+--- a/src/cairo-pdf-surface.c
++++ b/src/cairo-pdf-surface.c
+@@ -2997,6 +2997,7 @@ _cairo_pdf_surface_add_padded_image_surface (cairo_pdf_surface_t          *surfa
+     cairo_box_t box;
+     cairo_rectangle_int_t rect;
+     cairo_surface_pattern_t pad_pattern;
++    cairo_bool_t padded = FALSE;
+ 
+     status = _cairo_pdf_surface_acquire_source_image_from_pattern (surface, source,
+ 								   &image, &image_extra);
+@@ -3035,6 +3036,28 @@ _cairo_pdf_surface_add_padded_image_surface (cairo_pdf_surface_t          *surfa
+         _cairo_pattern_fini (&pad_pattern.base);
+         if (unlikely (status))
+             goto BAIL;
++	padded = TRUE;
++    }
++    else if (source->type == CAIRO_PATTERN_TYPE_SURFACE &&
++	     &image->base != _cairo_surface_get_source (((cairo_surface_pattern_t *) source)->surface, NULL))
++    {
++	/* Not padded, but the image is only lent: the source is a surface
++	 * of another kind (a Win32 surface, say) which mapped it for us,
++	 * and releasing it below finishes it. The page is written after
++	 * that, so it keeps a copy of its own. */
++	pad_image = _cairo_image_surface_create_with_content (image->base.content, w, h);
++	if (pad_image->status) {
++	    status = pad_image->status;
++	    goto BAIL;
++	}
++
++	_cairo_pattern_init_for_surface (&pad_pattern, &image->base);
++	status = _cairo_surface_paint (pad_image,
++				       CAIRO_OPERATOR_SOURCE, &pad_pattern.base,
++				       NULL);
++        _cairo_pattern_fini (&pad_pattern.base);
++        if (unlikely (status))
++            goto BAIL;
+     }
+ 
+     status = _cairo_pdf_surface_add_source_surface (surface,
+@@ -3055,7 +3078,7 @@ _cairo_pdf_surface_add_padded_image_surface (cairo_pdf_surface_t          *surfa
+     if (unlikely (status))
+         goto BAIL;
+ 
+-    if (pad_image != &image->base) {
++    if (padded) {
+ 	/* If using a padded image, replace _add_source_surface
+ 	 * x/y_offset with padded image offset. Note:
+ 	 * _add_source_surface only sets a non zero x/y_offset for
+-- 
+2.50.1 (Apple Git-155)
+
