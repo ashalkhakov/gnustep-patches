@@ -1,0 +1,41 @@
+From 1856c0a3dd94bbe81b9e1c24811ad44e39c2c76d Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Tue, 27 Oct 2026 23:25:00 +0500
+Subject: [PATCH] framework.make: install a DLL framework's import library from
+ the build directory
+
+Installing a framework on Windows copies its import library
+(libNAME.dll.a) to the Libraries directory from $(FRAMEWORK_FILE_NAME),
+a path relative to the framework's own directory, where the DLL beside it
+is copied from $(FRAMEWORK_LIBRARY_DIR), which is under
+$(GNUSTEP_BUILD_DIR).  With a build directory other than the source's
+(make GNUSTEP_BUILD_DIR=build, or a project that sets it) the build puts
+the import library under it and the install does not find it:
+
+  /usr/bin/install: cannot stat 'Foo.framework/./libFoo.dll.a':
+  No such file or directory
+
+It is copied from $(FRAMEWORK_FILE), the same path under
+$(GNUSTEP_BUILD_DIR), as the DLL is.
+
+Patch done with help of AI.
+---
+ Instance/framework.make | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/Instance/framework.make b/Instance/framework.make
+index f314d446..47ab8ff3 100644
+--- a/Instance/framework.make
++++ b/Instance/framework.make
+@@ -754,7 +754,7 @@ ifneq ($(CHOWN_TO),)
+ endif
+ 	$(ECHO_NOTHING)$(INSTALL_PROGRAM) $(FRAMEWORK_LIBRARY_DIR)/$(LIB_LINK_DLL_FILE) \
+           $(DLL_INSTALLATION_DIR)$(END_ECHO)
+-	$(ECHO_NOTHING)$(INSTALL_PROGRAM) $(FRAMEWORK_FILE_NAME) \
++	$(ECHO_NOTHING)$(INSTALL_PROGRAM) $(FRAMEWORK_FILE) \
+ 	  $(GNUSTEP_LIBRARIES)/$(GNUSTEP_TARGET_LDIR)$(END_ECHO)
+ 
+ endif
+-- 
+2.50.1 (Apple Git-155)
+

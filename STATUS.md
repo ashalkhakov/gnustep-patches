@@ -1041,6 +1041,14 @@ in libs-base's suite: on Windows, MSYS2 CLANG64, with every libs-base patch
 here applied to master 1acaaef, each fails without its fix and passes with
 it, and NSBundle (89) and NSTask (88) pass; on Linux both are skipped and
 NSTask passes (92).
+Added on 2026-10-27 for UDCode on Windows, which builds in a build directory
+of its own: `framework-dll-install-build-dir` (tools-make). Installing a
+framework on Windows copied its import library from a path relative to the
+source directory, not the build directory the DLL beside it is copied from:
+a framework built with GNUSTEP_BUILD_DIR set did not install. tools-make
+has no test suite; NOTES.md has the reproduction, which fails without the
+fix and installs with it (MSYS2 CLANG64). Its commit says "Patch done with
+help of AI." and carries no Claude trailer.
 Added on 2026-10-27 for UDCode on Windows, whose debug adapter and language
 servers talk over their standard input: `windows-stdin-pipe`. The win32
 GSFileHandle took a standard input to be a console's whatever it was, and
@@ -1174,6 +1182,7 @@ among it, passes with this gui and fails without it.
 | `predicate-string-escapes` | libs-base | test | not sent yet | (none: FreeCoreData and ORMKit's apps use it from here) |
 | `arc4random-glibc` | libs-base | test | not sent yet | (none: every app built on the stack uses it from here, on glibc before 2.36 and on Windows; HomeRow's and UDCalc's shims are gone) |
 | `windows-stdin-pipe` | libs-base | test | not sent yet | (none: UDCode's debug adapter on Windows uses it from here) |
+| `framework-dll-install-build-dir` | tools-make | none (NOTES.md has the reproduction) | not sent yet | (none: UDCodeKit's Windows install uses it from here) |
 | `collection-copy-is-shallow` | libs-base | test | not sent yet | (none: FreeCoreData uses it from here) |
 | `nonretained-value-identity` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
 | `xml-detached-namespaces` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
