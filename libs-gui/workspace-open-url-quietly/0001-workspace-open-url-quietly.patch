@@ -1,0 +1,154 @@
+From 4cb269b43581568179289bdffd91d0c3ade58a42 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Tue, 27 Oct 2026 15:46:24 +0500
+Subject: [PATCH] NSWorkspace: -openURL: falls back to the system's opener
+ before any alert
+
+For a URL no application or service claims (an https: link on Windows,
+or wherever no GNUstep browser is installed), -openURL: ran a modal
+alert, "Unable to use Application or Service to open URL", and only
+after it was dismissed tried -_openUnknown:, the system's own opener
+(GSUnknownFileTool, ShellExecute on Windows, xdg-open elsewhere), which
+then opened it.  So the user was told it failed while it worked, and
+whatever the application was waiting for meanwhile (a sign-in page's
+result, polled for on the run loop) waited behind the modal alert.
+
+Try the system's opener first, and say it could not be opened only when
+that fails too.
+
+Tests/gui/NSWorkspace/openURLQuietly.m opens a URL of a scheme nothing
+claims, with GSUnknownFileTool set to true, and watches for an alert from
+the modal panel mode: on Windows (MSYS2 CLANG64), with every libs-gui
+patch in gnustep-patches applied, the URL is opened either way and an
+alert is shown without the change and none with it.
+
+Patch done with help of AI.
+---
+ Source/NSWorkspace.m                   | 11 ++--
+ Tests/gui/NSWorkspace/TestInfo         |  0
+ Tests/gui/NSWorkspace/openURLQuietly.m | 82 ++++++++++++++++++++++++++
+ 3 files changed, 87 insertions(+), 6 deletions(-)
+ create mode 100644 Tests/gui/NSWorkspace/TestInfo
+ create mode 100644 Tests/gui/NSWorkspace/openURLQuietly.m
+
+diff --git a/Source/NSWorkspace.m b/Source/NSWorkspace.m
+index b1626f7..1b725ee 100644
+--- a/Source/NSWorkspace.m
++++ b/Source/NSWorkspace.m
+@@ -1164,17 +1164,16 @@ - (BOOL) openURL: (NSURL*)url
+           [NSApp deactivate];
+           return YES;
+         }
++      else if ([self _openUnknown: [url absoluteString]])
++        {
++          [NSApp deactivate];
++          return YES;
++        }
+       else
+         {
+ 	  NSRunAlertPanel(nil,
+ 	    @"Unable to use Application or Service to open URL",
+ 	    @"Continue", nil, nil);
+-
+-          if ([self _openUnknown: [url absoluteString]])
+-	    {
+-	      [NSApp deactivate];
+-	      return YES;
+-	    }
+         }
+     }
+   return NO;
+diff --git a/Tests/gui/NSWorkspace/TestInfo b/Tests/gui/NSWorkspace/TestInfo
+new file mode 100644
+index 0000000..e69de29
+diff --git a/Tests/gui/NSWorkspace/openURLQuietly.m b/Tests/gui/NSWorkspace/openURLQuietly.m
+new file mode 100644
+index 0000000..75abac6
+--- /dev/null
++++ b/Tests/gui/NSWorkspace/openURLQuietly.m
+@@ -0,0 +1,82 @@
++/* -openURL: for a URL no application or service claims falls back to the
++   system's opener (GSUnknownFileTool; ShellExecute on Windows, xdg-open
++   elsewhere) and, when that opens it, says nothing: the alert that it could
++   not use an application or service is for when the fallback fails too.
++
++   The URL's scheme is one nothing claims, and GSUnknownFileTool is set to
++   true, which opens nothing and succeeds.  A timer in the modal panel mode
++   notices an alert while -openURL: runs, and stops it. */
++#include "Testing.h"
++
++#include <Foundation/NSAutoreleasePool.h>
++#include <Foundation/NSRunLoop.h>
++#include <Foundation/NSTimer.h>
++#include <Foundation/NSURL.h>
++#include <Foundation/NSUserDefaults.h>
++
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSWorkspace.h>
++
++@interface AlertWatch : NSObject
++{
++@public
++  BOOL alerted;
++}
++- (void) check: (NSTimer *)timer;
++@end
++
++@implementation AlertWatch
++- (void) check: (NSTimer *)timer
++{
++  if ([NSApp modalWindow] != nil)
++    {
++      alerted = YES;
++      [NSApp stopModal];
++    }
++}
++@end
++
++int main()
++{
++  NSAutoreleasePool	*arp = [NSAutoreleasePool new];
++
++  START_SET("NSWorkspace -openURL: falls back quietly")
++
++  NS_DURING
++    {
++      [NSApplication sharedApplication];
++    }
++  NS_HANDLER
++    {
++      if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++	SKIP("It looks like GNUstep backend is not yet installed")
++    }
++  NS_ENDHANDLER
++
++  {
++    AlertWatch	*watch = [[AlertWatch new] autorelease];
++    NSTimer	*timer;
++    BOOL	opened;
++
++    [[NSUserDefaults standardUserDefaults] setObject: @"true"
++					      forKey: @"GSUnknownFileTool"];
++    timer = [NSTimer timerWithTimeInterval: 0.2
++				    target: watch
++				  selector: @selector(check:)
++				  userInfo: nil
++				   repeats: YES];
++    [[NSRunLoop currentRunLoop] addTimer: timer
++				 forMode: NSModalPanelRunLoopMode];
++    opened = [[NSWorkspace sharedWorkspace] openURL:
++      [NSURL URLWithString: @"gnustep-test-unclaimed://example/"]];
++    [timer invalidate];
++
++    PASS(opened, "the system's opener opens a URL nothing else claims")
++    PASS(!watch->alerted, "and no alert says it could not be opened")
++  }
++
++  END_SET("NSWorkspace -openURL: falls back quietly")
++
++  [arp release];
++  return 0;
++}
+-- 
+2.50.1 (Apple Git-155)
+

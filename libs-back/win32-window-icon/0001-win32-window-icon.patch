@@ -1,0 +1,220 @@
+From 6b589053f6519fd59fa56473b10ede5a19529602 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Tue, 27 Oct 2026 15:37:28 +0500
+Subject: [PATCH] win32: the application's icon on every window (WM_SETICON)
+
+The win32 server registers its window class with no icon and never sets
+one on a window, so every GNUstep window on Windows shows a blank icon in
+its title bar, in Alt-Tab and on the taskbar, whatever the application's
+icon (NSIcon, -setApplicationIconImage:).
+
+As the X11 server sets _NET_WM_ICON from -[NSApplication
+applicationIconImage] when it makes a window, the win32 server now sends
+each window WM_SETICON with a big and a small icon, made once from that
+image: drawn into a bitmap of the system's icon sizes (SM_CXICON,
+SM_CXSMICON) and handed to CreateIconFromResourceEx as PNG data, which
+Windows takes for an icon's image.
+
+Tests/cairo/win32icon.m sets an application icon, makes a titled window
+and asks it for its icons (WM_GETICON): on Windows (MSYS2 CLANG64, cairo)
+both checks fail without the change and pass with it.
+
+Patch done with help of AI.
+---
+ Source/win32/WIN32Server.m | 77 ++++++++++++++++++++++++++++++++++++
+ Tests/cairo/win32icon.m    | 81 ++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 158 insertions(+)
+ create mode 100644 Tests/cairo/win32icon.m
+
+diff --git a/Source/win32/WIN32Server.m b/Source/win32/WIN32Server.m
+index 081046b..0fa5120 100644
+--- a/Source/win32/WIN32Server.m
++++ b/Source/win32/WIN32Server.m
+@@ -40,6 +40,9 @@
+ #include <AppKit/AppKitExceptions.h>
+ #include <AppKit/NSApplication.h>
+ #include <AppKit/NSGraphics.h>
++#include <AppKit/NSGraphicsContext.h>
++#include <AppKit/NSBitmapImageRep.h>
++#include <AppKit/NSImage.h>
+ #include <AppKit/NSMenu.h>
+ #include <AppKit/NSWindow.h>
+ #include <AppKit/NSView.h>
+@@ -1561,6 +1564,79 @@ - (LRESULT) windowEventProc: (HWND)hwnd : (UINT)uMsg
+ 
+ @implementation WIN32Server (WindowOps)
+ 
++/* An icon of size by size pixels from image, drawn into a bitmap and handed
++   to Windows as PNG data, which it takes for an icon's image. */
++static HICON
++iconFromImage(NSImage *image, int size)
++{
++  NSBitmapImageRep	*rep;
++  NSData		*png;
++  HICON			icon = NULL;
++
++  rep = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes: NULL
++						 pixelsWide: size
++						 pixelsHigh: size
++					      bitsPerSample: 8
++					    samplesPerPixel: 4
++						   hasAlpha: YES
++						   isPlanar: NO
++					     colorSpaceName: NSDeviceRGBColorSpace
++						bytesPerRow: 0
++					       bitsPerPixel: 0];
++  [NSGraphicsContext saveGraphicsState];
++  [NSGraphicsContext setCurrentContext:
++    [NSGraphicsContext graphicsContextWithBitmapImageRep: rep]];
++  [image drawInRect: NSMakeRect(0, 0, size, size)
++	   fromRect: NSZeroRect
++	  operation: NSCompositeSourceOver
++	   fraction: 1.0];
++  [NSGraphicsContext restoreGraphicsState];
++  png = [rep representationUsingType: NSPNGFileType
++			  properties: [NSDictionary dictionary]];
++  if ([png length] > 0)
++    {
++      icon = CreateIconFromResourceEx((PBYTE)[png bytes], (DWORD)[png length],
++				      TRUE, 0x00030000, size, size,
++				      LR_DEFAULTCOLOR);
++    }
++  RELEASE(rep);
++  return icon;
++}
++
++/* The application's icon on the window, big (Alt-Tab, the taskbar) and
++   small (the title bar), as the X11 server sets _NET_WM_ICON: made once,
++   when the application first has one. */
++- (void) _setIconFor: (HWND)hwnd
++{
++  static BOOL	made = NO;
++  static BOOL	making = NO;
++  static HICON	big = NULL;
++  static HICON	small = NULL;
++
++  if (!made && !making && NSApp != nil)
++    {
++      NSImage	*image;
++
++      making = YES;
++      image = [NSApp applicationIconImage];
++      if (image != nil)
++	{
++	  big = iconFromImage(image, GetSystemMetrics(SM_CXICON));
++	  small = iconFromImage(image, GetSystemMetrics(SM_CXSMICON));
++	  made = YES;
++	}
++      making = NO;
++    }
++  if (big != NULL)
++    {
++      SendMessage(hwnd, WM_SETICON, ICON_BIG, (LPARAM)big);
++    }
++  if (small != NULL)
++    {
++      SendMessage(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)small);
++    }
++}
++
+ /*
+   styleMask specifies the receiver's style. It can either be
+   NSBorderlessWindowMask, or it can contain any of the following
+@@ -1667,6 +1743,7 @@ - (int) window: (NSRect)frame : (NSBackingStoreType)type : (unsigned int)style
+ #endif
+ 
+       SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
++      [self _setIconFor: hwnd];
+ 
+       [self _setWindowOwnedByServer: (int)hwnd];
+     }
+diff --git a/Tests/cairo/win32icon.m b/Tests/cairo/win32icon.m
+new file mode 100644
+index 0000000..8bc6430
+--- /dev/null
++++ b/Tests/cairo/win32icon.m
+@@ -0,0 +1,81 @@
++/* The application's icon on a window of the win32 server: WM_SETICON with a
++ * big and a small icon, made from -[NSApplication applicationIconImage], as
++ * the X11 server sets _NET_WM_ICON.  Without them a window has no icon of its
++ * own, and Windows shows a blank one in its title bar and the taskbar.
++ *
++ * It guards on the win32 server with cairo, and skips when the backend
++ * cannot be reached.
++ */
++#import <Foundation/Foundation.h>
++#import "Testing.h"
++#include "config.h"
++
++#if defined(BUILD_SERVER) && defined(SERVER_win32) \
++  && defined(BUILD_GRAPHICS) && defined(GRAPHICS_cairo) \
++  && BUILD_SERVER == SERVER_win32 && BUILD_GRAPHICS == GRAPHICS_cairo
++
++#import <AppKit/AppKit.h>
++#include <windows.h>
++
++int
++main(void)
++{
++  START_SET("win32 window icon")
++
++  NSWindow	*window = nil;
++
++  NS_DURING
++    {
++      NSBitmapImageRep	*rep;
++      NSImage		*icon;
++
++      [NSApplication sharedApplication];
++      rep = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes: NULL
++	pixelsWide: 64 pixelsHigh: 64 bitsPerSample: 8 samplesPerPixel: 4
++	hasAlpha: YES isPlanar: NO colorSpaceName: NSDeviceRGBColorSpace
++	bytesPerRow: 0 bitsPerPixel: 0];
++      memset([rep bitmapData], 0xff, [rep bytesPerRow] * 64);
++      icon = [[NSImage alloc] initWithSize: NSMakeSize(64, 64)];
++      [icon addRepresentation: rep];
++      [NSApp setApplicationIconImage: icon];
++      window = [[NSWindow alloc] initWithContentRect: NSMakeRect(100, 100, 200, 100)
++	styleMask: NSTitledWindowMask | NSClosableWindowMask
++	backing: NSBackingStoreBuffered
++	defer: NO];
++    }
++  NS_HANDLER
++    {
++      window = nil;
++    }
++  NS_ENDHANDLER
++
++  if (window == nil)
++    {
++      SKIP("no win32 server available")
++    }
++  else
++    {
++      HWND	hwnd = (HWND)(intptr_t)[window windowNumber];
++
++      PASS(SendMessage(hwnd, WM_GETICON, ICON_BIG, 0) != 0,
++	"a window has the application's icon, big")
++      PASS(SendMessage(hwnd, WM_GETICON, ICON_SMALL, 0) != 0,
++	"and small")
++    }
++
++  END_SET("win32 window icon")
++  return 0;
++}
++
++#else
++
++int
++main(void)
++{
++  START_SET("win32 window icon")
++    SKIP("back is not built with the win32 server and cairo")
++  END_SET("win32 window icon")
++  return 0;
++}
++
++#endif
+-- 
+2.50.1 (Apple Git-155)
+

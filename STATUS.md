@@ -1041,6 +1041,24 @@ in libs-base's suite: on Windows, MSYS2 CLANG64, with every libs-base patch
 here applied to master 1acaaef, each fails without its fix and passes with
 it, and NSBundle (89) and NSTask (88) pass; on Linux both are skipped and
 NSTask passes (92).
+Added on 2026-10-27 for SimpleNotes on Windows, whose Sign In said the
+browser could not be opened while it opened it: `workspace-open-url-quietly`.
+For a URL nothing claims, -openURL: ran a modal alert first and the
+system's opener (ShellExecute, xdg-open) only after it; the alert also
+held up the sign-in waiting behind it. The opener is tried first now, the
+alert only when it fails. `Tests/gui/NSWorkspace/openURLQuietly.m` in
+libs-gui's suite: on Windows, MSYS2 CLANG64, every libs-gui patch here
+applied, an alert without the fix and none with it. Its commit says
+"Patch done with help of AI." and carries no Claude trailer.
+
+Added on 2026-10-27 for SimpleNotes' Windows installer, whose windows had
+a blank icon: `win32-window-icon`. The win32 server never set a window's
+icon; it now sends WM_SETICON (big and small) made from the application's
+icon, as the X11 server sets _NET_WM_ICON. `Tests/cairo/win32icon.m` in
+libs-back's suite: on Windows, MSYS2 CLANG64, both checks fail without
+the fix and pass with it. Its commit says "Patch done with help of AI."
+and carries no Claude trailer, ready to send upstream.
+
 Extended on 2026-10-27 for UDCalc and HomeRow on Windows: `arc4random-glibc`
 now provides arc4random(), arc4random_uniform() and arc4random_buf() on
 Windows too, whose C runtime has none, exported from the base DLL and
@@ -1227,6 +1245,8 @@ among it, passes with this gui and fails without it.
 | `nstask-windows-gui-shown` | libs-base | test | not sent yet | (none: FreeCoreData uses it from here) |
 | `pdf-lent-image` | cairo | repro (`pdf-pad-win32.c`) | not sent yet (by hand) | (none: the Windows stack builds cairo with it) |
 | `system-font-segoe-ui` | libs-back | test | not sent yet | (none: SimpleNotes uses it from here) |
+| `win32-window-icon` | libs-back | test | not sent yet | (none: every Windows app uses it from here) |
+| `workspace-open-url-quietly` | libs-gui | test | not sent yet | (none: every app uses it from here) |
 
 Re-run that check before sending anything: `Scripts/apply-patches.sh` on a
 fresh checkout is the quickest form of it.
