@@ -1,0 +1,130 @@
+From a32b5bd17c1bdbb448c2a86ca0692c40def7d080 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Tue, 27 Oct 2026 13:05:19 +0500
+Subject: [PATCH] fontconfig: Segoe UI before Tahoma as the default system font
+
+On a Windows without DejaVu, Bitstream Vera or FreeSans, the fontconfig
+enumerator's default system font was Tahoma, which has no italic face:
+NSFontManager's -convertFont:toHaveTrait: NSItalicFontMask gave Tahoma
+back, and text made italic in the system font was drawn upright. Segoe
+UI, Windows' own interface font since Vista, has italic and bold faces;
+try it, and its bold, before Tahoma's. Where it is not installed nothing
+changes, and DejaVu Sans still comes first where it is.
+
+Tests/cairo/systemfontitalic.m checks that the system font has an italic
+face wherever Segoe UI is installed, and skips elsewhere. On Windows
+(MSYS2 CLANG64) with DejaVu hidden from fontconfig it fails without the
+change (Tahoma) and passes with it (SegoeUI); with DejaVu it passes
+either way. The rest of Tests/cairo is unchanged by it.
+
+Patch done with help of AI.
+---
+ Source/fontconfig/FCFontEnumerator.m |  6 +--
+ Tests/cairo/systemfontitalic.m       | 71 ++++++++++++++++++++++++++++
+ 2 files changed, 74 insertions(+), 3 deletions(-)
+ create mode 100644 Tests/cairo/systemfontitalic.m
+
+diff --git a/Source/fontconfig/FCFontEnumerator.m b/Source/fontconfig/FCFontEnumerator.m
+index c186f08..904574c 100644
+--- a/Source/fontconfig/FCFontEnumerator.m
++++ b/Source/fontconfig/FCFontEnumerator.m
+@@ -456,8 +456,8 @@ - (NSString *) defaultSystemFontName
+ {
+   return [self firstAvailableFontName:
+                  [NSArray arrayWithObjects: @"DejaVuSans",
+-                  @"BitstreamVeraSans-Roman", @"FreeSans", @"Tahoma",
+-                  @"ArialMT", nil]
++                  @"BitstreamVeraSans-Roman", @"FreeSans", @"SegoeUI",
++                  @"Tahoma", @"ArialMT", nil]
+                              fallback: @"Helvetica"];
+ }
+ 
+@@ -525,7 +525,7 @@ so a custom system font (set through the NSFont default) gets its own
+   return [self firstAvailableFontName:
+                  [NSArray arrayWithObjects: @"DejaVuSans-Bold",
+                   @"BitstreamVeraSans-Bold", @"FreeSans-Bold",
+-                  @"Tahoma-Bold", @"Arial-BoldMT", nil]
++                  @"SegoeUI-Bold", @"Tahoma-Bold", @"Arial-BoldMT", nil]
+                              fallback: @"Helvetica-Bold"];
+ }
+ 
+diff --git a/Tests/cairo/systemfontitalic.m b/Tests/cairo/systemfontitalic.m
+new file mode 100644
+index 0000000..36ec927
+--- /dev/null
++++ b/Tests/cairo/systemfontitalic.m
+@@ -0,0 +1,71 @@
++/* The default system font has an italic face where Windows' own interface
++ * font, Segoe UI, is installed.
++ *
++ * On a Windows without DejaVu, Bitstream Vera or FreeSans, the fontconfig
++ * enumerator used to settle on Tahoma, which has no italic face: text made
++ * italic in the system font was drawn upright.  Where Segoe UI is not
++ * installed (Linux) the check is skipped.
++ */
++#import <Foundation/Foundation.h>
++#import "Testing.h"
++#include "config.h"
++
++#if defined(BUILD_GRAPHICS) && defined(GRAPHICS_cairo) \
++  && BUILD_GRAPHICS == GRAPHICS_cairo
++
++#import <AppKit/AppKit.h>
++#import <GNUstepGUI/GSFontInfo.h>
++
++int
++main(void)
++{
++  START_SET("the system font's italic")
++
++  GSFontEnumerator *e = nil;
++
++  NS_DURING
++    {
++      [NSApplication sharedApplication];
++      e = [GSFontEnumerator sharedEnumerator];
++    }
++  NS_HANDLER
++    {
++      e = nil;
++    }
++  NS_ENDHANDLER
++
++  if (e == nil)
++    {
++      SKIP("no font backend available")
++    }
++  else if (![[e availableFontFamilies] containsObject: @"Segoe UI"])
++    {
++      SKIP("Segoe UI is not installed")
++    }
++  else
++    {
++      NSFontManager *fm = [NSFontManager sharedFontManager];
++      NSFont *font = [NSFont systemFontOfSize: 12];
++      NSFont *italic = [fm convertFont: font toHaveTrait: NSItalicFontMask];
++
++      PASS(([fm traitsOfFont: italic] & NSItalicFontMask) != 0,
++	"the system font (%s) has an italic face",
++	[[font fontName] UTF8String])
++    }
++
++  END_SET("the system font's italic")
++  return 0;
++}
++
++#else
++
++int
++main(void)
++{
++  START_SET("the system font's italic")
++    SKIP("back is not built with the cairo graphics backend")
++  END_SET("the system font's italic")
++  return 0;
++}
++
++#endif
+-- 
+2.50.1 (Apple Git-155)
+

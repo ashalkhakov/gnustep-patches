@@ -1058,6 +1058,19 @@ alone, aborts with MSYS2's cairo and writes its page with the patched one;
 gnustep-back printing a picture to PDF does the same. To be upstreamed by
 hand, not from here.
 
+Added on 2026-10-27 for SimpleNotes on Windows, whose italic text was
+drawn upright: `system-font-segoe-ui`. On a Windows without DejaVu,
+Bitstream Vera or FreeSans (an ordinary one; CI's runner), the fontconfig
+enumerator's default system font was Tahoma, which has no italic face, so
+converting the system font to italic gave Tahoma back. Segoe UI, Windows'
+interface font, is tried before Tahoma now, and its bold before Tahoma's.
+`Tests/cairo/systemfontitalic.m` in libs-back's suite: on Windows, MSYS2
+CLANG64, with every libs-back patch here applied to master d378734 and
+DejaVu hidden from fontconfig, it fails without the fix (Tahoma) and passes
+with it (SegoeUI); skipped where Segoe UI is not installed. Its commit
+says "Patch done with help of AI." and carries no Claude trailer, ready to
+send upstream.
+
 Added on 2026-10-22 for Logbook's desktop app: `xib-custom-view-identifier`.
 A custom view of a xib is made by NSCustomView (GSNibLoading.m), which
 gives the view its frame, autoresizing, hidden flag, key views and
@@ -1204,6 +1217,7 @@ among it, passes with this gui and fails without it.
 | `nsbundle-windows-exe` | libs-base | test | not sent yet | (none: FreeCoreData's CDLauncher has a workaround until the stack has it) |
 | `nstask-windows-gui-shown` | libs-base | test | not sent yet | (none: FreeCoreData uses it from here) |
 | `pdf-lent-image` | cairo | repro (`pdf-pad-win32.c`) | not sent yet (by hand) | (none: the Windows stack builds cairo with it) |
+| `system-font-segoe-ui` | libs-back | test | not sent yet | (none: SimpleNotes uses it from here) |
 
 Re-run that check before sending anything: `Scripts/apply-patches.sh` on a
 fresh checkout is the quickest form of it.
