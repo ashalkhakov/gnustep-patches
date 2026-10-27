@@ -253,6 +253,7 @@ build_libdispatch() {
 
 build_tools_make() {
     fetch tools-make https://github.com/gnustep/tools-make.git
+    apply_patches_for tools-make "$SOURCES/tools-make"
     configure_in "$SOURCES/tools-make" \
         --prefix="$PREFIX" \
         --with-layout=gnustep \
