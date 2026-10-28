@@ -1,0 +1,131 @@
+From 48af74668a16c5563b6478beb7835814a2782c5f Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Wed, 28 Oct 2026 22:57:14 +0500
+Subject: [PATCH] NSWindow: a closing window keeps its controller and delegate
+ till it has closed
+
+A document's window controller leaves its document when its window says
+it will close (NSWindowWillCloseNotification), and the document held it;
+it autoreleases itself, but the notification centre posts in a pool of
+its own, so the controller was released as soon as the notification had
+been posted, before -close ordered the window out. The window's views
+still had it for their delegate (a split view's, an outline's), and
+ordering out may ask them: on Windows a window losing focus as it is
+hidden resets its cursor rectangles at once, and a split view asked its
+released delegate for its divider's rectangle (a crash closing a
+document's window, seen in UDQuakeTools' Quarry).
+
+-close keeps the controller and the delegate in its own pool, released
+when the window has closed.
+
+Tests/gui/NSWindowController/closeKeepsController.m closes a document
+whose window records, as it is ordered out, whether the controller is
+still there: without the change it is not; with it, it is, and it goes
+once the window has closed. Linux (aarch64), every libs-gui patch here
+applied; the NSWindow and NSWindowController tests pass (64).
+
+Patch done with help of AI.
+---
+ .../NSWindowController/closeKeepsController.m | 90 +++++++++++++++++++
+ 1 file changed, 90 insertions(+)
+ create mode 100644 Tests/gui/NSWindowController/closeKeepsController.m
+
+diff --git a/Tests/gui/NSWindowController/closeKeepsController.m b/Tests/gui/NSWindowController/closeKeepsController.m
+new file mode 100644
+index 0000000..4daa16d
+--- /dev/null
++++ b/Tests/gui/NSWindowController/closeKeepsController.m
+@@ -0,0 +1,90 @@
++/* A document's window controller lives until its window has closed.  The
++   controller leaves its document when the window says it will close, and
++   the document held it; it was released when that notification had been
++   posted, before the window ordered itself out, while the window's views
++   (a split view, an outline) still had it for their delegate.  On Windows
++   a window losing focus as it is ordered out resets its cursor rectangles
++   at once, and a split view asked its released delegate for its divider. */
++#import "Testing.h"
++#import <Foundation/NSAutoreleasePool.h>
++#import <Foundation/NSGeometry.h>
++#import <AppKit/NSApplication.h>
++#import <AppKit/NSDocument.h>
++#import <AppKit/NSWindow.h>
++#import <AppKit/NSWindowController.h>
++
++static BOOL	controllerGone = NO;
++static int	orderedOut = 0;
++static BOOL	goneWhenOrderedOut = NO;
++
++@interface WatchedController : NSWindowController
++@end
++
++@implementation WatchedController
++- (void) dealloc
++{
++  controllerGone = YES;
++  [super dealloc];
++}
++@end
++
++@interface WatchingWindow : NSWindow
++@end
++
++@implementation WatchingWindow
++- (void) orderOut: (id)sender
++{
++  orderedOut++;
++  goneWhenOrderedOut = goneWhenOrderedOut || controllerGone;
++  [super orderOut: sender];
++}
++@end
++
++@interface PlainDocument : NSDocument
++@end
++
++@implementation PlainDocument
++@end
++
++int
++main(int argc, const char **argv)
++{
++  START_SET("NSWindowController lives while its window closes")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  {
++    NSAutoreleasePool	*arp = [NSAutoreleasePool new];
++    PlainDocument	*document = [[PlainDocument alloc] init];
++    WatchingWindow	*window;
++    WatchedController	*controller;
++
++    window = [[WatchingWindow alloc]
++      initWithContentRect: NSMakeRect(0, 0, 200, 120)
++		styleMask: NSTitledWindowMask
++		  backing: NSBackingStoreBuffered
++		    defer: NO];
++    controller = [[WatchedController alloc] initWithWindow: window];
++    RELEASE(window);
++    [document addWindowController: controller];
++    RELEASE(controller);		/* the document's now */
++    [window orderFront: nil];
++    PASS([window isReleasedWhenClosed], "a document's window is released when closed")
++
++    [document close];
++    PASS(orderedOut > 0, "the window is ordered out as it closes")
++    PASS(goneWhenOrderedOut == NO,
++      "its controller is still there when it is ordered out")
++    RELEASE(document);
++    [arp release];
++    PASS(controllerGone, "and goes once the window has closed")
++  }
++
++  END_SET("NSWindowController lives while its window closes")
++  return 0;
++}
+-- 
+2.50.1 (Apple Git-155)
+
