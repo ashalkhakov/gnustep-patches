@@ -1,0 +1,226 @@
+From 1eb4437834a7d30779dc4a3006d6e42889a0db8f Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Wed, 28 Oct 2026 14:58:45 +0500
+Subject: [PATCH] win32: order and sort this application's windows only
+
+When a window's position in the z-order changes, the win32 server sorts
+the GNUstep windows into level order, and when it orders a window in, it
+places it among them by level. It found them by class name
+(GNUstepWindowClass), which every GNUstep application's windows share, so
+it took other applications' windows for its own: it compared their
+levels and moved them with SetWindowPos.
+
+SetWindowPos on another thread's window waits for that thread to take
+the messages it sends. An application stopped in a debugger takes none,
+so while one was stopped with a window ordered in (its menu, say), every
+other GNUstep application hung the next time it ordered or moved a
+window, and one being started hung making its first. That is what made
+an IDE hang while the program it was debugging stood at a breakpoint.
+
+Only windows made by this thread, which makes the server's windows, are
+now taken for this application's.
+
+Tests/cairo/win32otherwindows.m plays the other application with a thread
+whose window of that class name is ordered in, above this one's level,
+and which reads no messages for a few seconds: on Windows (MSYS2 CLANG64,
+cairo) ordering a window in waits for it without the change, and does not
+with it. The cairo tests' preamble gives the win32 build the server's
+headers, as it does the wayland one.
+
+Patch done with help of AI.
+---
+ Source/win32/WIN32Server.m       |   3 +-
+ Source/win32/w32_movesize.m      |   2 +
+ Tests/cairo/GNUmakefile.preamble |   6 ++
+ Tests/cairo/win32otherwindows.m  | 128 +++++++++++++++++++++++++++++++
+ 4 files changed, 138 insertions(+), 1 deletion(-)
+ create mode 100644 Tests/cairo/win32otherwindows.m
+
+diff --git a/Source/win32/WIN32Server.m b/Source/win32/WIN32Server.m
+index 081046b..4bf3753 100644
+--- a/Source/win32/WIN32Server.m
++++ b/Source/win32/WIN32Server.m
+@@ -1927,7 +1927,8 @@ - (void) orderwindow: (int) op : (int) otherWin : (int) winNum
+            */
+           if (otherWin > 0 && otherWin != winNum
+             && GetClassName((HWND)otherWin, buf, 32) == 18
+-            && strncmp(buf, "GNUstepWindowClass", 18) == 0)
++            && strncmp(buf, "GNUstepWindowClass", 18) == 0
++            && GetWindowThreadProcessId((HWND)otherWin, NULL) == GetCurrentThreadId())
+             {
+               if (GetWindowLongPtr((HWND)otherWin, OFF_ORDERED) == 1)
+                 {
+diff --git a/Source/win32/w32_movesize.m b/Source/win32/w32_movesize.m
+index 70ab9bc..43a3c31 100644
+--- a/Source/win32/w32_movesize.m
++++ b/Source/win32/w32_movesize.m
+@@ -200,6 +200,7 @@ - (void) decodeWM_WINDOWPOSCHANGEDParams: (WPARAM)wParam : (LPARAM)lParam : (HWN
+             {
+               if (GetClassName(hi, buf, 32) == 18
+                   && strncmp(buf, "GNUstepWindowClass", 18) == 0
++                  && GetWindowThreadProcessId(hi, NULL) == GetCurrentThreadId()
+                   && GetWindowLongPtr(hi, OFF_ORDERED) == 1
+                   && (hl = GetWindowLongPtr(hi, OFF_LEVEL))
+                   > NSDesktopWindowLevel)
+@@ -220,6 +221,7 @@ - (void) decodeWM_WINDOWPOSCHANGEDParams: (WPARAM)wParam : (LPARAM)lParam : (HWN
+                 {
+                   if (GetClassName(lo, buf, 32) == 18
+                       && strncmp(buf, "GNUstepWindowClass", 18) == 0
++                      && GetWindowThreadProcessId(lo, NULL) == GetCurrentThreadId()
+                       && GetWindowLongPtr(lo, OFF_ORDERED) == 1
+                       && (ll = GetWindowLongPtr(lo, OFF_LEVEL))
+                       > NSDesktopWindowLevel)
+diff --git a/Tests/cairo/GNUmakefile.preamble b/Tests/cairo/GNUmakefile.preamble
+index 89bebfd..50c011a 100644
+--- a/Tests/cairo/GNUmakefile.preamble
++++ b/Tests/cairo/GNUmakefile.preamble
+@@ -7,6 +7,12 @@ ADDITIONAL_INCLUDE_DIRS += -I$(GNUSTEP_BUILD_DIR)/../.. -I../..
+ -include $(GNUSTEP_BUILD_DIR)/../../config.make
+ -include ../../config.make
+ 
++# The win32 test of other programs' windows sets a window's level and order
++# as the server keeps them, so it takes the server's header.
++ifeq ($(BUILD_SERVER)-$(BUILD_GRAPHICS),win32-cairo)
++ADDITIONAL_INCLUDE_DIRS += -I$(GNUSTEP_BUILD_DIR)/../../Headers -I../../Headers
++endif
++
+ # The rendering tests drive the installed backend through AppKit, so link the
+ # gui wherever they build.  The gradient test builds for every graphics
+ # backend that draws, so this has to cover all of them rather than the two
+diff --git a/Tests/cairo/win32otherwindows.m b/Tests/cairo/win32otherwindows.m
+new file mode 100644
+index 0000000..f58e048
+--- /dev/null
++++ b/Tests/cairo/win32otherwindows.m
+@@ -0,0 +1,128 @@
++/* The win32 server orders and sorts its own windows only.  Another
++ * program's GNUstep window (of the same class name, with a level) belongs
++ * to a thread that may not be answering: a program stopped in a debugger.
++ * Moving it with SetWindowPos waits for that thread, so ordering a window
++ * in here hung until the other program ran again.
++ *
++ * The other program is played by a thread of this one, with a window of a
++ * class of the same name, ordered in and above this one's level, which
++ * reads no messages.  It waits a few seconds to be told this one got
++ * through, then reads its messages, so a server that waits for it fails
++ * the test rather than hanging it.
++ *
++ * It guards on the win32 server with cairo, and skips when the backend
++ * cannot be reached.
++ */
++#import <Foundation/Foundation.h>
++#import "Testing.h"
++#include "config.h"
++
++#if defined(BUILD_SERVER) && defined(SERVER_win32) \
++  && defined(BUILD_GRAPHICS) && defined(GRAPHICS_cairo) \
++  && BUILD_SERVER == SERVER_win32 && BUILD_GRAPHICS == GRAPHICS_cairo
++
++#import <AppKit/AppKit.h>
++#include <windows.h>
++#include "win32/WIN32Server.h"
++
++static HANDLE		ready;
++static HANDLE		through;
++static volatile LONG	waited = 0;
++
++static DWORD WINAPI
++otherProgram(LPVOID unused)
++{
++  WNDCLASSEXA	wc;
++  HWND		hwnd;
++  MSG		msg;
++  DWORD		until;
++
++  memset(&wc, 0, sizeof(wc));
++  wc.cbSize = sizeof(wc);
++  wc.lpfnWndProc = DefWindowProcA;
++  wc.cbWndExtra = WIN_EXTRABYTES + sizeof(LONG_PTR);
++  wc.hInstance = GetModuleHandleA("kernel32.dll");
++  wc.lpszClassName = "GNUstepWindowClass";
++  RegisterClassExA(&wc);
++  hwnd = CreateWindowExA(WS_EX_TOOLWINDOW, "GNUstepWindowClass", "other",
++    WS_POPUP, 0, 0, 10, 10, NULL, NULL, wc.hInstance, NULL);
++  SetWindowLongPtr(hwnd, OFF_LEVEL, NSPopUpMenuWindowLevel);
++  SetWindowLongPtr(hwnd, OFF_ORDERED, 1);
++  SetEvent(ready);
++  if (WaitForSingleObject(through, 5000) == WAIT_TIMEOUT)
++    {
++      InterlockedExchange(&waited, 1);
++    }
++  until = GetTickCount() + 1000;
++  while (GetTickCount() < until)
++    {
++      while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE))
++	{
++	  DispatchMessageA(&msg);
++	}
++      Sleep(10);
++    }
++  DestroyWindow(hwnd);
++  return 0;
++}
++
++int
++main(void)
++{
++  START_SET("win32 other programs' windows")
++
++  NSWindow	*window = nil;
++
++  NS_DURING
++    {
++      [NSApplication sharedApplication];
++      window = [[NSWindow alloc] initWithContentRect: NSMakeRect(100, 100, 200, 100)
++	styleMask: NSTitledWindowMask
++	backing: NSBackingStoreBuffered
++	defer: NO];
++    }
++  NS_HANDLER
++    {
++      window = nil;
++    }
++  NS_ENDHANDLER
++
++  if (window == nil)
++    {
++      SKIP("no win32 server available")
++    }
++  else
++    {
++      HANDLE	thread;
++
++      ready = CreateEventA(NULL, TRUE, FALSE, NULL);
++      through = CreateEventA(NULL, TRUE, FALSE, NULL);
++      thread = CreateThread(NULL, 0, otherProgram, NULL, 0, NULL);
++      WaitForSingleObject(ready, INFINITE);
++
++      [window orderFront: nil];
++      [window orderOut: nil];
++      [window orderFront: nil];
++      SetEvent(through);
++      WaitForSingleObject(thread, INFINITE);
++
++      PASS(waited == 0,
++	"ordering a window in waits for no other program's window")
++    }
++
++  END_SET("win32 other programs' windows")
++  return 0;
++}
++
++#else
++
++int
++main(void)
++{
++  START_SET("win32 other programs' windows")
++    SKIP("back is not built with the win32 server and cairo")
++  END_SET("win32 other programs' windows")
++  return 0;
++}
++
++#endif
+-- 
+2.50.1 (Apple Git-155)
+
