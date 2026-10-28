@@ -1092,6 +1092,20 @@ libs-back's suite: on Windows, MSYS2 CLANG64, both checks fail without
 the fix and pass with it. Its commit says "Patch done with help of AI."
 and carries no Claude trailer, ready to send upstream.
 
+Added on 2026-10-28 for UDQuakeTools, whose Quarry crashed on Windows
+closing a workspace's window: `window-close-keeps-controller` (libs-gui).
+A document's window controller leaves its document on
+NSWindowWillCloseNotification and autoreleases itself, but libs-base
+posts a notification in a pool of its own, so the controller was released
+before -[NSWindow close] ordered the window out; on Windows, hiding the
+window resets its cursor rectangles at once, and a split view asked its
+released delegate (the controller) for its divider. -close keeps the
+controller and the delegate in its own pool. `NSWindowController/
+closeKeepsController.m`: on Linux aarch64, every libs-gui patch here
+applied, it fails without the fix and passes with it, as do the NSWindow
+and NSWindowController tests (64). Its commit says "Patch done with help
+of AI." and carries no Claude trailer, ready to send upstream.
+
 Added on 2026-10-28 for UDQuakeTools, whose Quarry tests hung on Linux:
 `notificationqueue-unregister` (libs-base). A thread's notification
 queues are listed as they are made; unregistering one past the list's
@@ -1268,6 +1282,7 @@ among it, passes with this gui and fails without it.
 | `quick-click-order` | libs-back | test | not sent yet | (none: UDCodeKit and UDQuakeTools use it from here) |
 | `binding-to-many-mutation` | libs-gui | test | not sent yet | (none: UDQuakeTools uses it from here) |
 | `controller-selection-markers` | libs-gui | test | not sent yet | (none: bound controls show AppKit's placeholders from here) |
+| `window-close-keeps-controller` | libs-gui | test | not sent yet | (none: UDQuakeTools' Quarry uses it from here) |
 | `controller-to-many-content` | libs-gui | test | not sent yet (after `controller-entity-mode`) | (none: Logbook adds records through it) |
 | `controller-to-many-set` | libs-gui | test | not sent yet (after `controller-to-many-content`) | (none: Logbook filters records through it) |
 | `controller-value-bindings` | libs-gui | test | not sent yet | (none: Logbook's pick lists bind their order through it) |
