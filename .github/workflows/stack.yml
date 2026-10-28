@@ -45,7 +45,7 @@ jobs:
       LIBRARY_COMBO: ng-gnu-gnu
       RUNTIME_VERSION: gnustep-2.0
       LD_LIBRARY_PATH: /opt/gnustep/lib
-      COMPONENTS: libobjc2 libdispatch tools-make libs-base libs-gui libs-back libs-corebase libs-opal eau tools-xctest
+      COMPONENTS: libobjc2 libdispatch tools-make libs-base libs-gui libs-back libs-corebase libs-opal eau tools-xctest gsupdater
     steps:
       - uses: actions/checkout@v4
 
@@ -89,7 +89,7 @@ jobs:
           mkdir -p "$d"
           echo "$VERSION" > "$d/VERSION"
           { echo "gnustep-patches $GITHUB_SHA"
-            for s in "$RUNNER_TEMP"/gnustep-sources/*/; do echo "$(basename "$s") $(git -C "$s" rev-parse HEAD)"; done
+            for s in "$RUNNER_TEMP"/gnustep-sources/*/; do [ -d "$s/.git" ] || continue; echo "$(basename "$s") $(git -C "$s" rev-parse HEAD)"; done
           } > "$d/MANIFEST"
           cp Scripts/packages-ubuntu.txt Scripts/build-gnustep.sh "$d/"
           cat "$d/MANIFEST"
@@ -142,7 +142,7 @@ jobs:
       RUNTIME_VERSION: gnustep-2.0
       # Eau is built on X11; Windows applications use WinUXTheme, the native
       # look, instead.
-      COMPONENTS: cairo libobjc2 libdispatch tools-make libs-base libs-gui libs-back libs-corebase libs-opal winuxtheme tools-xctest
+      COMPONENTS: cairo libobjc2 libdispatch tools-make libs-base libs-gui libs-back libs-corebase libs-opal winuxtheme tools-xctest gsupdater
     steps:
       # The patches are applied byte for byte: no CRLF.
       - name: Line endings
@@ -183,7 +183,7 @@ jobs:
           mkdir -p "$d"
           echo "$VERSION" > "$d/VERSION"
           { echo "gnustep-patches $GITHUB_SHA"
-            for s in "$(cygpath -u "$RUNNER_TEMP")"/gnustep-sources/*/; do echo "$(basename "$s") $(git -C "$s" rev-parse HEAD)"; done
+            for s in "$(cygpath -u "$RUNNER_TEMP")"/gnustep-sources/*/; do [ -d "$s/.git" ] || continue; echo "$(basename "$s") $(git -C "$s" rev-parse HEAD)"; done
           } > "$d/MANIFEST"
           cp Scripts/packages-msys2.txt Scripts/build-gnustep.sh "$d/"
           cat "$d/MANIFEST"
