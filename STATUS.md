@@ -330,6 +330,16 @@ of its 17 checks without the fix and passes with it on libs-gui 5c43a947f;
 `NSArrayController/selectionKVO.m`, which checked the old answers, now
 checks these.
 
+Extended on 2026-10-28 for UDQuakeTools, whose number fields took text
+through a selection: `controller-selection-markers`' proxy validates a
+value as AppKit's does, by each selected object
+(-validateValue:forKey:error: and the key path form); it had neither, so
+NSObject's took every value. `NSObjectController/selectionValidation.m`:
+on Windows, MSYS2 CLANG64, six of its seven checks fail without it and
+all pass with it, as do the 108 NSObjectController checks. The patch also
+drops the Claude trailer it carried, saying "Patch done with help of AI."
+instead, ready to send upstream.
+
 Amended on 2026-10-20, two regressions of the 2026.10.20 release.
 `nsdateformatter-settings` made a formatter not lenient by default with
 ICU's strict parsing, which refuses what macOS's not-lenient parsing
