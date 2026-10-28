@@ -62,8 +62,9 @@ gnustep-patches-<version>-ubuntu22.04-aarch64.tar.xz
 to its release: `opt/gnustep`, unpacked at `/`. Ubuntu 22.04, the oldest LTS
 in support, so that what is built on it runs on anything newer; every
 component any application uses (libobjc2, libdispatch, tools-make, libs-base,
-libs-gui, libs-back, libs-corebase, libs-opal, the Eau theme, tools-xctest),
-with the patches applied. `/opt/gnustep/share/gnustep-patches` says what it
+libs-gui, libs-back, libs-corebase, libs-opal, the Eau theme, tools-xctest,
+and GSUpdater, the stack's own, in `Components/GSUpdater`), with the patches
+applied. `/opt/gnustep/share/gnustep-patches` says what it
 is: `VERSION`, `MANIFEST` (the commit of every component), the packages
 building on it needs (`Scripts/packages-ubuntu.txt`) and `build-gnustep.sh`
 (`--verify-only` checks it). An application names the version it builds on

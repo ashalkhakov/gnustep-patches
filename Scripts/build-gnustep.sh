@@ -21,7 +21,8 @@
 #   PREFIX           where the stack is installed (also accepted: INSTALL_PATH)
 #   SOURCES          where the checkouts live (also accepted: DEPS_PATH)
 #   COMPONENTS       build these, in this order (default: the full stack;
-#                    on Windows, cairo first, and winuxtheme in place of eau)
+#                    on Windows, cairo first, and winuxtheme in place of eau;
+#                    gsupdater, the stack's own, last)
 #   PATCHES          "all" (default), "none", or a list of <project>/<topic>
 #   CC, CXX          default clang / clang++
 #   LIBRARY_COMBO    default ng-gnu-gnu
@@ -52,7 +53,7 @@ case "$(uname -s)" in
     MINGW*|MSYS*) theme=winuxtheme; cairo=cairo ;;
     *)            theme=eau; cairo= ;;
 esac
-COMPONENTS=${COMPONENTS:-"$cairo libobjc2 libdispatch tools-make libs-base libs-gui libs-back $theme tools-xctest"}
+COMPONENTS=${COMPONENTS:-"$cairo libobjc2 libdispatch tools-make libs-base libs-gui libs-back $theme tools-xctest gsupdater"}
 PATCHES=${PATCHES:-all}
 CC=${CC:-clang}
 CXX=${CXX:-clang++}
@@ -423,6 +424,23 @@ build_tools_xctest() {
     (cd "$SOURCES/tools-xctest" && make -j"$JOBS" && make install)
 }
 
+# An application's updates, the same class everywhere: WinSparkle on
+# Windows, none on Linux (Components/GSUpdater). The stack's own, so not
+# fetched; its tests run before it is called built.
+build_gsupdater() {
+    gnustep_sh
+    rm -rf "$SOURCES/gsupdater"
+    cp -R "$PATCHES_ROOT/Components/GSUpdater" "$SOURCES/gsupdater"
+    (cd "$SOURCES/gsupdater" && make -j"$JOBS" && make install)
+    # A test that does not build is only "skipped", and gnustep-tests says
+    # All OK: its summary is read too.
+    if ! (cd "$SOURCES/gsupdater" && gnustep-tests Tests) \
+        || grep -q 'Skipped\|Failed' "$SOURCES/gsupdater/tests.sum"; then
+        cat "$SOURCES/gsupdater/tests.log" >&2
+        return 1
+    fi
+}
+
 # ------------------------------------------------------------------ #
 # Verification - run after a build and after a cache restore, because a
 # prefix that came out of a cache can be wrong in exactly the same ways.
@@ -512,6 +530,15 @@ verify() {
         esac
     done
 
+    case " $COMPONENTS " in
+        *" gsupdater "*)
+            if ! find "$PREFIX" -maxdepth 6 -name 'GSUpdater.h' | grep -q .; then
+                echo "verify: no GSUpdater in $PREFIX" >&2
+                failed=1
+            fi
+            ;;
+    esac
+
     # gnustep-gui builds its sound plug-ins (NSSound's) only when it finds
     # libsndfile and libao, and says nothing when it does not.
     case " $COMPONENTS " in
@@ -554,6 +581,7 @@ for component in $COMPONENTS; do
         eau)            build_eau ;;
         winuxtheme)     build_winuxtheme ;;
         tools-xctest)   build_tools_xctest ;;
+        gsupdater)      build_gsupdater ;;
         *) echo "build-gnustep: unknown component $component" >&2; exit 2 ;;
     esac
 done

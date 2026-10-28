@@ -1,0 +1,3 @@
+# The tests run on the library as installed (Scripts/build-gnustep.sh).
+-include $(GNUSTEP_MAKEFILES)/Additional/gui.make
+AUXILIARY_TOOL_LIBS += -lGSUpdater $(GUI_LIBS)
