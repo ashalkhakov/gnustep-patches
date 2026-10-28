@@ -1,4 +1,4 @@
-From 3143a2ebae570e982199599adfd986ff8366ba0e Mon Sep 17 00:00:00 2001
+From f3549463f8fd7cee04752bb1463702f14508f956 Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Mon, 19 Oct 2026 16:49:44 +0000
 Subject: [PATCH] Answer selection markers from a controller's selection
@@ -63,27 +63,36 @@ the default placeholders; it passes on macOS 15. Without the change six
 of its checks fail, and its second set stops at the first call to
 +defaultPlaceholderForMarker:withBinding:, not implemented.
 
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+A value for the selection is validated as AppKit's is, by each selected
+object (-validateValue:forKey:error: and the key path form), which may
+refuse it or change it: the proxy had neither, so NSObject's took every
+value, and a number field bound through a selection let text through.
+Tests/gui/NSObjectController/selectionValidation.m: on Windows (MSYS2
+CLANG64), six of its seven checks fail without it and all pass with it.
+
+Patch done with help of AI.
 ---
  Source/GNUmakefile                            |   1 +
  Source/GSBindingHelpers.h                     |   1 +
  Source/GSControllerSelectionProxy.h           |  42 +++
- Source/GSControllerSelectionProxy.m           | 246 ++++++++++++++++++
+ Source/GSControllerSelectionProxy.m           | 274 ++++++++++++++++++
  Source/NSArrayController.m                    |  11 -
- Source/NSKeyValueBinding.m                    | 103 ++++++--
+ Source/NSKeyValueBinding.m                    | 103 +++++--
  Source/NSObjectController.m                   |   5 +-
  Source/NSTextField.m                          |  10 +
  Tests/gui/NSArrayController/selectionKVO.m    |  19 +-
- .../NSObjectController/markerPlaceholders.m   | 212 +++++++++++++++
- .../gui/NSObjectController/selectionMarkers.m | 134 ++++++++++
- 11 files changed, 739 insertions(+), 45 deletions(-)
+ .../NSObjectController/markerPlaceholders.m   | 212 ++++++++++++++
+ .../gui/NSObjectController/selectionMarkers.m | 134 +++++++++
+ .../NSObjectController/selectionValidation.m  | 109 +++++++
+ 12 files changed, 876 insertions(+), 45 deletions(-)
  create mode 100644 Source/GSControllerSelectionProxy.h
  create mode 100644 Source/GSControllerSelectionProxy.m
  create mode 100644 Tests/gui/NSObjectController/markerPlaceholders.m
  create mode 100644 Tests/gui/NSObjectController/selectionMarkers.m
+ create mode 100644 Tests/gui/NSObjectController/selectionValidation.m
 
 diff --git a/Source/GNUmakefile b/Source/GNUmakefile
-index c7f67a752..da8f7a669 100644
+index c7f67a7..da8f7a6 100644
 --- a/Source/GNUmakefile
 +++ b/Source/GNUmakefile
 @@ -309,6 +309,7 @@ NSWindowController.m \
@@ -95,7 +104,7 @@ index c7f67a752..da8f7a669 100644
  GSDisplayServer.m \
  GSHelpManagerPanel.m \
 diff --git a/Source/GSBindingHelpers.h b/Source/GSBindingHelpers.h
-index 7d74001ad..1731f25b2 100644
+index 7d74001..1731f25 100644
 --- a/Source/GSBindingHelpers.h
 +++ b/Source/GSBindingHelpers.h
 @@ -40,6 +40,7 @@
@@ -108,7 +117,7 @@ index 7d74001ad..1731f25b2 100644
  }
 diff --git a/Source/GSControllerSelectionProxy.h b/Source/GSControllerSelectionProxy.h
 new file mode 100644
-index 000000000..a0fb1e949
+index 0000000..a0fb1e9
 --- /dev/null
 +++ b/Source/GSControllerSelectionProxy.h
 @@ -0,0 +1,42 @@
@@ -156,10 +165,10 @@ index 000000000..a0fb1e949
 +#endif /* _GSControllerSelectionProxy_h_GNUSTEP_GUI_INCLUDE */
 diff --git a/Source/GSControllerSelectionProxy.m b/Source/GSControllerSelectionProxy.m
 new file mode 100644
-index 000000000..7c3f96caa
+index 0000000..28582d3
 --- /dev/null
 +++ b/Source/GSControllerSelectionProxy.m
-@@ -0,0 +1,246 @@
+@@ -0,0 +1,274 @@
 +/* Implementation of class GSControllerSelectionProxy
 +   Copyright (C) 2026 Free Software Foundation, Inc.
 +
@@ -333,6 +342,34 @@ index 000000000..7c3f96caa
 +    }
 +}
 +
++- (BOOL) validateValue: (id *)ioValue
++		forKey: (NSString *)key
++		 error: (NSError **)outError
++{
++  return [self validateValue: ioValue forKeyPath: key error: outError];
++}
++
++/* Valid when each selected object finds it so, as the value is set on
++   each; the first to change it changes it for the rest. */
++- (BOOL) validateValue: (id *)ioValue
++	    forKeyPath: (NSString *)keyPath
++		 error: (NSError **)outError
++{
++  NSEnumerator *e = [[_controller selectedObjects] objectEnumerator];
++  id object;
++
++  while ((object = [e nextObject]) != nil)
++    {
++      if ([object validateValue: ioValue
++		     forKeyPath: keyPath
++			  error: outError] == NO)
++	{
++	  return NO;
++	}
++    }
++  return YES;
++}
++
 +- (void) addObserver: (NSObject *)observer
 +	  forKeyPath: (NSString *)keyPath
 +	     options: (NSKeyValueObservingOptions)options
@@ -407,10 +444,10 @@ index 000000000..7c3f96caa
 +@end
 +
 diff --git a/Source/NSArrayController.m b/Source/NSArrayController.m
-index 2aa680bac..732221051 100644
+index 682b4a3..7876ed9 100644
 --- a/Source/NSArrayController.m
 +++ b/Source/NSArrayController.m
-@@ -486,17 +486,6 @@
+@@ -431,17 +431,6 @@ + (NSSet*) keyPathsForValuesAffectingCanSelectPrevious
      NSContentBinding, nil];
  }
  
@@ -429,10 +466,10 @@ index 2aa680bac..732221051 100644
  {
    return [_selection_indexes firstIndex];
 diff --git a/Source/NSKeyValueBinding.m b/Source/NSKeyValueBinding.m
-index 5ee0981ab..92c5c763a 100644
+index 12ba766..133c33b 100644
 --- a/Source/NSKeyValueBinding.m
 +++ b/Source/NSKeyValueBinding.m
-@@ -137,6 +137,7 @@
+@@ -137,6 +137,7 @@ - (void) unbind: (NSString *)binding
  static NSRecursiveLock *bindingLock = nil;
  static NSMapTable *classTable = NULL;      //available bindings
  static NSMapTable *objectTable = NULL;     //bound bindings
@@ -502,7 +539,7 @@ index 5ee0981ab..92c5c763a 100644
  @implementation GSKeyValueBinding
  
  + (void) initialize
-@@ -162,6 +218,7 @@ void GSBindingInvokeAction(NSString *targetKey, NSString *argumentKey,
+@@ -162,6 +218,7 @@ + (void) initialize
            NSObjectMapValueCallBacks, 128);
        objectTable = NSCreateMapTable(NSNonRetainedObjectMapKeyCallBacks,
            NSObjectMapValueCallBacks, 128);
@@ -510,7 +547,7 @@ index 5ee0981ab..92c5c763a 100644
      }
  }
  
-@@ -292,6 +349,7 @@ void GSBindingInvokeAction(NSString *targetKey, NSString *argumentKey,
+@@ -292,6 +349,7 @@ - (id) initWithBinding: (NSString *)binding
    NSMutableDictionary *bindings;
    
    src = source;
@@ -518,7 +555,7 @@ index 5ee0981ab..92c5c763a 100644
    if (options == nil)
      {
        info = [[NSDictionary alloc] initWithObjectsAndKeys:
-@@ -332,6 +390,7 @@ void GSBindingInvokeAction(NSString *targetKey, NSString *argumentKey,
+@@ -332,6 +390,7 @@ - (id) initWithBinding: (NSString *)binding
  - (void)dealloc
  {
    DESTROY(info);
@@ -526,7 +563,7 @@ index 5ee0981ab..92c5c763a 100644
    src = nil; 
    [super dealloc];
  }
-@@ -429,40 +488,36 @@ void GSBindingInvokeAction(NSString *targetKey, NSString *argumentKey,
+@@ -419,40 +478,36 @@ - (id) transformValue: (id)value withOptions: (NSDictionary *)options
  {
    NSString *valueTransformerName;
    NSValueTransformer *valueTransformer;
@@ -588,7 +625,7 @@ index 5ee0981ab..92c5c763a 100644
        return placeholder;
      }
 diff --git a/Source/NSObjectController.m b/Source/NSObjectController.m
-index 4bfac5188..b8d8ca9f2 100644
+index 71f00d7..77145b4 100644
 --- a/Source/NSObjectController.m
 +++ b/Source/NSObjectController.m
 @@ -31,6 +31,7 @@
@@ -599,7 +636,7 @@ index 4bfac5188..b8d8ca9f2 100644
  #import <Foundation/NSKeyedArchiver.h>
  #import <Foundation/NSKeyValueObserving.h>
  #import <Foundation/NSKeyValueCoding.h>
-@@ -188,6 +189,7 @@ static NSString *GSObjectsChangedInManagingContextNotification
+@@ -134,6 +135,7 @@ - (id) init
  - (void) dealloc
  {
    [GSKeyValueBinding unbindAllForObject: self];
@@ -607,7 +644,7 @@ index 4bfac5188..b8d8ca9f2 100644
    RELEASE(_content);
    RELEASE(_entity_name_key);
    RELEASE(_fetch_predicate);
-@@ -438,8 +440,7 @@ static NSString *GSObjectsChangedInManagingContextNotification
+@@ -363,8 +365,7 @@ - (NSArray*) selectedObjects
  
  - (id) selection
  {
@@ -618,7 +655,7 @@ index 4bfac5188..b8d8ca9f2 100644
  
  
 diff --git a/Source/NSTextField.m b/Source/NSTextField.m
-index 2ebd2772b..a1b6f7185 100644
+index 2ebd277..a1b6f71 100644
 --- a/Source/NSTextField.m
 +++ b/Source/NSTextField.m
 @@ -47,6 +47,7 @@
@@ -629,7 +666,7 @@ index 2ebd2772b..a1b6f7185 100644
  
  static NSNotificationCenter *nc;
  
-@@ -71,6 +72,15 @@ static Class textFieldCellClass;
+@@ -71,6 +72,15 @@ + (void) initialize
  
        [self exposeBinding: NSEditableBinding];
        [self exposeBinding: NSTextColorBinding];
@@ -646,7 +683,7 @@ index 2ebd2772b..a1b6f7185 100644
  }
  
 diff --git a/Tests/gui/NSArrayController/selectionKVO.m b/Tests/gui/NSArrayController/selectionKVO.m
-index 74952f703..3fd8223ab 100644
+index 74952f7..3fd8223 100644
 --- a/Tests/gui/NSArrayController/selectionKVO.m
 +++ b/Tests/gui/NSArrayController/selectionKVO.m
 @@ -4,9 +4,9 @@
@@ -670,7 +707,7 @@ index 74952f703..3fd8223ab 100644
  
  static NSMutableSet *fired;
  
-@@ -105,15 +106,17 @@ main(int argc, const char **argv)
+@@ -105,15 +106,17 @@ - (void) observeValueForKeyPath: (NSString *)keyPath
            [ac removeObserver: observer forKeyPath: key];
          }
  
@@ -695,7 +732,7 @@ index 74952f703..3fd8223ab 100644
      if ([[localException name] isEqualToString: NSInternalInconsistencyException]
 diff --git a/Tests/gui/NSObjectController/markerPlaceholders.m b/Tests/gui/NSObjectController/markerPlaceholders.m
 new file mode 100644
-index 000000000..94fd4f971
+index 0000000..94fd4f9
 --- /dev/null
 +++ b/Tests/gui/NSObjectController/markerPlaceholders.m
 @@ -0,0 +1,212 @@
@@ -913,7 +950,7 @@ index 000000000..94fd4f971
 +}
 diff --git a/Tests/gui/NSObjectController/selectionMarkers.m b/Tests/gui/NSObjectController/selectionMarkers.m
 new file mode 100644
-index 000000000..bb2c47ff7
+index 0000000..bb2c47f
 --- /dev/null
 +++ b/Tests/gui/NSObjectController/selectionMarkers.m
 @@ -0,0 +1,134 @@
@@ -1051,6 +1088,121 @@ index 000000000..bb2c47ff7
 +
 +  return 0;
 +}
+diff --git a/Tests/gui/NSObjectController/selectionValidation.m b/Tests/gui/NSObjectController/selectionValidation.m
+new file mode 100644
+index 0000000..d771cab
+--- /dev/null
++++ b/Tests/gui/NSObjectController/selectionValidation.m
+@@ -0,0 +1,109 @@
++/* A value for a controller's selection is validated as AppKit's is: by
++   each selected object (-validateValue:forKey:error:, a key's own
++   -validate<Key>:error:), which may refuse it or change it.  Without that a
++   binding's value was taken whatever the objects said of it. */
++#include "Testing.h"
++
++#include <Foundation/NSArray.h>
++#include <Foundation/NSAutoreleasePool.h>
++#include <Foundation/NSError.h>
++#include <Foundation/NSIndexSet.h>
++#include <Foundation/NSString.h>
++#include <Foundation/NSValue.h>
++
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSArrayController.h>
++#include <AppKit/NSObjectController.h>
++
++@interface Counted : NSObject
++{
++@public
++  int	count;
++}
++@end
++
++@implementation Counted
++- (int) count
++{
++  return count;
++}
++
++- (void) setCount: (int)value
++{
++  count = value;
++}
++
++/* A number, as text a field gives: refused when it is none, made one
++   when it is. */
++- (BOOL) validateCount: (id *)ioValue error: (NSError **)outError
++{
++  if ([*ioValue isKindOfClass: [NSString class]])
++    {
++      if ([*ioValue intValue] == 0 && [*ioValue isEqual: @"0"] == NO)
++	{
++	  if (outError != NULL)
++	    {
++	      *outError = [NSError errorWithDomain: @"Counted" code: 1 userInfo: nil];
++	    }
++	  return NO;
++	}
++      *ioValue = [NSNumber numberWithInt: [*ioValue intValue]];
++    }
++  return YES;
++}
++@end
++
++int
++main(int argc, const char **argv)
++{
++  NSArrayController	*ac;
++  NSObjectController	*oc;
++  Counted		*first;
++  Counted		*second;
++  NSError		*error;
++  id			value;
++
++  START_SET("NSObjectController selection validation")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  first = AUTORELEASE([[Counted alloc] init]);
++  second = AUTORELEASE([[Counted alloc] init]);
++  ac = AUTORELEASE([[NSArrayController alloc] init]);
++  [ac setContent: [NSMutableArray arrayWithObjects: first, second, nil]];
++  [ac setSelectionIndexes: [NSIndexSet indexSetWithIndex: 0]];
++
++  value = @"many";
++  error = nil;
++  PASS(([[ac selection] validateValue: &value forKey: @"count" error: &error]) == NO,
++    "a value the selected object refuses is refused")
++  PASS(error != nil, "with the selected object's error")
++
++  value = @"8";
++  PASS(([[ac selection] validateValue: &value forKey: @"count" error: NULL]),
++    "a value the selected object takes is taken")
++  PASS_EQUAL(value, [NSNumber numberWithInt: 8],
++    "as the selected object made it")
++
++  value = @"many";
++  PASS(([[ac selection] validateValue: &value forKeyPath: @"count" error: NULL]) == NO,
++    "by key path too")
++
++  [ac setSelectionIndexes: [NSIndexSet indexSetWithIndexesInRange: NSMakeRange(0, 2)]];
++  value = @"many";
++  PASS(([[ac selection] validateValue: &value forKey: @"count" error: NULL]) == NO,
++    "two selected: refused when they refuse it")
++
++  oc = AUTORELEASE([[NSObjectController alloc] initWithContent: first]);
++  value = @"many";
++  PASS(([[oc selection] validateValue: &value forKey: @"count" error: NULL]) == NO,
++    "an object controller's selection, the same")
++
++  END_SET("NSObjectController selection validation")
++  return 0;
++}
 -- 
-2.43.0
+2.50.1 (Apple Git-155)
 
