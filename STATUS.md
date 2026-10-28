@@ -1082,6 +1082,22 @@ libs-back's suite: on Windows, MSYS2 CLANG64, both checks fail without
 the fix and pass with it. Its commit says "Patch done with help of AI."
 and carries no Claude trailer, ready to send upstream.
 
+Added on 2026-10-28 for UDCode on Windows, which hung while the program
+it was debugging stood at a breakpoint: `win32-own-windows`. The win32
+server sorted every window of the class GNUstepWindowClass into level
+order, and placed a window it ordered in among them, other applications'
+included, and moved them with SetWindowPos, which waits for the thread
+that owns the window; a program stopped in a debugger answers nothing, so
+every other GNUstep application hung at its next window move, and one
+being started at its first window. It now takes only this thread's
+windows for its own. `Tests/cairo/win32otherwindows.m` in libs-back's
+suite plays the other application with a thread that reads no messages:
+on Windows, MSYS2 CLANG64, every libs-back patch here applied, it fails
+without the fix and passes with it; the cairo tests pass but
+`surfacedevice.m`, which fails on Windows without it too. Its commit says
+"Patch done with help of AI." and carries no Claude trailer, ready to
+send upstream.
+
 Extended on 2026-10-27 for UDCalc and HomeRow on Windows: `arc4random-glibc`
 now provides arc4random(), arc4random_uniform() and arc4random_buf() on
 Windows too, whose C runtime has none, exported from the base DLL and
@@ -1271,6 +1287,7 @@ among it, passes with this gui and fails without it.
 | `pdf-lent-image` | cairo | repro (`pdf-pad-win32.c`) | not sent yet (by hand) | (none: the Windows stack builds cairo with it) |
 | `system-font-segoe-ui` | libs-back | test | not sent yet | (none: SimpleNotes uses it from here) |
 | `win32-window-icon` | libs-back | test | not sent yet | (none: every Windows app uses it from here) |
+| `win32-own-windows` | libs-back | test | not sent yet | (none: UDCode on Windows uses it from here) |
 | `workspace-open-url-quietly` | libs-gui | test | not sent yet | (none: every app uses it from here) |
 
 Re-run that check before sending anything: `Scripts/apply-patches.sh` on a
