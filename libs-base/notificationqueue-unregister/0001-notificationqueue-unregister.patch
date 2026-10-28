@@ -1,0 +1,151 @@
+From 502a0768465b4717b3edd695efdde1a1eb633646 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Wed, 28 Oct 2026 21:19:23 +0500
+Subject: [PATCH] NSNotificationQueue: a thread's queues unregistered in any
+ order
+
++[NotificationQueueList unregisterQueue:] looked for a queue past the
+head of the thread's list without moving along it: the loop compared the
+same entry each time round, so a thread's third queue (or any after it,
+or one it never registered) never left the list and its -dealloc looped
+for ever. And an element it removed, the head or another, still pointed
+at the rest of the list when it was released, and -dealloc releases
+everything after it: the queues behind it were freed while still
+listed, and the next to go read freed memory. An editor that made a
+language server client, each with a queue of its own, hung when the
+third was released.
+
+The loop moves to the next entry, and a removed element gives up the
+rest of the list before it is released.
+
+Tests/base/NSNotificationQueue/unregister.m makes four queues on one
+thread and releases them out of order, then three more and the first of
+those first, a watchdog thread failing it after ten seconds: without the
+change it fails there, at the third queue's release; with the first
+change alone it aborts at the fourth (a message to a deallocated list);
+with both all seven checks pass (Linux, aarch64).
+
+Patch done with help of AI.
+---
+ Source/NSNotificationQueue.m                |  3 +
+ Tests/base/NSNotificationQueue/TestInfo     |  0
+ Tests/base/NSNotificationQueue/unregister.m | 79 +++++++++++++++++++++
+ 3 files changed, 82 insertions(+)
+ create mode 100644 Tests/base/NSNotificationQueue/TestInfo
+ create mode 100644 Tests/base/NSNotificationQueue/unregister.m
+
+diff --git a/Source/NSNotificationQueue.m b/Source/NSNotificationQueue.m
+index 6c6abde..87819e1 100644
+--- a/Source/NSNotificationQueue.m
++++ b/Source/NSNotificationQueue.m
+@@ -127,6 +127,7 @@ + (void) unregisterQueue: (NSNotificationQueue*)q
+       NSMutableDictionary	*d = GSCurrentThreadDictionary();
+       NotificationQueueList	*tmp = list->next;
+ 
++      list->next = nil;		/* The rest is no longer the old head's.	*/
+       if (tmp != nil)
+         {
+           [d setObject: tmp forKey: lkey];
+@@ -146,9 +147,11 @@ + (void) unregisterQueue: (NSNotificationQueue*)q
+ 	      NotificationQueueList	*tmp = list->next;
+ 
+ 	      list->next = tmp->next;
++	      tmp->next = nil;	/* Nor the removed element's.	*/
+ 	      RELEASE(tmp);
+ 	      break;
+ 	    }
++	  list = list->next;
+ 	}
+     }
+ }
+diff --git a/Tests/base/NSNotificationQueue/TestInfo b/Tests/base/NSNotificationQueue/TestInfo
+new file mode 100644
+index 0000000..e69de29
+diff --git a/Tests/base/NSNotificationQueue/unregister.m b/Tests/base/NSNotificationQueue/unregister.m
+new file mode 100644
+index 0000000..f65300e
+--- /dev/null
++++ b/Tests/base/NSNotificationQueue/unregister.m
+@@ -0,0 +1,79 @@
++/* A thread's notification queues, each registered on it as it is made,
++   are each unregistered as it goes, in whatever order.  The list was
++   searched past its first two entries without being walked, so a third
++   queue's going (or that of a queue the thread never had) looped for ever:
++   a watchdog thread fails the test rather than leaving it hung.  And an
++   element removed (the head or another) took the rest of the list with
++   it as it was deallocated, so the queues after it were released while
++   still listed. */
++#import <Foundation/NSAutoreleasePool.h>
++#import <Foundation/NSNotification.h>
++#import <Foundation/NSNotificationQueue.h>
++#import <Foundation/NSThread.h>
++#import "Testing.h"
++
++#include <stdio.h>
++#include <stdlib.h>
++
++static volatile BOOL	done = NO;
++
++@interface Watchdog : NSObject
++@end
++
++@implementation Watchdog
++- (void) watch: (id)unused
++{
++  [NSThread sleepForTimeInterval: 10.0];
++  if (done == NO)
++    {
++      fprintf(stderr, "a queue's going did not return within 10 seconds\n");
++      exit(1);
++    }
++}
++@end
++
++int
++main(void)
++{
++  NSAutoreleasePool	*arp = [NSAutoreleasePool new];
++  NSNotificationCenter	*center = [NSNotificationCenter defaultCenter];
++  NSNotificationQueue	*first;
++  NSNotificationQueue	*second;
++  NSNotificationQueue	*third;
++  NSNotificationQueue	*fourth;
++
++  START_SET("NSNotificationQueue unregistered")
++
++  [NSThread detachNewThreadSelector: @selector(watch:)
++			   toTarget: [Watchdog new]
++			 withObject: nil];
++
++  first = [[NSNotificationQueue alloc] initWithNotificationCenter: center];
++  second = [[NSNotificationQueue alloc] initWithNotificationCenter: center];
++  third = [[NSNotificationQueue alloc] initWithNotificationCenter: center];
++  fourth = [[NSNotificationQueue alloc] initWithNotificationCenter: center];
++
++  [third release];
++  PASS(YES, "a third queue goes")
++  [fourth release];
++  PASS(YES, "and a fourth, the last")
++  [second release];
++  PASS(YES, "and a second")
++  [first release];
++  PASS(YES, "and the first")
++
++  first = [[NSNotificationQueue alloc] initWithNotificationCenter: center];
++  second = [[NSNotificationQueue alloc] initWithNotificationCenter: center];
++  third = [[NSNotificationQueue alloc] initWithNotificationCenter: center];
++  [first release];
++  PASS(YES, "the first goes, the others listed")
++  [third release];
++  PASS(YES, "then the last")
++  [second release];
++  PASS(YES, "then the one left")
++  done = YES;
++
++  END_SET("NSNotificationQueue unregistered")
++  [arp release];
++  return 0;
++}
+-- 
+2.50.1 (Apple Git-155)
+

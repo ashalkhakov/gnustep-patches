@@ -1092,6 +1092,19 @@ libs-back's suite: on Windows, MSYS2 CLANG64, both checks fail without
 the fix and pass with it. Its commit says "Patch done with help of AI."
 and carries no Claude trailer, ready to send upstream.
 
+Added on 2026-10-28 for UDQuakeTools, whose Quarry tests hung on Linux:
+`notificationqueue-unregister` (libs-base). A thread's notification
+queues are listed as they are made; unregistering one past the list's
+first two looped for ever (the loop never moved along), and a removed
+element, still pointing at the rest, released the queues behind it as
+it was deallocated. Each LSPClient has a queue, so an editor hung
+releasing its third. `Tests/base/NSNotificationQueue/unregister.m`
+releases seven queues out of order under a watchdog: on Linux aarch64,
+every libs-base patch here applied, it fails without the fix (the third
+never goes), aborts with the loop's fix alone, and passes with both;
+Quarry's tests that hung pass. Its commit says "Patch done with help of
+AI." and carries no Claude trailer, ready to send upstream.
+
 Added on 2026-10-28 for UDCode on Windows, which hung while the program
 it was debugging stood at a breakpoint: `win32-own-windows`. The win32
 server sorted every window of the class GNUstepWindowClass into level
@@ -1208,6 +1221,7 @@ among it, passes with this gui and fails without it.
 | `predicate-string-escapes` | libs-base | test | not sent yet | (none: FreeCoreData and ORMKit's apps use it from here) |
 | `arc4random-glibc` | libs-base | test | not sent yet | (none: every app built on the stack uses it from here, on glibc before 2.36 and on Windows; HomeRow's and UDCalc's shims are gone) |
 | `windows-stdin-pipe` | libs-base | test | not sent yet | (none: UDCode's debug adapter on Windows uses it from here) |
+| `notificationqueue-unregister` | libs-base | test | not sent yet | (none: UDQuakeTools' Quarry uses it from here) |
 | `framework-dll-install-build-dir` | tools-make | none (NOTES.md has the reproduction) | not sent yet | (none: UDCodeKit's Windows install uses it from here) |
 | `collection-copy-is-shallow` | libs-base | test | not sent yet | (none: FreeCoreData uses it from here) |
 | `nonretained-value-identity` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
