@@ -1021,6 +1021,22 @@ under valgrind and crashes without it and runs clean with it; Logbook,
 with both bindings back, crashes three checks into its self-test on
 2026.10.20.7 and passes all 113 with this base.
 
+Added on 2026-10-29 for RDLKit, whose designer tests lost their
+pasteboards on Windows: `gpbs-auto-stop` (libs-back). The pasteboard
+server, started with --auto as NSPasteboard starts it, tracks only the
+connections of its pasteboards' owners, but asked whether to stop whenever
+any connection went: a client owning nothing going while no owner was
+tracked stopped it, and every other client lost its pasteboards ("port
+was invalidated", then "No local object with given target"). It now stops
+only when the last connection it tracks goes. `Tests/gpbs/autoStop.m`: on
+Linux x86_64, every libs-back patch here applied, a client keeps reading
+its pasteboard after another that owned nothing has come and gone; it
+fails without the fix and passes with it. Not all of RDLKit's Windows
+failure: there a client's connection is also dropped about 80 seconds into
+its designer suite (a callback to it goes unanswered for its 30-second
+reply timeout), a race still being found. Its commit says "Patch done with
+help of AI." and carries no Claude trailer, ready to send upstream.
+
 Added on 2026-10-29 for UDQuakeTools' Quarry: `tableview-click-below-rows`.
 A click below a table view's last row deselected nothing, so a list once
 chosen from could not be emptied, and Quarry's material, FX, particle and
@@ -1359,6 +1375,7 @@ among it, passes with this gui and fails without it.
 | `system-font-segoe-ui` | libs-back | test | not sent yet | (none: SimpleNotes uses it from here) |
 | `win32-window-icon` | libs-back | test | not sent yet | (none: every Windows app uses it from here) |
 | `win32-own-windows` | libs-back | test | not sent yet | (none: UDCode on Windows uses it from here) |
+| `gpbs-auto-stop` | libs-back | test | not sent yet | (none: RDLKit's designer tests use it from here) |
 | `workspace-open-url-quietly` | libs-gui | test | not sent yet | (none: every app uses it from here) |
 | `tableview-click-below-rows` | libs-gui | test | not sent yet | (none: UDQuakeTools uses it from here) |
 
