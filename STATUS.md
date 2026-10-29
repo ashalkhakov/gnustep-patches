@@ -1021,6 +1021,21 @@ under valgrind and crashes without it and runs clean with it; Logbook,
 with both bindings back, crashes three checks into its self-test on
 2026.10.20.7 and passes all 113 with this base.
 
+Added on 2026-10-29 for ORMKit, which did not compile on Windows:
+`windows-near-far` (libs-base). GSConfig.h includes <windows.h> on
+Windows, and with it minwindef.h's near and far, the 16-bit pointer
+qualifiers kept as macros that expand to nothing: a program that imported
+Foundation could not name a variable, a parameter or a selector's part
+near or far ("expected identifier"). ORMKit names a fact type's near and
+far roles so throughout; RDLKit and UDQuakeTools had renamed theirs. They
+are undefined after the include, as BOOL is; NEAR and FAR, which Windows'
+headers use, expand to nothing themselves. `Tests/base/GSConfig/nearFar.m`:
+on Windows, MSYS2 CLANG64, it does not compile without the fix and passes
+with it; ORMKit builds and passes its tests (ORMKitTests 284,
+ORMDesignerTests 38, the ormtool smoke test) with it. Its commit says
+"Patch done with help of AI." and carries no Claude trailer, ready to send
+upstream.
+
 Added on 2026-10-29 for RDLKit, whose designer tests lost their
 pasteboards on Windows: `gpbs-auto-stop` (libs-back). The pasteboard
 server, started with --auto as NSPasteboard starts it, tracks only the
@@ -1284,6 +1299,7 @@ among it, passes with this gui and fails without it.
 | `windows-stdin-pipe` | libs-base | test | not sent yet | (none: UDCode's debug adapter on Windows uses it from here) |
 | `notificationqueue-unregister` | libs-base | test | not sent yet | (none: UDQuakeTools' Quarry uses it from here) |
 | `windows-precise-time` | libs-base | test | not sent yet | (none: UDCodeKit's timing tests use it from here) |
+| `windows-near-far` | libs-base | test | not sent yet | (none: ORMKit on Windows uses it from here) |
 | `framework-dll-install-build-dir` | tools-make | none (NOTES.md has the reproduction) | not sent yet | (none: UDCodeKit's Windows install uses it from here) |
 | `collection-copy-is-shallow` | libs-base | test | not sent yet | (none: FreeCoreData uses it from here) |
 | `nonretained-value-identity` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
