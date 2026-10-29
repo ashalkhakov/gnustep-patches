@@ -1,0 +1,197 @@
+From 6420f1989ff830aa73abf51b0f448cb0955f8f48 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Thu, 29 Oct 2026 22:01:20 +0500
+Subject: [PATCH] NSDocument: the older read and write methods use the current
+ ones
+
+A document written against the current API -- -readFromData:ofType:error:
+and -dataOfType:error: only, as Apple's templates have it -- could not be
+read or written through the older methods: -loadDataRepresentation:ofType:
+and -dataRepresentationOfType: raised "must implement", and opening a file
+by its path (-openDocumentWithContentsOfFile:display:, the way a file named
+on the command line is opened) reads through -readFromFile:ofType: and
+-loadDataRepresentation:ofType:.  The current methods already fall back on
+the older ones a subclass overrides; the older ones now go to the current
+ones the same way, as on Cocoa: -loadDataRepresentation:ofType: to
+-readFromData:ofType:error:, -loadFileWrapperRepresentation:ofType: to
+-readFromFileWrapper:ofType:error:, -readFromFile:ofType: to
+-readFromURL:ofType:error: and -dataRepresentationOfType: to
+-dataOfType:error:, each only when the subclass overrides it, so neither
+way calls back into the other.
+
+Tests/gui/NSDocument/legacyForwards.m reads a document of such a class by
+its path and writes it through -dataRepresentationOfType:.  On Linux
+(x86_64), every libs-gui patch of gnustep-patches applied, both checks fail
+without the change and pass with it.
+
+Patch done with help of AI.
+---
+ Source/NSDocument.m                   | 28 ++++++++-
+ Tests/gui/NSDocument/TestInfo         |  0
+ Tests/gui/NSDocument/legacyForwards.m | 90 +++++++++++++++++++++++++++
+ 3 files changed, 117 insertions(+), 1 deletion(-)
+ create mode 100644 Tests/gui/NSDocument/TestInfo
+ create mode 100644 Tests/gui/NSDocument/legacyForwards.m
+
+diff --git a/Source/NSDocument.m b/Source/NSDocument.m
+index d7755c2..4e43eb6 100644
+--- a/Source/NSDocument.m
++++ b/Source/NSDocument.m
+@@ -588,6 +588,12 @@ - (BOOL) keepBackupFile
+ 
+ - (NSData *) dataRepresentationOfType: (NSString *)type
+ {
++  /* A document written against the current API (-dataOfType:error:) is
++   * written through this one too, as on Cocoa. */
++  if (OVERRIDDEN(dataOfType:error:))
++    {
++      return [self dataOfType: type error: NULL];
++    }
+   [NSException raise: NSInternalInconsistencyException format:@"%@ must implement %@",
+                NSStringFromClass([self class]), NSStringFromSelector(_cmd)];
+   return nil;
+@@ -610,6 +616,14 @@ - (NSData *) dataOfType: (NSString *)type
+ 
+ - (BOOL) loadDataRepresentation: (NSData *)data ofType: (NSString *)type
+ {
++  /* A document written against the current API (-readFromData:ofType:error:)
++   * is read through this one too, as on Cocoa: opening a file by its path
++   * (-openDocumentWithContentsOfFile:display:, a file given on the command
++   * line) comes this way. */
++  if (OVERRIDDEN(readFromData:ofType:error:))
++    {
++      return [self readFromData: data ofType: type error: NULL];
++    }
+   [NSException raise: NSInternalInconsistencyException format:@"%@ must implement %@",
+                NSStringFromClass([self class]), NSStringFromSelector(_cmd)];
+   return NO;
+@@ -652,6 +666,10 @@ - (NSFileWrapper *) fileWrapperOfType: (NSString *)type
+ - (BOOL) loadFileWrapperRepresentation: (NSFileWrapper *)wrapper 
+                                 ofType: (NSString *)type
+ {
++  if (OVERRIDDEN(readFromFileWrapper:ofType:error:))
++    {
++      return [self readFromFileWrapper: wrapper ofType: type error: NULL];
++    }
+   if ([wrapper isRegularFile])
+     {
+       return [self loadDataRepresentation: [wrapper regularFileContents] 
+@@ -676,7 +694,15 @@ - (BOOL) writeToFile: (NSString *)fileName ofType: (NSString *)type
+ 
+ - (BOOL) readFromFile: (NSString *)fileName ofType: (NSString *)type
+ {
+-  NSFileWrapper *wrapper = AUTORELEASE([[NSFileWrapper alloc] initWithPath: fileName]);
++  NSFileWrapper *wrapper;
++
++  if (OVERRIDDEN(readFromURL:ofType:error:))
++    {
++      return [self readFromURL: [NSURL fileURLWithPath: fileName]
++                        ofType: type
++                         error: NULL];
++    }
++  wrapper = AUTORELEASE([[NSFileWrapper alloc] initWithPath: fileName]);
+   return [self loadFileWrapperRepresentation: wrapper ofType: type];
+ }
+ 
+diff --git a/Tests/gui/NSDocument/TestInfo b/Tests/gui/NSDocument/TestInfo
+new file mode 100644
+index 0000000..e69de29
+diff --git a/Tests/gui/NSDocument/legacyForwards.m b/Tests/gui/NSDocument/legacyForwards.m
+new file mode 100644
+index 0000000..56af9e3
+--- /dev/null
++++ b/Tests/gui/NSDocument/legacyForwards.m
+@@ -0,0 +1,90 @@
++/* A document written against the current API -- -readFromData:ofType:error:
++   and -dataOfType:error: only -- is read and written through the older
++   methods as well, as on Cocoa.  Opening a file by its path
++   (-openDocumentWithContentsOfFile:display:, as a file named on the command
++   line is opened) reads through -readFromFile:ofType: and
++   -loadDataRepresentation:ofType:, which raised "must implement". */
++#import "Testing.h"
++#import <Foundation/NSAutoreleasePool.h>
++#import <Foundation/NSData.h>
++#import <Foundation/NSError.h>
++#import <Foundation/NSException.h>
++#import <Foundation/NSFileManager.h>
++#import <Foundation/NSString.h>
++#import <AppKit/NSApplication.h>
++#import <AppKit/NSDocument.h>
++
++@interface ModernDocument : NSDocument
++{
++@public
++  NSString	*text;
++}
++@end
++
++@implementation ModernDocument
++- (BOOL) readFromData: (NSData *)data
++	       ofType: (NSString *)type
++		error: (NSError **)error
++{
++  ASSIGN(text, AUTORELEASE([[NSString alloc] initWithData: data
++						  encoding: NSUTF8StringEncoding]));
++  return text != nil;
++}
++- (NSData *) dataOfType: (NSString *)type error: (NSError **)error
++{
++  return [text dataUsingEncoding: NSUTF8StringEncoding];
++}
++- (void) dealloc
++{
++  RELEASE(text);
++  [super dealloc];
++}
++@end
++
++int
++main(int argc, char **argv)
++{
++  START_SET("NSDocument's older methods use the current ones")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  {
++    NSAutoreleasePool	*arp = [NSAutoreleasePool new];
++    NSString		*path = [NSTemporaryDirectory()
++      stringByAppendingPathComponent: @"legacyForwards.txt"];
++    ModernDocument	*doc = nil;
++    NSData		*written = nil;
++
++    [@"a model" writeToFile: path atomically: YES
++		   encoding: NSUTF8StringEncoding error: NULL];
++
++    NS_DURING
++      doc = [[ModernDocument alloc] initWithContentsOfFile: path
++						    ofType: @"text"];
++    NS_HANDLER
++      doc = nil;
++    NS_ENDHANDLER
++    PASS(doc != nil && [doc->text isEqual: @"a model"],
++      "a document read by its path reads through -readFromData:ofType:error:")
++
++    NS_DURING
++      written = [doc dataRepresentationOfType: @"text"];
++    NS_HANDLER
++      written = nil;
++    NS_ENDHANDLER
++    PASS_EQUAL(written, [@"a model" dataUsingEncoding: NSUTF8StringEncoding],
++      "and is written through -dataOfType:error:")
++
++    RELEASE(doc);
++    [[NSFileManager defaultManager] removeItemAtPath: path error: NULL];
++    [arp release];
++  }
++
++  END_SET("NSDocument's older methods use the current ones")
++  return 0;
++}
+-- 
+2.50.1 (Apple Git-155)
+

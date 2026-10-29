@@ -1,0 +1,124 @@
+From 3f84011ff7ae9d9596e633ae36a25d3b06ff37db Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Thu, 29 Oct 2026 22:01:20 +0500
+Subject: [PATCH] NSApplication: NSOpen with an absolute path opens a file on
+ Windows too
+
+-finishLaunching took NSOpen's value as a URL when it read as one with a
+scheme, and on Windows a path does: C:/Users/me/model.orm has the scheme
+C.  It went to -application:openURL:, and the document controller read
+the "URL" as a resource, which gave no data: a file named on the command
+line opened as nothing (an application reading its document's data got
+nil).  A value that is an absolute path on this system is now a file
+before it is a URL.
+
+Tests/gui/NSApplication/openAbsolutePath.m launches with NSOpen naming an
+absolute path written with /, and records which of -application:openFile:
+and -application:openURL: the delegate is sent.  On Windows, MSYS2
+CLANG64: without the change the path goes to -application:openURL: and
+both checks fail; with it, it is opened as a file and they pass.  (On
+POSIX the path has no scheme, and it passes either way.)
+
+Patch done with help of AI.
+---
+ Source/NSApplication.m                     |  6 +-
+ Tests/gui/NSApplication/openAbsolutePath.m | 70 ++++++++++++++++++++++
+ 2 files changed, 75 insertions(+), 1 deletion(-)
+ create mode 100644 Tests/gui/NSApplication/openAbsolutePath.m
+
+diff --git a/Source/NSApplication.m b/Source/NSApplication.m
+index 6006342..9a0aed5 100644
+--- a/Source/NSApplication.m
++++ b/Source/NSApplication.m
+@@ -1167,7 +1167,11 @@ - (void) finishLaunching
+     }
+   else if ((filePath = [defs stringForKey: @"NSOpen"]) != nil)
+     {
+-      NSURL	*u = [NSURL URLWithString: filePath];
++      /* A path absolute on this system is a file, though it may also read
++       * as a URL: on Windows C:/Users/... has the scheme C, and was opened
++       * as a URL, which read nothing. */
++      NSURL	*u = [filePath isAbsolutePath]
++	? nil : [NSURL URLWithString: filePath];
+ 
+       if ([[u scheme] length] > 0)
+ 	{
+diff --git a/Tests/gui/NSApplication/openAbsolutePath.m b/Tests/gui/NSApplication/openAbsolutePath.m
+new file mode 100644
+index 0000000..a625ee6
+--- /dev/null
++++ b/Tests/gui/NSApplication/openAbsolutePath.m
+@@ -0,0 +1,70 @@
++/* NSOpen naming a path absolute on this system opens that file, though the
++   path may also read as a URL: on Windows C:/Users/... has the scheme C,
++   and was handed to -application:openURL: as a URL, which read nothing. */
++#import "Testing.h"
++#import <Foundation/NSAutoreleasePool.h>
++#import <Foundation/NSDictionary.h>
++#import <Foundation/NSException.h>
++#import <Foundation/NSPathUtilities.h>
++#import <Foundation/NSString.h>
++#import <Foundation/NSURL.h>
++#import <Foundation/NSUserDefaults.h>
++#import <AppKit/NSApplication.h>
++
++@interface Opener : NSObject
++{
++@public
++  NSString	*file;
++  NSURL		*url;
++}
++@end
++
++@implementation Opener
++- (BOOL) application: (NSApplication *)app openFile: (NSString *)name
++{
++  ASSIGN(file, name);
++  return YES;
++}
++- (BOOL) application: (NSApplication *)app openURL: (NSURL *)u
++{
++  ASSIGN(url, u);
++  return YES;
++}
++@end
++
++int
++main(int argc, char **argv)
++{
++  START_SET("NSOpen with an absolute path opens a file")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  {
++    NSAutoreleasePool	*arp = [NSAutoreleasePool new];
++    Opener		*opener = [Opener new];
++    /* Written with / on every system, as a path is given on a command line
++     * (and as C:/Users/... is on Windows). */
++    NSString		*path = [[NSTemporaryDirectory()
++      stringByAppendingPathComponent: @"model.orm"]
++      stringByReplacingOccurrencesOfString: @"\\" withString: @"/"];
++
++    PASS([path isAbsolutePath], "the path is absolute here (%s)", [path UTF8String])
++    [[NSUserDefaults standardUserDefaults]
++      setVolatileDomain: [NSDictionary dictionaryWithObject: path forKey: @"NSOpen"]
++		forName: NSArgumentDomain];
++    [NSApp setDelegate: (id)opener];
++    [NSApp finishLaunching];
++    PASS_EQUAL(opener->file, path, "it is opened as a file")
++    PASS(opener->url == nil, "not as a URL")
++
++    [arp release];
++  }
++
++  END_SET("NSOpen with an absolute path opens a file")
++  return 0;
++}
+-- 
+2.50.1 (Apple Git-155)
+
