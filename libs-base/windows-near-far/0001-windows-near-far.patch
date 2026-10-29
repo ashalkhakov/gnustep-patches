@@ -1,0 +1,97 @@
+From c4d8ae63a2241d895f361b8001af0dff972b8cde Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Thu, 29 Oct 2026 20:05:23 +0500
+Subject: [PATCH] GSConfig.h: near and far are a program's names on Windows too
+
+GSConfig.h includes <windows.h> on Windows, and with it minwindef.h's
+near and far: the 16-bit pointer qualifiers, kept as macros that expand to
+nothing.  A program that imported Foundation could not name a variable, a
+parameter or a selector's part near or far -- an ORM tool's near and far
+roles, a diagram's near point -- and got "expected identifier".  They mean
+nothing to a 32 or 64 bit compiler, and GSConfig.h undefines them after the
+include, as it does BOOL; NEAR and FAR, which Windows' own headers still
+use, expand to nothing themselves, as minwindef.h has them.
+
+Tests/base/GSConfig/nearFar.m names a variable and a selector's part near
+and far.  On Windows, MSYS2 CLANG64: it does not compile without the
+change ("expected identifier") and passes with it.  ORMKit, which uses
+near and far for a fact type's roles throughout, builds and passes its
+tests with it.
+
+Patch done with help of AI.
+---
+ Headers/GNUstepBase/GSConfig.h.in | 13 +++++++++++++
+ Tests/base/GSConfig/TestInfo      |  0
+ Tests/base/GSConfig/nearFar.m     | 32 +++++++++++++++++++++++++++++++
+ 3 files changed, 45 insertions(+)
+ create mode 100644 Tests/base/GSConfig/TestInfo
+ create mode 100644 Tests/base/GSConfig/nearFar.m
+
+diff --git a/Headers/GNUstepBase/GSConfig.h.in b/Headers/GNUstepBase/GSConfig.h.in
+index dba5272..a5daec8 100644
+--- a/Headers/GNUstepBase/GSConfig.h.in
++++ b/Headers/GNUstepBase/GSConfig.h.in
+@@ -336,6 +336,19 @@ typedef	struct {
+ 
+ #  undef __OBJC_BOOL
+ #  undef  BOOL
++/* <windows.h> keeps the 16-bit pointer qualifiers near and far as macros
++ * that expand to nothing (minwindef.h), so a program could not name a
++ * variable, a parameter or a selector's part near or far once it had
++ * imported Foundation.  They mean nothing to a 32 or 64 bit compiler; NEAR
++ * and FAR, which Windows' own headers still use, are kept and expand to
++ * nothing themselves.
++ */
++#  undef  near
++#  undef  far
++#  undef  NEAR
++#  define NEAR
++#  undef  FAR
++#  define FAR
+ #endif
+ 
+ /* Used to annotate callback functions with __stdcall on Windows. */
+diff --git a/Tests/base/GSConfig/TestInfo b/Tests/base/GSConfig/TestInfo
+new file mode 100644
+index 0000000..e69de29
+diff --git a/Tests/base/GSConfig/nearFar.m b/Tests/base/GSConfig/nearFar.m
+new file mode 100644
+index 0000000..55372c7
+--- /dev/null
++++ b/Tests/base/GSConfig/nearFar.m
+@@ -0,0 +1,32 @@
++/* near and far are names a program may use: on Windows <windows.h>, which
++   GSConfig.h includes, kept them as macros for the 16-bit pointer
++   qualifiers, expanding to nothing, and a variable or a selector's part
++   named either did not compile. */
++#import "Testing.h"
++#import <Foundation/NSObject.h>
++#import <Foundation/NSString.h>
++
++@interface Pair : NSObject
++- (NSString *) from: (NSString *)near to: (NSString *)far;
++@end
++
++@implementation Pair
++- (NSString *) from: (NSString *)near to: (NSString *)far
++{
++  return [NSString stringWithFormat: @"%@-%@", near, far];
++}
++@end
++
++int main()
++{
++  NSAutoreleasePool	*arp = [NSAutoreleasePool new];
++  NSString		*near = @"here";
++  NSString		*far = @"there";
++  Pair			*p = [Pair new];
++
++  PASS_EQUAL([p from: near to: far], @"here-there",
++    "near and far can be a program's own names")
++  [p release];
++  [arp release]; arp = nil;
++  return 0;
++}
+-- 
+2.50.1 (Apple Git-155)
+
