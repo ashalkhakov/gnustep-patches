@@ -1,4 +1,4 @@
-From 48af74668a16c5563b6478beb7835814a2782c5f Mon Sep 17 00:00:00 2001
+From 49eb3feb31d770c21c2b8e6988d3b5c1afc694b2 Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Wed, 28 Oct 2026 22:57:14 +0500
 Subject: [PATCH] NSWindow: a closing window keeps its controller and delegate
@@ -26,10 +26,30 @@ applied; the NSWindow and NSWindowController tests pass (64).
 
 Patch done with help of AI.
 ---
+ Source/NSWindow.m                             |  8 ++
  .../NSWindowController/closeKeepsController.m | 90 +++++++++++++++++++
- 1 file changed, 90 insertions(+)
+ 2 files changed, 98 insertions(+)
  create mode 100644 Tests/gui/NSWindowController/closeKeepsController.m
 
+diff --git a/Source/NSWindow.m b/Source/NSWindow.m
+index b6856de..a168114 100644
+--- a/Source/NSWindow.m
++++ b/Source/NSWindow.m
+@@ -3315,6 +3315,14 @@ release later (unless we're supposed to release ourselves when
+         {
+           RETAIN(self);
+         }
++      /* The controller lets go of itself as the notification is posted (it
++         leaves its document) and the delegate may go with it; the window's
++         views (split views, outlines) have them for delegates still, and
++         ordering out may ask them (a window losing focus resets its cursor
++         rectangles at once on Windows).  They go with this pool, when the
++         window has closed. */
++      AUTORELEASE(RETAIN(_windowController));
++      AUTORELEASE(RETAIN(_delegate));
+ 
+       [nc postNotificationName: NSWindowWillCloseNotification object: self];
+       _f.has_opened = NO;
 diff --git a/Tests/gui/NSWindowController/closeKeepsController.m b/Tests/gui/NSWindowController/closeKeepsController.m
 new file mode 100644
 index 0000000..4daa16d
