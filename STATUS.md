@@ -1092,6 +1092,19 @@ libs-back's suite: on Windows, MSYS2 CLANG64, both checks fail without
 the fix and pass with it. Its commit says "Patch done with help of AI."
 and carries no Claude trailer, ready to send upstream.
 
+Added on 2026-10-29 for UDCodeKit, whose timing tests failed on Windows:
+`windows-precise-time` (libs-base). GSPrivateTimeNow() took the time on
+Windows with GetSystemTime(), whose SYSTEMTIME holds whole milliseconds,
+so +[NSDate date] moved in millisecond steps and a millisecond's work
+took 0, 0.001 or 0.002 seconds by it (UDComplexityTests timed 0.0010s
+against 0.0040s and failed). It now takes GetSystemTimePreciseAsFileTime()
+and takes away the ticks to the reference date before converting.
+`Tests/base/NSDate/precision.m`: on Windows, MSYS2 CLANG64, every
+libs-base patch here applied, the smallest step is 0.000999928 seconds
+without the fix (it fails) and 1.19e-07 with it (it passes); the date is
+the system's time both ways. Its commit says "Patch done with help of
+AI." and carries no Claude trailer, ready to send upstream.
+
 Added on 2026-10-28 for UDQuakeTools, whose Quarry crashed on Windows
 closing a workspace's window: `window-close-keeps-controller` (libs-gui).
 A document's window controller leaves its document on
@@ -1236,6 +1249,7 @@ among it, passes with this gui and fails without it.
 | `arc4random-glibc` | libs-base | test | not sent yet | (none: every app built on the stack uses it from here, on glibc before 2.36 and on Windows; HomeRow's and UDCalc's shims are gone) |
 | `windows-stdin-pipe` | libs-base | test | not sent yet | (none: UDCode's debug adapter on Windows uses it from here) |
 | `notificationqueue-unregister` | libs-base | test | not sent yet | (none: UDQuakeTools' Quarry uses it from here) |
+| `windows-precise-time` | libs-base | test | not sent yet | (none: UDCodeKit's timing tests use it from here) |
 | `framework-dll-install-build-dir` | tools-make | none (NOTES.md has the reproduction) | not sent yet | (none: UDCodeKit's Windows install uses it from here) |
 | `collection-copy-is-shallow` | libs-base | test | not sent yet | (none: FreeCoreData uses it from here) |
 | `nonretained-value-identity` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |

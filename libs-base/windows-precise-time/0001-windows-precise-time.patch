@@ -1,0 +1,111 @@
+From b2c5d34633623a9d086f6e59abfdf3aea5eecf57 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Thu, 29 Oct 2026 13:12:26 +0500
+Subject: [PATCH] NSDate: the current date as precise as the system's clock on
+ Windows
+
+GSPrivateTimeNow() took the system time on Windows with GetSystemTime(),
+whose SYSTEMTIME holds whole milliseconds, so +[NSDate date] moved in
+steps of a millisecond (or the timer's tick) and nothing shorter could be
+timed by it: a millisecond's work took 0, 0.001 or 0.002 seconds.  It now
+takes GetSystemTimePreciseAsFileTime(), 100 nanosecond ticks since 1601,
+as precise as the system's clock, and takes away the ticks to the
+reference date before converting to seconds, which a double could not
+hold to the tick.
+
+Tests/base/NSDate/precision.m checks that the current date is still the
+system's time (within two seconds of time()) and that it moves in steps
+finer than a millisecond.  On Windows, MSYS2 CLANG64, every libs-base
+patch of gnustep-patches applied: without the change the smallest step is
+0.000999928 seconds and the second check fails; with it, 1.19e-07 (a
+double's own resolution at the present date) and both pass.
+
+Patch done with help of AI.
+---
+ Source/NSCalendarDate.m       | 18 ++++++++++-----
+ Tests/base/NSDate/precision.m | 42 +++++++++++++++++++++++++++++++++++
+ 2 files changed, 55 insertions(+), 5 deletions(-)
+ create mode 100644 Tests/base/NSDate/precision.m
+
+diff --git a/Source/NSCalendarDate.m b/Source/NSCalendarDate.m
+index cb51b6c..90d1be1 100644
+--- a/Source/NSCalendarDate.m
++++ b/Source/NSCalendarDate.m
+@@ -353,13 +353,21 @@ @interface	GSAbsTimeZone : NSObject	// Help the compiler
+ #endif
+ 
+ #else
+-  SYSTEMTIME sys_time;
++  FILETIME		file_time;
++  ULARGE_INTEGER	ticks;
++
+   /*
+-   * Get current GMT time, convert to NSTimeInterval since reference date,
++   * Get current GMT time, in 100 nanosecond ticks since 1601, as precise as
++   * the system's clock is (GetSystemTime gives whole milliseconds, too
++   * coarse to time anything short), and convert to NSTimeInterval since
++   * reference date.  The ticks to the reference date are taken away before
++   * the conversion, which a double could not hold to the tick.
+    */
+-  GetSystemTime(&sys_time);
+-  t = GSTime(sys_time.wDay, sys_time.wMonth, sys_time.wYear, sys_time.wHour,
+-    sys_time.wMinute, sys_time.wSecond, sys_time.wMilliseconds);
++  GetSystemTimePreciseAsFileTime(&file_time);
++  ticks.LowPart = file_time.dwLowDateTime;
++  ticks.HighPart = file_time.dwHighDateTime;
++  t = (NSTimeInterval)(LONGLONG)(ticks.QuadPart - 126227808000000000ULL)
++    / (NSTimeInterval)10000000.0;
+ #endif /* _WIN32 */
+ 
+   return t;
+diff --git a/Tests/base/NSDate/precision.m b/Tests/base/NSDate/precision.m
+new file mode 100644
+index 0000000..820e15d
+--- /dev/null
++++ b/Tests/base/NSDate/precision.m
+@@ -0,0 +1,42 @@
++/* The current date is as precise as the system's clock, finer than a
++   millisecond: something short can be timed by it.  On Windows it was the
++   system time in whole milliseconds, so a millisecond's work took 0, 0.001
++   or 0.002 seconds by it. */
++#import "Testing.h"
++#import <Foundation/NSAutoreleasePool.h>
++#import <Foundation/NSDate.h>
++#include <time.h>
++
++int main()
++{
++  NSAutoreleasePool	*arp = [NSAutoreleasePool new];
++  NSTimeInterval	now = [[NSDate date] timeIntervalSince1970];
++  NSTimeInterval	smallest = 1.0;
++  int			i;
++
++  PASS(now - (NSTimeInterval)time(NULL) > -2.0
++    && now - (NSTimeInterval)time(NULL) < 2.0,
++    "the current date is the system's time")
++
++  /* The smallest step the date takes, over the next 100 it takes. */
++  for (i = 0; i < 100; i++)
++    {
++      NSTimeInterval	before = [NSDate timeIntervalSinceReferenceDate];
++      NSTimeInterval	after;
++
++      do
++	{
++	  after = [NSDate timeIntervalSinceReferenceDate];
++	}
++      while (after == before);
++      if (after - before < smallest)
++	{
++	  smallest = after - before;
++	}
++    }
++  PASS(smallest < 0.0005,
++    "the current date moves in steps finer than a millisecond (%g)", smallest)
++
++  [arp release]; arp = nil;
++  return 0;
++}
+-- 
+2.50.1 (Apple Git-155)
+
