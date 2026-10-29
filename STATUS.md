@@ -1021,6 +1021,24 @@ under valgrind and crashes without it and runs clean with it; Logbook,
 with both bindings back, crashes three checks into its self-test on
 2026.10.20.7 and passes all 113 with this base.
 
+Added on 2026-10-29 for UDQuakeTools' Quarry: `tableview-click-below-rows`.
+A click below a table view's last row deselected nothing, so a list once
+chosen from could not be emptied, and Quarry's material, FX, particle and
+AF editors, which showed the declaration's own keywords only with nothing
+chosen, kept them out of reach (UDQuakeTools#22). The table was never
+taller than its rows: -setFrame: and -setFrameSize: meant to fill the clip
+view but measured against -documentVisibleRect, the visible part of the
+table itself, and -viewWillMoveToSuperview: measured against the superview
+it was leaving; the space below the rows was the clip view's, and a click
+there never reached the table. The patch measures against the clip view's
+bounds, re-applies the frame once the table is in its clip view, and in
+-mouseDown: deselects every row on a plain click on no row when an empty
+selection is allowed, as macOS does. `NSTableView/clickBelowRows.m` in
+libs-gui's suite: on master 19dae207a both its fill and its click checks
+fail; with the fill alone the click still fails; with the patch all four
+pass, and with every libs-gui patch here applied the NSTableView,
+NSOutlineView, NSScrollView, NSClipView and NSArrayController suites pass.
+
 Added on 2026-10-22 for Logbook's desktop app: `locale-currency-name`.
 -[NSLocale displayNameForKey:value:] answered nil for NSLocaleCurrencyCode
 and NSLocaleCurrencySymbol, keys it did not handle, where macOS names the
@@ -1342,6 +1360,7 @@ among it, passes with this gui and fails without it.
 | `win32-window-icon` | libs-back | test | not sent yet | (none: every Windows app uses it from here) |
 | `win32-own-windows` | libs-back | test | not sent yet | (none: UDCode on Windows uses it from here) |
 | `workspace-open-url-quietly` | libs-gui | test | not sent yet | (none: every app uses it from here) |
+| `tableview-click-below-rows` | libs-gui | test | not sent yet | (none: UDQuakeTools uses it from here) |
 
 Re-run that check before sending anything: `Scripts/apply-patches.sh` on a
 fresh checkout is the quickest form of it.
