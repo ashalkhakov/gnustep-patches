@@ -1021,6 +1021,24 @@ under valgrind and crashes without it and runs clean with it; Logbook,
 with both bindings back, crashes three checks into its self-test on
 2026.10.20.7 and passes all 113 with this base.
 
+Added on 2026-10-29 for ORMKit's ORMDesigner, which crashed opening a model
+named on its command line on Windows: `nsopen-windows-path` and
+`document-legacy-forwards` (libs-gui). -finishLaunching took NSOpen's value
+as a URL when it read as one with a scheme, and on Windows C:/Users/... has
+the scheme C: the document controller read the "URL" as a resource and the
+document got no data. An absolute path is a file first now.
+`Tests/gui/NSApplication/openAbsolutePath.m`: on Windows, MSYS2 CLANG64, the
+path goes to -application:openURL: without the fix (both checks fail) and is
+opened as a file with it; ORMDesigner opens a model so with it. Opening by
+path then reaches NSDocument's older methods, which did not use the current
+ones a document implements (-readFromData:ofType:error:,
+-dataOfType:error:): -loadDataRepresentation:ofType: raised "must
+implement". The older read and write methods now go to the current ones a
+subclass overrides, as on Cocoa. `Tests/gui/NSDocument/legacyForwards.m`: on
+Linux x86_64, every libs-gui patch here applied, both checks fail without
+it and pass with it. Their commits say "Patch done with help of AI." and
+carry no Claude trailer, ready to send upstream.
+
 Added on 2026-10-29 for ORMKit, which did not compile on Windows:
 `windows-near-far` (libs-base). GSConfig.h includes <windows.h> on
 Windows, and with it minwindef.h's near and far, the 16-bit pointer
@@ -1347,6 +1365,8 @@ among it, passes with this gui and fails without it.
 | `binding-to-many-mutation` | libs-gui | test | not sent yet | (none: UDQuakeTools uses it from here) |
 | `controller-selection-markers` | libs-gui | test | not sent yet | (none: bound controls show AppKit's placeholders from here) |
 | `window-close-keeps-controller` | libs-gui | test | not sent yet | (none: UDQuakeTools' Quarry uses it from here) |
+| `nsopen-windows-path` | libs-gui | test | not sent yet | (none: ORMDesigner on Windows uses it from here) |
+| `document-legacy-forwards` | libs-gui | test | not sent yet | (none: ORMDesigner on Windows uses it from here) |
 | `controller-to-many-content` | libs-gui | test | not sent yet (after `controller-entity-mode`) | (none: Logbook adds records through it) |
 | `controller-to-many-set` | libs-gui | test | not sent yet (after `controller-to-many-content`) | (none: Logbook filters records through it) |
 | `controller-value-bindings` | libs-gui | test | not sent yet | (none: Logbook's pick lists bind their order through it) |
