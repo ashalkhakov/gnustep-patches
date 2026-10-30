@@ -1021,6 +1021,34 @@ under valgrind and crashes without it and runs clean with it; Logbook,
 with both bindings back, crashes three checks into its self-test on
 2026.10.20.7 and passes all 113 with this base.
 
+Added on 2026-10-31 for LogBook on Windows, whose sync check took five
+minutes on a laptop and lost a receipt's photo on CI: `urlsession-windows-write`
+and `bplist-collections-by-identity` (libs-base). On Windows NSURLSession
+learns a socket's readiness from WSAEventSelect(), and told libcurl it could
+write only on FD_WRITE, which Windows records when the socket connects and
+then only after a send() fails with WSAEWOULDBLOCK. libcurl sends a buffer
+at a time (64 KB) and waits to be told it may write again, so a body larger
+than one buffer stopped after it, until the server gave up (GCDWebServer:
+60 seconds, then a reset connection). While libcurl wants to write, the
+socket is now asked (select() with no timeout), after each turn of libcurl's
+and after each WSAEventSelect(), which clears what the socket had recorded.
+`Tests/base/NSURLSession/uploadTaskTests.m` sends 256 KB more: on Windows,
+MSYS2 CLANG64, every libs-base patch here applied, the transfer never
+completes without the fix and passes with it (20 checks). The binary
+property list writer found the objects it had written by equality, arrays
+and dictionaries too, and an NSDictionary's -hash is its count: the keyed
+archive of a large object graph, thousands of small dictionaries, compared
+each with nearly every other. FreeCoreData's SQLite store archives its model
+into each store it makes, so each new store of LogBook's took most of a
+minute. Collections are now written once for each time they occur, told
+apart by identity, as OSX's writer does; strings, numbers, dates and data
+are still shared by equality.
+`Tests/base/NSPropertyList/bplist-many-dictionaries.m`: 20000 small
+dictionaries take 0.55 seconds with it on Windows and are not written
+after five minutes without it. LogBook's sync check on the laptop: 309
+seconds on 2026.10.20.32, 79 with both. Their commits say "Patch done with
+help of AI." and carry no Claude trailer, ready to send upstream.
+
 Added on 2026-10-29 for ORMKit's ORMDesigner, which crashed opening a model
 named on its command line on Windows: `nsopen-windows-path` and
 `document-legacy-forwards` (libs-gui). -finishLaunching took NSOpen's value
@@ -1367,6 +1395,8 @@ among it, passes with this gui and fails without it.
 | `window-close-keeps-controller` | libs-gui | test | not sent yet | (none: UDQuakeTools' Quarry uses it from here) |
 | `nsopen-windows-path` | libs-gui | test | not sent yet | (none: ORMDesigner on Windows uses it from here) |
 | `document-legacy-forwards` | libs-gui | test | not sent yet | (none: ORMDesigner on Windows uses it from here) |
+| `urlsession-windows-write` | libs-base | test | not sent yet | (none: LogBook's sync on Windows uses it from here) |
+| `bplist-collections-by-identity` | libs-base | test | not sent yet | (none: FreeCoreData's SQLite store, as LogBook makes them, uses it from here) |
 | `controller-to-many-content` | libs-gui | test | not sent yet (after `controller-entity-mode`) | (none: Logbook adds records through it) |
 | `controller-to-many-set` | libs-gui | test | not sent yet (after `controller-to-many-content`) | (none: Logbook filters records through it) |
 | `controller-value-bindings` | libs-gui | test | not sent yet | (none: Logbook's pick lists bind their order through it) |

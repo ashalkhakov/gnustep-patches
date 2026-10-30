@@ -1,0 +1,153 @@
+From a475613a2ea2cbfb24db0672938d50ff6f099d53 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Sat, 31 Oct 2026 01:14:18 +0500
+Subject: [PATCH] NSPropertyList: a binary property list's collections told
+ apart by identity
+
+GSBinaryPLGenerator found each object it had already written by equality,
+arrays and dictionaries too.  An NSDictionary's -hash is its count, so the
+keyed archive of a large object graph, thousands of small dictionaries of
+a few counts, put nearly every one in a handful of buckets and compared it
+deeply with the rest: quadratic in their number.  FreeCoreData's SQLite
+store archives its Core Data model into each store it makes: LogBook's
+sync check, which makes a store for each device, spent most of its five
+minutes on Windows there (309 seconds; 137 with this change).
+
+Arrays, dictionaries and sets are now hashed and compared by identity, as
+OSX's writer does: each is written once for each time it occurs.  Strings,
+numbers, dates and data are still found by equality, equal ones written
+once.
+
+Tests/base/NSPropertyList/bplist-many-dictionaries.m writes 20000 small
+dictionaries, which must take under ten seconds, and reads them back the
+same.  On Windows (MSYS2 CLANG64) they take 0.55 seconds with the change;
+without it they are not written after five minutes, the test runner's
+limit.
+
+Patch done with help of AI.
+---
+ Source/NSPropertyList.m                       | 33 ++++++++++++
+ .../NSPropertyList/bplist-many-dictionaries.m | 53 +++++++++++++++++++
+ 2 files changed, 86 insertions(+)
+ create mode 100644 Tests/base/NSPropertyList/bplist-many-dictionaries.m
+
+diff --git a/Source/NSPropertyList.m b/Source/NSPropertyList.m
+index bf3edd4..91d4645 100644
+--- a/Source/NSPropertyList.m
++++ b/Source/NSPropertyList.m
+@@ -3618,6 +3618,30 @@ - (id) objectAtIndex: (NSUInteger)index
+ #undef POP_OBJ
+ @end
+ 
++static BOOL
++isCollection(id o)
++{
++  return [o isKindOfClass: [NSArray class]]
++    || [o isKindOfClass: [NSDictionary class]]
++    || [o isKindOfClass: [NSSet class]];
++}
++
++/* Arrays, dictionaries and sets are each written once for each time they
++ * occur, as OSX writes them, and are told apart by identity alone: an
++ * NSDictionary's -hash is its count, so with equality the keyed archive of
++ * a large object graph (thousands of small dictionaries of a few counts)
++ * put nearly every one in a handful of buckets and compared it deeply with
++ * the rest, quadratic in their number.  Strings, numbers, dates and data,
++ * equal ones written once, are still found by equality.
++ */
++static NSUInteger
++hashFunc(const void *item, NSUInteger (*size)(const void *item))
++{
++  id	o = (id)item;
++
++  return isCollection(o) ? (NSUInteger)(uintptr_t)item >> 4 : [o hash];
++}
++
+ /* Test two items for equality ... both are objects.
+  * If either is an NSNumber, we insist that they are the same class
+  * so that numbers with the same numeric value but different classes
+@@ -3630,6 +3654,14 @@ - (id) objectAtIndex: (NSUInteger)index
+   id	o1 = (id)item1;
+   id	o2 = (id)item2;
+ 
++  if (o1 == o2)
++    {
++      return YES;
++    }
++  if (isCollection(o1) || isCollection(o2))
++    {
++      return NO;
++    }
+   if ([o1 isKindOfClass: [NSNumber class]]
+     || [o2 isKindOfClass: [NSNumber class]])
+     {
+@@ -3705,6 +3737,7 @@ - (void) setup
+   objectsToDoList = [[NSMutableArray alloc] init];
+   k = [NSPointerFunctions pointerFunctionsWithOptions:
+     NSPointerFunctionsObjectPersonality];
++  [k setHashFunction: hashFunc];
+   [k setIsEqualFunction: isEqualFunc];
+   v = [NSPointerFunctions pointerFunctionsWithOptions:
+     NSPointerFunctionsIntegerPersonality|NSPointerFunctionsOpaqueMemory];
+diff --git a/Tests/base/NSPropertyList/bplist-many-dictionaries.m b/Tests/base/NSPropertyList/bplist-many-dictionaries.m
+new file mode 100644
+index 0000000..26a24d5
+--- /dev/null
++++ b/Tests/base/NSPropertyList/bplist-many-dictionaries.m
+@@ -0,0 +1,53 @@
++/* A binary property list of many small dictionaries, as a keyed archive of
++   a large object graph is, is written in time proportional to them: each
++   was compared with nearly every other (an NSDictionary's -hash is its
++   count), so 20000 took minutes.  What is written reads back the same. */
++#import "Testing.h"
++#import <Foundation/NSArray.h>
++#import <Foundation/NSAutoreleasePool.h>
++#import <Foundation/NSData.h>
++#import <Foundation/NSDate.h>
++#import <Foundation/NSDictionary.h>
++#import <Foundation/NSPropertyList.h>
++#import <Foundation/NSString.h>
++#import <Foundation/NSValue.h>
++
++int main()
++{
++  NSAutoreleasePool	*arp = [NSAutoreleasePool new];
++  NSMutableArray	*objects = [NSMutableArray array];
++  NSDictionary		*shared = [NSDictionary dictionaryWithObject: @"x"
++							      forKey: @"y"];
++  NSDictionary		*plist;
++  NSData		*data;
++  id			read;
++  NSDate		*start;
++  NSTimeInterval	took;
++  int			i;
++
++  for (i = 0; i < 20000; i++)
++    {
++      [objects addObject: [NSDictionary dictionaryWithObjectsAndKeys:
++	[NSNumber numberWithInt: i % 7], @"$class",
++	[NSString stringWithFormat: @"name %d", i], @"name",
++	nil]];
++    }
++  /* The same dictionary twice, and equal strings, still written once. */
++  [objects addObject: shared];
++  [objects addObject: shared];
++  plist = [NSDictionary dictionaryWithObject: objects forKey: @"$objects"];
++
++  start = [NSDate date];
++  data = [NSPropertyListSerialization dataWithPropertyList: plist
++    format: NSPropertyListBinaryFormat_v1_0 options: 0 error: NULL];
++  took = -[start timeIntervalSinceNow];
++  PASS(data != nil, "20000 small dictionaries written")
++  PASS(took < 10.0, "in under ten seconds (%g)", took)
++
++  read = [NSPropertyListSerialization propertyListWithData: data
++    options: NSPropertyListImmutable format: NULL error: NULL];
++  PASS([read isEqual: plist], "read back the same")
++
++  [arp release];
++  return 0;
++}
+-- 
+2.50.1 (Apple Git-155)
+

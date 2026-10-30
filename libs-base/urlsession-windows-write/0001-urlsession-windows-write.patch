@@ -1,0 +1,312 @@
+From 3fcfef4bbf326f0ae0e32926eb2fed7bede6f430 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Sat, 31 Oct 2026 01:42:48 +0500
+Subject: [PATCH] NSURLSession: an upload larger than libcurl's buffer sent
+ whole on Windows
+
+On Windows the session learns a socket's readiness from WSAEventSelect(),
+and told libcurl it could write only when WSAEnumNetworkEvents() reported
+FD_WRITE.  FD_WRITE is an edge: Windows records it when the socket
+connects and then only after a send() has failed with WSAEWOULDBLOCK.
+libcurl sends a buffer at a time (64 KB) and waits to be told the socket
+is writable again; its send having succeeded, no FD_WRITE ever came.  So
+a request whose body was larger than one buffer sent the first and
+stopped, until the server gave up waiting for the rest (60 seconds for
+GCDWebServer, which then reset the connection).
+
+While libcurl wants to write, the socket is now asked whether it can be
+written to (select() with no timeout), and after libcurl's turn, still
+wanting to and able to, the socket's event is set so the run loop comes
+back to it.  The event's map holds the socket's SourceInfo rather than
+the socket, to know what libcurl wants.
+
+Tests/base/NSURLSession/uploadTaskTests.m sends a body of 256 KB and
+checks the server had it whole.  On Windows (MSYS2 CLANG64, every
+libs-base patch of gnustep-patches applied) the transfer never completes
+without the change, and the file passes (20 checks) with it.
+
+Patch done with help of AI.
+---
+ Source/NSURLSession.m                     | 73 ++++++++++++++++++----
+ Tests/base/NSURLSession/uploadTaskTests.m | 75 ++++++++++++++++++++++-
+ 2 files changed, 135 insertions(+), 13 deletions(-)
+
+diff --git a/Source/NSURLSession.m b/Source/NSURLSession.m
+index e7104da..9b1ed9d 100644
+--- a/Source/NSURLSession.m
++++ b/Source/NSURLSession.m
+@@ -43,10 +43,10 @@
+  * it is a macro of its own.
+  */
+ #if	defined(_WIN32)
+-/* Maps a registered WSAEVENT back to its socket, since the run loop only
+- * hands the event handle back to -receivedEvent:type:extra:forMode:.
++/* Maps a registered WSAEVENT back to its socket's SourceInfo, since the run
++ * loop only hands the event handle back to -receivedEvent:type:extra:forMode:.
+  */
+-#define	GS_NSURLSession_PLATFORM_IVARS	NSMapTable * _socketForEvent;
++#define	GS_NSURLSession_PLATFORM_IVARS	NSMapTable * _sourcesForEvent;
+ #else
+ #define	GS_NSURLSession_PLATFORM_IVARS
+ #endif
+@@ -204,6 +204,20 @@
+   return 0;
+ }
+ 
++#if	defined(_WIN32)
++/* Whether a socket can be written to now, without waiting. */
++static BOOL
++socketIsWritable(curl_socket_t socket)
++{
++  fd_set		writable;
++  struct timeval	now = { 0, 0 };
++
++  FD_ZERO(&writable);
++  FD_SET(socket, &writable);
++  return select(0, NULL, &writable, NULL, &now) == 1;
++}
++#endif
++
+ /* CURLMOPT_SOCKETFUNCTION: libcurl requests socket monitoring using this
+  * callback */
+ static int
+@@ -242,6 +256,7 @@
+     }
+ } /* socket_callback */
+ 
++
+ // ########### Work thread trampoline
+ 
+ /* Runs the run loop for an NSURLSession's work thread.  It deliberately
+@@ -368,8 +383,8 @@ - (instancetype) initWithConfiguration: (NSURLSessionConfiguration *)
+ 
+       internal->_timer = nil;
+ #if	defined(_WIN32)
+-      internal->_socketForEvent = NSCreateMapTable(
+-	NSNonOwnedPointerMapKeyCallBacks, NSIntegerMapValueCallBacks, 0);
++      internal->_sourcesForEvent = NSCreateMapTable(
++	NSNonOwnedPointerMapKeyCallBacks, NSNonOwnedPointerMapValueCallBacks, 0);
+ #endif
+       /* A port keeps the work thread run loop from exiting when it has no
+        * other input sources. */
+@@ -725,7 +740,7 @@ - (void) _removeSocket: (struct SourceInfo *)sources
+               forMode: NSDefaultRunLoopMode
+                   all: YES];
+       WSAEventSelect(sources->socket, sources->event, 0);
+-      NSMapRemove(internal->_socketForEvent, (void*)sources->event);
++      NSMapRemove(internal->_sourcesForEvent, (void*)sources->event);
+       WSACloseEvent(sources->event);
+       sources->event = WSA_INVALID_EVENT;
+     }
+@@ -834,14 +849,20 @@ - (int) _setSocket: (curl_socket_t)socket
+                     type: ET_HANDLE
+                  watcher: self
+                  forMode: NSDefaultRunLoopMode];
+-            NSMapInsert(internal->_socketForEvent, (void*)sources->event,
+-              (void*)(intptr_t)socket);
++            NSMapInsert(internal->_sourcesForEvent, (void*)sources->event,
++              (void*)sources);
+           }
+         if (SOCKET_ERROR == WSAEventSelect(socket, sources->event, mask))
+           {
+             return -1;
+           }
+         sources->networkEvents = mask;
++        /* WSAEventSelect() clears what the socket had recorded, an FD_WRITE
++         * too, and none comes while it stays writable: asked instead. */
++        if (wantWrite && socketIsWritable(socket))
++          {
++            WSASetEvent(sources->event);
++          }
+       }
+   }
+ #else
+@@ -895,9 +916,15 @@ - (void) receivedEvent: (void*)data
+   int 		action = 0;
+ 
+ #if	defined(_WIN32)
+-  WSANETWORKEVENTS occurred;
++  WSANETWORKEVENTS	occurred;
++  struct SourceInfo	*sources;
+ 
+-  socket = (curl_socket_t)(intptr_t)NSMapGet(internal->_socketForEvent, data);
++  sources = NSMapGet(internal->_sourcesForEvent, data);
++  if (NULL == sources)
++    {
++      return;
++    }
++  socket = sources->socket;
+   if (0 == WSAEnumNetworkEvents(socket, (WSAEVENT)data, &occurred))
+     {
+       if (occurred.lNetworkEvents & (FD_READ | FD_ACCEPT | FD_OOB))
+@@ -907,6 +934,17 @@ - (void) receivedEvent: (void*)data
+       if (occurred.lNetworkEvents & FD_CLOSE)
+         action |= CURL_CSELECT_IN;
+     }
++  /* FD_WRITE is an edge: Windows records it when the socket connects, and
++   * then only after a send() has failed with WSAEWOULDBLOCK.  libcurl sends
++   * a buffer at a time and waits to be told the socket is writable again,
++   * so a body larger than one buffer (an upload of 64 KB or more) never got
++   * past its first buffer until the server gave up on it.  While libcurl
++   * wants to write, the socket is asked whether it can be written to. */
++  if ((sources->networkEvents & FD_WRITE) && !(action & CURL_CSELECT_OUT)
++    && socketIsWritable(socket))
++    {
++      action |= CURL_CSELECT_OUT;
++    }
+ #else
+   socket = (curl_socket_t)(intptr_t)data;
+   if (ET_WDESC == type)
+@@ -917,6 +955,17 @@ - (void) receivedEvent: (void*)data
+ 
+   curl_multi_socket_action(internal->_multiHandle, socket, action,
+     &internal->_stillRunning);
++#if	defined(_WIN32)
++  /* Still wanting to write, and able to: no FD_WRITE will come for it, so
++   * the event is set and this is called again (libcurl may have removed the
++   * socket meanwhile: its SourceInfo is looked up again). */
++  sources = NSMapGet(internal->_sourcesForEvent, data);
++  if (sources != NULL && (sources->networkEvents & FD_WRITE)
++    && socketIsWritable(sources->socket))
++    {
++      WSASetEvent((WSAEVENT)data);
++    }
++#endif
+   [self _checkForCompletion];
+ 
+   /* When internal->_stillRunning reaches zero, all transfers are complete/done
+@@ -1354,9 +1403,9 @@ - (void) dealloc
+       curl_multi_cleanup(internal->_multiHandle);
+ 
+ #if	defined(_WIN32)
+-      if (internal->_socketForEvent != NULL)
++      if (internal->_sourcesForEvent != NULL)
+ 	{
+-	  NSFreeMapTable(internal->_socketForEvent);
++	  NSFreeMapTable(internal->_sourcesForEvent);
+ 	}
+ #endif
+ 
+diff --git a/Tests/base/NSURLSession/uploadTaskTests.m b/Tests/base/NSURLSession/uploadTaskTests.m
+index ba617a7..11bc768 100644
+--- a/Tests/base/NSURLSession/uploadTaskTests.m
++++ b/Tests/base/NSURLSession/uploadTaskTests.m
+@@ -57,11 +57,35 @@ - (NSData *)responseForRequest:(NSURLRequest *)req
+ 
+ static LargeUploadRoute *largeUploadRoute;
+ 
++/* A body many times the size of libcurl's upload buffer: sent a buffer at
++ * a time, each after the socket can be written to again.  On Windows that
++ * was signalled once only, so the transfer stopped after its first buffer.
++ * Letters: the helper server reads a request as UTF-8 text. */
++static NSMutableData *hugeBodyContent;
++
++@interface HugeUploadRoute : NSObject
++- (NSData *)responseForRequest:(NSURLRequest *)req;
++@end
++
++@implementation HugeUploadRoute
++- (NSData *)responseForRequest:(NSURLRequest *)req
++{
++  PASS_EQUAL([req HTTPBody], hugeBodyContent,
++             "HTTPBody of 256 KB is correct");
++
++  return [@"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
++          dataUsingEncoding:NSASCIIStringEncoding];
++}
++@end
++
++static HugeUploadRoute *hugeUploadRoute;
++
+ static NSArray *
+ createRoutes(Class routeClass)
+ {
+   Route *routeOKWithContent;
+   Route *routeLargeUpload;
++  Route *routeHugeUpload;
+   NSURL *routeOKWithContentURL;
+   NSURL *routeLargeUploadURL;
+ 
+@@ -82,8 +106,15 @@ - (NSData *)responseForRequest:(NSURLRequest *)req
+           target:largeUploadRoute
+         selector:@selector(responseForRequest:)];
+ 
++  hugeUploadRoute = [HugeUploadRoute new];
++  routeHugeUpload = [routeClass
++    routeWithURL:[NSURL URLWithString:@"/hugeUploadOK"]
++          method:@"POST"
++          target:hugeUploadRoute
++        selector:@selector(responseForRequest:)];
++
+   return [NSArray arrayWithObjects:
+-    routeOKWithContent, routeLargeUpload, nil];
++    routeOKWithContent, routeLargeUpload, routeHugeUpload, nil];
+ }
+ 
+ #if __has_feature(blocks)
+@@ -134,6 +165,37 @@ - (NSData *)responseForRequest:(NSURLRequest *)req
+   [dataTask resume];
+   [uploadTask resume];
+ }
++
++static void
++testHugeUploadWithBlock(NSURL *baseURL)
++{
++  NSURLSession         *session;
++  NSMutableURLRequest  *request;
++  NSURLSessionDataTask *dataTask;
++
++  expectedCountOfTasksToComplete += 1;
++
++  session = [NSURLSession sharedSession];
++  request = [NSMutableURLRequest
++    requestWithURL:[baseURL URLByAppendingPathComponent:@"hugeUploadOK"]];
++  [request setHTTPBody:hugeBodyContent];
++  [request setHTTPMethod:@"POST"];
++  [request setValue:@"text/plain"
++    forHTTPHeaderField:@"Content-Type"];
++
++  dataTask = [session dataTaskWithRequest:request
++                        completionHandler:^(NSData *data,
++                                            NSURLResponse *response,
++                                            NSError *error) {
++    PASS(nil == error && [(NSHTTPURLResponse *)response statusCode] == 200,
++         "a body of 256 KB was sent and answered");
++
++    [countLock lock];
++    currentCountOfCompletedTasks += 1;
++    [countLock unlock];
++  }];
++  [dataTask resume];
++}
+ #endif
+ 
+ int
+@@ -171,6 +233,16 @@ - (NSData *)responseForRequest:(NSURLRequest *)req
+       [currentDirectory stringByAppendingString:@"/Resources/largeBody.txt"];
+     largeBodyContent = [NSData dataWithContentsOfFile:largeBodyPath];
+     PASS(nil != largeBodyContent, "can load %s", [largeBodyPath UTF8String]);
++    hugeBodyContent = [NSMutableData dataWithLength:256 * 1024];
++    {
++      uint8_t   *bytes = [hugeBodyContent mutableBytes];
++      NSUInteger i;
++
++      for (i = 0; i < [hugeBodyContent length]; i++)
++        {
++          bytes[i] = 'a' + (i * 7 + i / 251) % 26;
++        }
++    }
+ 
+     httpServerClass = [bundle principalClass];
+     routeClass = [bundle classNamed:@"Route"];
+@@ -193,6 +265,7 @@ - (NSData *)responseForRequest:(NSURLRequest *)req
+     /* Call Test Functions here! */
+ #if __has_feature(blocks)
+     testLargeUploadWithBlock(baseURL);
++    testHugeUploadWithBlock(baseURL);
+ #endif
+ 
+     deadline = [NSDate dateWithTimeIntervalSinceNow:testTimeOut];
+-- 
+2.50.1 (Apple Git-155)
+
