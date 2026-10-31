@@ -1021,6 +1021,27 @@ under valgrind and crashes without it and runs clean with it; Logbook,
 with both bindings back, crashes three checks into its self-test on
 2026.10.20.7 and passes all 113 with this base.
 
+Added on 2026-10-31 for UDCode's diff editor:
+`layoutmanager-should-set-line-fragment-rect`.  The editor shows two texts
+side by side and pads lines in each view so that they align, by growing a
+line fragment in the layout manager's delegate,
+-layoutManager:shouldSetLineFragmentRect:lineFragmentUsedRect:
+baselineOffset:inTextContainer:forGlyphRange: (macOS 10.11); paragraph
+spacing will not do, because the text storage is shared with other tabs.
+GNUstep neither declared the method nor called it.  The patch declares the
+NSLayoutManagerDelegate protocol with it, optional, and GSHorizontalTypesetter
+asks the delegate about each line fragment before storing it: on YES the
+rects it returns are stored, its baseline offset (from the fragment's top
+down to the baseline, the y of the fragment's glyph locations) places the
+glyphs, and the next line starts below the line's lowest fragment.  With
+such a delegate, soft-invalidated fragments are not reused after an edit,
+since reuse would keep the delegate's old answer without asking it again.
+`NSLayoutManager/shouldSetLineFragmentRect.m` in libs-gui's suite: on master
+19dae207a 13 of its 18 checks fail, with the patch all pass, and without the
+reuse change the two after an edit fail; the NSLayoutManager, NSTextView and
+GSHorizontalTypesetter suites pass with it, and with every libs-gui patch
+here applied.
+
 Added on 2026-10-31 for LogBook on Windows, whose sync check took five
 minutes on a laptop and lost a receipt's photo on CI: `urlsession-windows-write`
 and `bplist-collections-by-identity` (libs-base). On Windows NSURLSession
@@ -1403,6 +1424,7 @@ among it, passes with this gui and fails without it.
 | `document-legacy-forwards` | libs-gui | test | not sent yet | (none: ORMDesigner on Windows uses it from here) |
 | `urlsession-windows-write` | libs-base | test | not sent yet | (none: LogBook's sync on Windows uses it from here) |
 | `bplist-collections-by-identity` | libs-base | test | not sent yet | (none: FreeCoreData's SQLite store, as LogBook makes them, uses it from here) |
+| `layoutmanager-should-set-line-fragment-rect` | libs-gui | test | not sent yet | (none: UDCode's diff editor will use it from here) |
 | `controller-to-many-content` | libs-gui | test | not sent yet (after `controller-entity-mode`) | (none: Logbook adds records through it) |
 | `controller-to-many-set` | libs-gui | test | not sent yet (after `controller-to-many-content`) | (none: Logbook filters records through it) |
 | `controller-value-bindings` | libs-gui | test | not sent yet | (none: Logbook's pick lists bind their order through it) |
