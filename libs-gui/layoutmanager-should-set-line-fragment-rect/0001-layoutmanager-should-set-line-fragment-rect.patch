@@ -1,0 +1,413 @@
+From 9538288cfca2aab0ea476b6f9cece5da6a8ec940 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Sat, 31 Oct 2026 07:04:26 +0000
+Subject: [PATCH] Ask the layout manager's delegate about each line fragment
+
+-layoutManager:shouldSetLineFragmentRect:lineFragmentUsedRect:
+baselineOffset:inTextContainer:forGlyphRange:, an NSLayoutManagerDelegate
+method since macOS 10.11, lets the delegate change a line fragment's
+rect, used rect and baseline offset before they are stored. GNUstep
+neither declared nor called it, so a delegate that pads a line had no
+effect: an editor that aligns the lines of two texts side by side, say,
+where paragraph spacing will not do because the text storage is shared
+with other views.
+
+NSLayoutManager.h now declares the NSLayoutManagerDelegate protocol with
+this method, optional. GSHorizontalTypesetter asks the delegate before
+-setLineFragmentRect:forGlyphRange:usedRect:, passing the fragment's
+rect, its used rect and the line's baseline offset: the distance from
+the top of the fragment down to the baseline, which is what the
+typesetter adds to each glyph's position to get its location in the
+fragment. When the delegate answers YES, the rects it returns are
+stored and its baseline offset places the fragment's glyphs (and a
+truncation glyph), so a larger offset moves them down; the next line
+starts below the lowest of the line's fragments as stored, so a taller
+fragment pushes every later line down, in its paragraph and the next.
+When it answers NO, nothing changes. The extra line fragment after a
+trailing newline is not offered to the delegate.
+
+With such a delegate the typesetter no longer reuses soft-invalidated
+line fragments after an edit. Reuse shifts the fragments below the edit
+as they were stored, the delegate's earlier answer included, without
+asking it again, so an answer that changed with the edit would never
+take effect. Those lines are laid out again instead and the delegate is
+asked about each; a layout manager whose delegate lacks the method
+reuses them as before.
+
+Tests/gui/NSLayoutManager/shouldSetLineFragmentRect.m lays out three
+paragraphs, the second wrapping, with delegates that add 10 points to
+the height of the second paragraph's first fragment: the fragment and
+its used rect are 10 points taller, the fragments above are unchanged,
+the next line of the paragraph and the next paragraph are 10 points
+lower, the glyphs stay at the padded fragment's top unless the baseline
+offset grows with it, the proposed offset is the glyphs' height in the
+fragment, and an answer of NO changes nothing. After an insertion in
+the first line the delegate is asked down to the last glyph again and a
+new answer (20 points) is used. On master 13 of its 18 checks fail; with
+the patch all pass, and without the change to reuse the two after the
+edit fail.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Headers/AppKit/NSLayoutManager.h              |  17 ++
+ Source/GSHorizontalTypesetter.m               |  50 ++++-
+ .../shouldSetLineFragmentRect.m               | 198 ++++++++++++++++++
+ 3 files changed, 259 insertions(+), 6 deletions(-)
+ create mode 100644 Tests/gui/NSLayoutManager/shouldSetLineFragmentRect.m
+
+diff --git a/Headers/AppKit/NSLayoutManager.h b/Headers/AppKit/NSLayoutManager.h
+index f3a263da7..e5bfef713 100644
+--- a/Headers/AppKit/NSLayoutManager.h
++++ b/Headers/AppKit/NSLayoutManager.h
+@@ -250,5 +250,22 @@ GNUstep extension.
+                                                inRange: (NSRange)range;
+ #endif
+ @end
++
++#if OS_API_VERSION(MAC_OS_X_VERSION_10_11, GS_API_LATEST)
++@protocol NSLayoutManagerDelegate <NSObject>
++#if GS_PROTOCOLS_HAVE_OPTIONAL
++@optional
++#else
++@end
++@interface NSObject (NSLayoutManagerDelegate)
++#endif
++- (BOOL) layoutManager: (NSLayoutManager *)layoutManager
++  shouldSetLineFragmentRect: (inout NSRect *)lineFragmentRect
++       lineFragmentUsedRect: (inout NSRect *)lineFragmentUsedRect
++             baselineOffset: (inout CGFloat *)baselineOffset
++            inTextContainer: (NSTextContainer *)textContainer
++              forGlyphRange: (NSRange)glyphRange;
++@end
++#endif
+ #endif
+ 
+diff --git a/Source/GSHorizontalTypesetter.m b/Source/GSHorizontalTypesetter.m
+index 380d6963e..5ab33a618 100644
+--- a/Source/GSHorizontalTypesetter.m
++++ b/Source/GSHorizontalTypesetter.m
+@@ -42,6 +42,7 @@
+ #import "AppKit/NSTextContainer.h"
+ #import "AppKit/NSTextStorage.h"
+ #import "AppKit/NSFont.h"
++#import "AppKit/NSLayoutManager.h"
+ #import "GNUstepGUI/GSLayoutManager.h"
+ #import "GNUstepGUI/GSHorizontalTypesetter.h"
+ 
+@@ -50,6 +51,13 @@
+ - (NSGlyph) _defaultGlyphForChar: (unichar)theChar;
+ @end
+ 
++static inline BOOL
++delegateSetsLineFragments(GSLayoutManager *layoutManager)
++{
++  return [[layoutManager delegate] respondsToSelector:
++    @selector(layoutManager:shouldSetLineFragmentRect:lineFragmentUsedRect:baselineOffset:inTextContainer:forGlyphRange:)];
++}
++
+ 
+ /*
+ Note that unless the user creates extra instances, there will only be one
+@@ -1261,6 +1269,7 @@ static inline BOOL wantNewLineHeight(CGFloat height, CGFloat *lineHeight, CGFloa
+   /* TODO: doesn't have to be a simple horizontal container, but it's easier
+      to handle that way. */
+   if ([currentTextContainer isSimpleRectangularTextContainer] &&
++      !delegateSetsLineFragments(currentLayoutManager) &&
+       [currentLayoutManager _softInvalidateFirstGlyphInTextContainer: currentTextContainer] == currentGlyphIndex)
+     {
+       if ([self _reuseSoftInvalidatedLayout])
+@@ -1441,11 +1450,16 @@ static inline BOOL wantNewLineHeight(CGFloat height, CGFloat *lineHeight, CGFloa
+     unsigned int glyphCounter, savedGlyphCounter;
+     GlyphCacheEntry *glyphEntry;
+     NSRect usedRect;
++    NSRange glyphRange;
++    CGFloat lineBottom;
+ 
+     CGFloat baseline = lineHeight - descender;
++    CGFloat offset;
++    BOOL askDelegate = delegateSetsLineFragments(currentLayoutManager);
+ 
+     glyphCounter = 0;
+     glyphEntry = glyphCache;
++    lineBottom = NSMinY(lineFragments->rect);
+     for (lineFragment = lineFragments; lineFragmentIndex >= 0; lineFragmentIndex--, lineFragment++)
+       {
+         usedRect.origin.x = glyphEntry->position.x + lineFragment->rect.origin.x;
+@@ -1454,21 +1468,46 @@ static inline BOOL wantNewLineHeight(CGFloat height, CGFloat *lineHeight, CGFloa
+         usedRect.origin.y = lineFragment->rect.origin.y;
+         usedRect.size.height = lineFragment->rect.size.height;
+ 
++        glyphRange = NSMakeRange(cacheBase + glyphCounter,
++                                 lineFragment->lastGlyphIndex - glyphCounter);
++        offset = baseline;
++        if (askDelegate)
++          {
++            NSRect rect = lineFragment->rect;
++            NSRect used = usedRect;
++            CGFloat b = baseline;
++
++            if ([(id<NSLayoutManagerDelegate>)[currentLayoutManager delegate]
++                         layoutManager: (NSLayoutManager *)currentLayoutManager
++             shouldSetLineFragmentRect: &rect
++                  lineFragmentUsedRect: &used
++                        baselineOffset: &b
++                       inTextContainer: currentTextContainer
++                         forGlyphRange: glyphRange])
++              {
++                lineFragment->rect = rect;
++                usedRect = used;
++                offset = b;
++              }
++          }
++        if (NSMaxY(lineFragment->rect) > lineBottom)
++          lineBottom = NSMaxY(lineFragment->rect);
++
+         [currentLayoutManager setLineFragmentRect: lineFragment->rect
+-                                    forGlyphRange: NSMakeRange(cacheBase + glyphCounter, lineFragment->lastGlyphIndex - glyphCounter)
++                                    forGlyphRange: glyphRange
+                                          usedRect: usedRect];
+         if (lineFragment->truncationGlyph != NSNullGlyph)
+           {
+             NSPoint tp = lineFragment->truncationPoint;
+ 
+-            tp.y += baseline;
++            tp.y += offset;
+             [currentLayoutManager setTruncationGlyph: lineFragment->truncationGlyph
+                                              atPoint: tp
+                                                 font: lineFragment->truncationFont
+                                        forGlyphRange: NSMakeRange(cacheBase + glyphCounter, lineFragment->lastGlyphIndex - glyphCounter)];
+           }
+         glyphPosition = glyphEntry->position;
+-        glyphPosition.y += baseline;
++        glyphPosition.y += offset;
+         savedGlyphCounter = glyphCounter;
+         while (glyphCounter < lineFragment->lastGlyphIndex)
+           {
+@@ -1492,7 +1531,7 @@ static inline BOOL wantNewLineHeight(CGFloat height, CGFloat *lineHeight, CGFloa
+                                               forGlyphRange: NSMakeRange(cacheBase + savedGlyphCounter, glyphCounter - savedGlyphCounter)];
+                   }
+                 glyphPosition = glyphEntry->position;
+-                glyphPosition.y += baseline;
++                glyphPosition.y += offset;
+                 savedGlyphCounter = glyphCounter;
+               }
+             glyphCounter++;
+@@ -1509,10 +1548,9 @@ static inline BOOL wantNewLineHeight(CGFloat height, CGFloat *lineHeight, CGFloa
+               }
+           }
+       }
++    currentPoint = NSMakePoint(0, lineBottom);
+   }
+ 
+-  currentPoint = NSMakePoint(0, NSMaxY(lineFragments->rect));
+-
+   if (newParagraph)
+     {
+       /* This line ended a paragraph; add its trailing spacing before the
+diff --git a/Tests/gui/NSLayoutManager/shouldSetLineFragmentRect.m b/Tests/gui/NSLayoutManager/shouldSetLineFragmentRect.m
+new file mode 100644
+index 000000000..577423a6f
+--- /dev/null
++++ b/Tests/gui/NSLayoutManager/shouldSetLineFragmentRect.m
+@@ -0,0 +1,198 @@
++/* The layout manager's delegate is asked about each line fragment before
++   it is stored, by -layoutManager:shouldSetLineFragmentRect:
++   lineFragmentUsedRect:baselineOffset:inTextContainer:forGlyphRange:.
++   When it answers YES its rects and baseline offset are used: a taller
++   fragment pushes every later one down, in its paragraph and the next,
++   and a larger baseline offset moves the fragment's glyphs down.  When it
++   answers NO, nothing changes.  After an edit, the lines laid out again are
++   asked about again, so a changed answer takes effect below the edit. */
++#include "Testing.h"
++
++#include <math.h>
++
++#include <Foundation/NSAutoreleasePool.h>
++#include <Foundation/NSString.h>
++
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSLayoutManager.h>
++#include <AppKit/NSTextContainer.h>
++#include <AppKit/NSTextStorage.h>
++
++@interface Padder : NSObject
++{
++@public
++  NSUInteger padGlyph;     /* the fragment holding this glyph is padded */
++  CGFloat extra;           /* added to its height */
++  CGFloat shift;           /* added to its baseline offset */
++  BOOL answer;
++  NSUInteger calls;
++  NSUInteger lastAsked;    /* the end of the last glyph range asked about */
++  CGFloat proposedBaseline;
++}
++@end
++
++@implementation Padder
++- (BOOL) layoutManager: (NSLayoutManager *)layoutManager
++  shouldSetLineFragmentRect: (NSRect *)lineFragmentRect
++       lineFragmentUsedRect: (NSRect *)lineFragmentUsedRect
++             baselineOffset: (CGFloat *)baselineOffset
++            inTextContainer: (NSTextContainer *)textContainer
++              forGlyphRange: (NSRange)glyphRange
++{
++  calls++;
++  lastAsked = NSMaxRange(glyphRange);
++  if (NSLocationInRange(padGlyph, glyphRange))
++    {
++      proposedBaseline = *baselineOffset;
++      lineFragmentRect->size.height += extra;
++      lineFragmentUsedRect->size.height += extra;
++      *baselineOffset += shift;
++    }
++  return answer;
++}
++@end
++
++static NSString *text = @"First line\n"
++  @"A second paragraph, long enough to wrap onto two lines or more\n"
++  @"Third\n";
++
++static NSTextStorage *storage;
++static NSLayoutManager *lm;
++static NSTextContainer *tc;
++
++static void
++layOut(Padder *delegate)
++{
++  storage = AUTORELEASE([[NSTextStorage alloc] initWithString: text]);
++  lm = AUTORELEASE([[NSLayoutManager alloc] init]);
++  [lm setDelegate: delegate];
++  tc = AUTORELEASE([[NSTextContainer alloc]
++    initWithContainerSize: NSMakeSize(200, 1e7)]);
++  [lm addTextContainer: tc];
++  [storage addLayoutManager: lm];
++  [lm glyphRangeForTextContainer: tc];
++}
++
++static NSRect
++fragment(NSUInteger glyph)
++{
++  return [lm lineFragmentRectForGlyphAtIndex: glyph effectiveRange: NULL];
++}
++
++static NSRect
++usedFragment(NSUInteger glyph)
++{
++  return [lm lineFragmentUsedRectForGlyphAtIndex: glyph effectiveRange: NULL];
++}
++
++int
++main(int argc, const char **argv)
++{
++  NSAutoreleasePool *pool = [NSAutoreleasePool new];
++  NSUInteger second;     /* the first glyph of the second paragraph */
++  NSUInteger wrapped;    /* the first glyph of its second line */
++  NSUInteger third;      /* the first glyph of the third paragraph */
++  NSRange range;
++  NSRect first0, second0, wrapped0, third0, used0, all0;
++  NSPoint secondAt0, wrappedAt0;
++  Padder *padder;
++
++  START_SET("NSLayoutManager delegate shouldSetLineFragmentRect")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  second = [text rangeOfString: @"A second"].location;
++  third = [text rangeOfString: @"Third"].location;
++
++  layOut(nil);
++  [lm lineFragmentRectForGlyphAtIndex: second effectiveRange: &range];
++  wrapped = NSMaxRange(range);
++  PASS(wrapped < third, "the second paragraph wraps");
++  first0 = fragment(0);
++  second0 = fragment(second);
++  wrapped0 = fragment(wrapped);
++  third0 = fragment(third);
++  used0 = usedFragment(second);
++  all0 = [lm usedRectForTextContainer: tc];
++  secondAt0 = [lm locationForGlyphAtIndex: second];
++  wrappedAt0 = [lm locationForGlyphAtIndex: wrapped];
++
++  padder = AUTORELEASE([Padder new]);
++  padder->padGlyph = second;
++  padder->extra = 10;
++  padder->answer = YES;
++  layOut(padder);
++  PASS(padder->calls > 0, "the delegate is asked about line fragments");
++  PASS(padder->lastAsked == [lm numberOfGlyphs],
++       "it is asked down to the last glyph");
++  PASS(fabs(padder->proposedBaseline - secondAt0.y) < 0.001,
++       "the proposed baseline offset is the glyphs' height in the fragment"
++       " (%g, glyphs at %g)", padder->proposedBaseline, secondAt0.y);
++  PASS(NSEqualRects(fragment(0), first0),
++       "a fragment above the padded one is unchanged");
++  PASS(NSMinY(fragment(second)) == NSMinY(second0)
++       && NSHeight(fragment(second)) == NSHeight(second0) + 10,
++       "the padded fragment is 10 points taller");
++  PASS(NSHeight(usedFragment(second)) == NSHeight(used0) + 10,
++       "and so is its used rect");
++  PASS(NSMinY(fragment(wrapped)) == NSMinY(wrapped0) + 10,
++       "the next line of the paragraph is 10 points lower");
++  PASS(NSMinY(fragment(third)) == NSMinY(third0) + 10,
++       "and so is the next paragraph");
++  PASS(NSHeight([lm usedRectForTextContainer: tc]) == NSHeight(all0) + 10,
++       "the text is 10 points taller");
++  PASS(NSEqualPoints([lm locationForGlyphAtIndex: second], secondAt0),
++       "the padded fragment's glyphs stay at its top");
++  PASS(NSEqualPoints([lm locationForGlyphAtIndex: wrapped], wrappedAt0),
++       "a lower fragment's glyphs are where they were in it");
++
++  padder = AUTORELEASE([Padder new]);
++  padder->padGlyph = second;
++  padder->extra = 10;
++  padder->shift = 10;
++  padder->answer = YES;
++  layOut(padder);
++  PASS([lm locationForGlyphAtIndex: second].y == secondAt0.y + 10,
++       "a larger baseline offset moves the fragment's glyphs down");
++  PASS(NSMinY(fragment(third)) == NSMinY(third0) + 10,
++       "and the lines below move by the height alone");
++
++  padder = AUTORELEASE([Padder new]);
++  padder->padGlyph = second;
++  padder->extra = 10;
++  padder->shift = 10;
++  padder->answer = NO;
++  layOut(padder);
++  PASS(padder->calls > 0, "a delegate that answers NO is asked");
++  PASS(NSEqualRects(fragment(second), second0)
++       && NSEqualRects(usedFragment(second), used0)
++       && NSEqualRects(fragment(third), third0)
++       && NSEqualPoints([lm locationForGlyphAtIndex: second], secondAt0),
++       "and what it changed is not used");
++
++  padder = AUTORELEASE([Padder new]);
++  padder->padGlyph = second;
++  padder->extra = 10;
++  padder->answer = YES;
++  layOut(padder);
++  padder->calls = 0;
++  padder->lastAsked = 0;
++  padder->extra = 20;
++  padder->padGlyph = second + 1;
++  [storage replaceCharactersInRange: NSMakeRange(0, 0) withString: @"x"];
++  [lm glyphRangeForTextContainer: tc];
++  PASS(padder->calls > 0 && padder->lastAsked == [lm numberOfGlyphs],
++       "after an edit, the lines below it are asked about again");
++  PASS(NSHeight(fragment(second + 1)) == NSHeight(second0) + 20
++       && NSMinY(fragment(third + 1)) == NSMinY(third0) + 20,
++       "and the delegate's new answer is used");
++
++  END_SET("NSLayoutManager delegate shouldSetLineFragmentRect")
++  [pool release];
++  return 0;
++}
+-- 
+2.43.0
+
