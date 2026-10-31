@@ -1030,8 +1030,14 @@ then only after a send() fails with WSAEWOULDBLOCK. libcurl sends a buffer
 at a time (64 KB) and waits to be told it may write again, so a body larger
 than one buffer stopped after it, until the server gave up (GCDWebServer:
 60 seconds, then a reset connection). While libcurl wants to write, the
-socket is now asked (select() with no timeout), after each turn of libcurl's
-and after each WSAEventSelect(), which clears what the socket had recorded.
+socket is now asked, after each turn of libcurl's and after each
+WSAEventSelect(), which clears what the socket had recorded: by a send() of
+nothing, as libdispatch does, which when the socket cannot be written to
+fails with WSAEWOULDBLOCK and so has Windows record the next FD_WRITE. (It
+asked select() at first, released in 2026.10.20.33: when libcurl's last
+send() had filled the buffer without failing, select() said no and no
+FD_WRITE was to come; on GitHub's windows-2025 runners LogBook's 170 KB
+upload of a receipt's photo still waited for the server to give up.)
 `Tests/base/NSURLSession/uploadTaskTests.m` sends 256 KB more: on Windows,
 MSYS2 CLANG64, every libs-base patch here applied, the transfer never
 completes without the fix and passes with it (20 checks). The binary

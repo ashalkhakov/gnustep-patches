@@ -1,6 +1,6 @@
-From 3fcfef4bbf326f0ae0e32926eb2fed7bede6f430 Mon Sep 17 00:00:00 2001
+From 6ab775bb6de3910c65af1b73103cea350f5caeb4 Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
-Date: Sat, 31 Oct 2026 01:42:48 +0500
+Date: Sat, 31 Oct 2026 11:44:19 +0500
 Subject: [PATCH] NSURLSession: an upload larger than libcurl's buffer sent
  whole on Windows
 
@@ -15,10 +15,16 @@ stopped, until the server gave up waiting for the rest (60 seconds for
 GCDWebServer, which then reset the connection).
 
 While libcurl wants to write, the socket is now asked whether it can be
-written to (select() with no timeout), and after libcurl's turn, still
-wanting to and able to, the socket's event is set so the run loop comes
-back to it.  The event's map holds the socket's SourceInfo rather than
-the socket, to know what libcurl wants.
+written to, by a send() of nothing, as libdispatch's Windows event loop
+does: when it cannot, that send() fails with WSAEWOULDBLOCK, which has
+Windows record an FD_WRITE once it can.  (A select() answers the same
+question but arms nothing: when libcurl's last send() had filled the
+buffer without failing, an upload waited for the server to give up.  On
+GitHub's windows-2025 runners, a 170 KB request, both processes idle.)
+After libcurl's turn, still wanting to write and able to, the socket's
+event is set so the run loop comes back to it.  The event's map holds
+the socket's SourceInfo rather than the socket, to know what libcurl
+wants.
 
 Tests/base/NSURLSession/uploadTaskTests.m sends a body of 256 KB and
 checks the server had it whole.  On Windows (MSYS2 CLANG64, every
@@ -32,7 +38,7 @@ Patch done with help of AI.
  2 files changed, 135 insertions(+), 13 deletions(-)
 
 diff --git a/Source/NSURLSession.m b/Source/NSURLSession.m
-index e7104da..9b1ed9d 100644
+index e7104da..5a998f6 100644
 --- a/Source/NSURLSession.m
 +++ b/Source/NSURLSession.m
 @@ -43,10 +43,10 @@
@@ -54,16 +60,16 @@ index e7104da..9b1ed9d 100644
  }
  
 +#if	defined(_WIN32)
-+/* Whether a socket can be written to now, without waiting. */
++/* Whether a socket can be written to now, without waiting.  Asked by a
++ * send() of nothing, as libdispatch does, not by select(): when it cannot,
++ * the send() fails with WSAEWOULDBLOCK, and that is what has Windows
++ * record an FD_WRITE once it can.  A select() saying no leaves none to come
++ * when the last send() filled the buffer without failing.
++ */
 +static BOOL
 +socketIsWritable(curl_socket_t socket)
 +{
-+  fd_set		writable;
-+  struct timeval	now = { 0, 0 };
-+
-+  FD_ZERO(&writable);
-+  FD_SET(socket, &writable);
-+  return select(0, NULL, &writable, NULL, &now) == 1;
++  return send(socket, "", 0, 0) == 0;
 +}
 +#endif
 +
