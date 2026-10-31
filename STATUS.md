@@ -1042,6 +1042,18 @@ reuse change the two after an edit fail; the NSLayoutManager, NSTextView and
 GSHorizontalTypesetter suites pass with it, and with every libs-gui patch
 here applied.
 
+Added on 2026-10-31 for WorkflowKit on Windows, whose timers fired late or
+never: `windows-walltime-timer` (libdispatch). Its Windows event loop gave
+SetThreadpoolTimer() a wall clock timer's due time in nanoseconds since 1970,
+where a positive due time is a FILETIME, 100-nanosecond intervals since 1601:
+a timer due in 200 milliseconds was set thousands of years ahead, and fired
+only when something else woke the event loop. The due time is now converted.
+`tests/dispatch_timer_wall.c` arms one for 200 milliseconds and waits by
+sleeping: on the laptop (MSYS2 CLANG64) it did not fire in ten seconds without
+the fix and fires after 202 milliseconds with it. WorkflowKit's scheduler
+arms its timer by the wall clock (dispatch_walltime). Its commit says "Patch
+done with help of AI." and carries no Claude trailer.
+
 Added on 2026-10-31 for XFormsKit on Windows, whose SVG <text> drew
 nothing there: `windows-fontconfig-text` (libs-opal). OpalText left its
 Fontconfig font descriptor and FreeType font out of the Windows build and
@@ -1471,6 +1483,7 @@ among it, passes with this gui and fails without it.
 | `mingw-mode-t` | libdispatch | none (a header that does not compile on MinGW; the Windows stack build is the check) | not sent yet | (none: the Windows stack uses it from here) |
 | `mingw-blocksruntime-name` | libdispatch | none (libdispatch.dll does not load on MinGW; the Windows stack check is the test) | not sent yet | (none: the Windows stack uses it from here) |
 | `windows-listening-socket-read` | libdispatch | none (GCDWebServer's Windows smoke test is the check: it listens but never accepts without it) | not sent yet | (none: the Windows stack uses it from here) |
+| `windows-walltime-timer` | libdispatch | test (`tests/dispatch_timer_wall.c`) | not sent yet | (none: WorkflowKit uses it from here) |
 | `uuid-secure-coding` | libs-base | test | not sent yet | (none: ODataKit's apps, Logbook first, use it from here) |
 | `kvo-nested-value-kept` | libs-base | test | not sent yet | (none: Logbook uses it from here) |
 | `tablecolumn-binds-table` | libs-gui | test | not sent yet | (none: Logbook uses it from here) |

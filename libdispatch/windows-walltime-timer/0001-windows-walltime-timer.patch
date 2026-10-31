@@ -1,0 +1,135 @@
+From f509e482182e84e44cbc61460592ccb214057da9 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Sat, 31 Oct 2026 18:41:51 +0500
+Subject: [PATCH] Windows: a wall clock timer is armed for when it is due
+
+_dispatch_event_loop_timer_arm() gave SetThreadpoolTimer() a wall clock
+timer's due time as the wall clock counts it, nanoseconds since 1970. A
+positive due time there is absolute, a FILETIME: 100-nanosecond intervals
+since 1601. So a timer due in 200 milliseconds was set for thousands of
+years ahead, and fired only when something else woke the event loop and the
+timer heap was looked at again. The due time is now converted: divided by
+100, and moved by the 369 years between 1601 and 1970.
+
+tests/dispatch_timer_wall.c arms a wall clock timer for 200 milliseconds and
+waits by sleeping, not by a dispatch wait, which would wake the event loop.
+On Windows (MSYS2 CLANG64) such a timer did not fire in ten seconds without
+the change; with it it fires on time, as an uptime timer does (207 ms).
+
+Patch done with help of AI.
+---
+ src/event/event_windows.c   |  8 +++--
+ tests/CMakeLists.txt        |  1 +
+ tests/dispatch_timer_wall.c | 69 +++++++++++++++++++++++++++++++++++++
+ 3 files changed, 76 insertions(+), 2 deletions(-)
+ create mode 100644 tests/dispatch_timer_wall.c
+
+diff --git a/src/event/event_windows.c b/src/event/event_windows.c
+index f7856bf..4883b8f 100644
+--- a/src/event/event_windows.c
++++ b/src/event/event_windows.c
+@@ -813,8 +813,12 @@ _dispatch_event_loop_timer_arm(dispatch_timer_heap_t dth DISPATCH_UNUSED,
+ 	switch (DISPATCH_TIMER_CLOCK(tidx)) {
+ 	case DISPATCH_CLOCK_WALL:
+ 		timer = &_dispatch_windows_timeout[DISPATCH_CLOCK_WALL];
+-		liTime.QuadPart = range.delay +
+-			_dispatch_time_now_cached(DISPATCH_TIMER_CLOCK(tidx), nows);
++		// A positive due time is absolute, a FILETIME: 100-nanosecond
++		// intervals since January 1, 1601 (UTC). The wall clock counts
++		// nanoseconds since January 1, 1970.
++		liTime.QuadPart = (LONGLONG)((range.delay +
++			_dispatch_time_now_cached(DISPATCH_TIMER_CLOCK(tidx), nows)) / 100ull +
++			116444736000000000ull);
+ 		break;
+ 
+ 	case DISPATCH_CLOCK_UPTIME:
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index cde05d7..a662bb5 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -133,6 +133,7 @@ set(DISPATCH_C_TESTS
+     timer_bit31
+     timer_bit63
+     timer_set_time
++    timer_wall
+     data
+     io_muxed
+     io_net
+diff --git a/tests/dispatch_timer_wall.c b/tests/dispatch_timer_wall.c
+new file mode 100644
+index 0000000..dbcb563
+--- /dev/null
++++ b/tests/dispatch_timer_wall.c
+@@ -0,0 +1,69 @@
++/*
++ * A timer on the wall clock (dispatch_walltime) fires when it is due, with
++ * nothing else in the process to wake the dispatch event loop: the test waits
++ * by sleeping, not by a dispatch wait, which would.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include <dispatch/dispatch.h>
++#include <stdatomic.h>
++#include <stdlib.h>
++#if defined(_WIN32)
++#include <windows.h>
++#else
++#include <unistd.h>
++#endif
++
++#include <bsdtests.h>
++#include "dispatch_test.h"
++
++static _Atomic int fired;
++
++static void
++sleep_ms(unsigned int ms)
++{
++#if defined(_WIN32)
++	Sleep(ms);
++#else
++	usleep(ms * 1000);
++#endif
++}
++
++int
++main(void)
++{
++	dispatch_test_start("Dispatch Wall Clock Timer");
++
++	dispatch_queue_t q = dispatch_queue_create("wall", DISPATCH_QUEUE_SERIAL);
++	dispatch_source_t t = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, q);
++	test_ptr_notnull("dispatch_source_create", t);
++	dispatch_source_set_event_handler(t, ^{
++		atomic_store(&fired, 1);
++		dispatch_source_cancel(t);
++	});
++	// Due in 200 ms by the wall clock.
++	dispatch_source_set_timer(t, dispatch_walltime(NULL, 200 * NSEC_PER_MSEC),
++		DISPATCH_TIME_FOREVER, 5 * NSEC_PER_MSEC);
++	dispatch_resume(t);
++
++	long waited = 0;
++	while (!atomic_load(&fired) && waited < 5000) {
++		sleep_ms(10);
++		waited += 10;
++	}
++	test_long("fired", atomic_load(&fired), 1);
++	test_long_less_than("milliseconds waited", waited, 2000);
++	test_stop();
++	return 0;
++}
+-- 
+2.50.1 (Apple Git-155)
+
