@@ -1,0 +1,71 @@
+From 8a24e22ac9e31c0af314ae23f1db2e595138905e Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Sat, 31 Oct 2026 13:31:47 +0500
+Subject: [PATCH] Core Text's fonts found and read on Windows too: Fontconfig
+ and FreeType
+
+On Windows (mingw32) OpalText left out its Fontconfig font descriptor and
+its FreeType font, and linked neither library, so OPFontDescriptor found no
+class to describe a font with: every CTFontCreateWithName() answered a font
+with no glyphs, no advances and no ascent, and text drawn with Core Text
+measured and painted nothing.  MSYS2 has Fontconfig and FreeType as every
+other system does, and Fontconfig finds Windows' own fonts (C:\Windows\Fonts):
+both are now built and linked on Windows as everywhere else.  Graphics fonts
+are still Win32's through cairo (CairoFontWin32), found by the family the
+descriptor resolved to, so a glyph's index is the same font file's.
+
+On Windows (MSYS2 CLANG64, every libs-opal patch of gnustep-patches
+applied), CTFontCreateWithName(@"Helvetica", 20, NULL) gave no glyphs and an
+ascent of 0 without the change, and Arial's (Fontconfig's match for it), an
+ascent of 18.1, with it; XFormsKit's SVG text tests, which paint a <text>
+into a bitmap context, find no ink without it and pass with it.
+
+Patch done with help of AI.
+---
+ Source/GNUmakefile          | 1 +
+ Source/OpalText/GNUmakefile | 7 +++----
+ 2 files changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/Source/GNUmakefile b/Source/GNUmakefile
+index 4251dd9..fb88ca2 100644
+--- a/Source/GNUmakefile
++++ b/Source/GNUmakefile
+@@ -26,6 +26,7 @@ LIBRARIES_DEPEND_UPON += $(shell pkg-config --libs freetype2) -lfontconfig -lX11
+ LIBRARIES_DEPEND_UPON += $(shell pkg-config --libs cairo)
+ else
+ LIBRARIES_DEPEND_UPON += -lgdi32 -lcairo
++LIBRARIES_DEPEND_UPON += $(shell pkg-config --libs freetype2) -lfontconfig
+ endif
+ 
+ LIBRARIES_DEPEND_UPON += $(shell pkg-config --libs lcms2)
+diff --git a/Source/OpalText/GNUmakefile b/Source/OpalText/GNUmakefile
+index 8366a86..c9218c7 100644
+--- a/Source/OpalText/GNUmakefile
++++ b/Source/OpalText/GNUmakefile
+@@ -5,10 +5,10 @@ SUBPROJECT_NAME = OpalText
+ 
+ $(SUBPROJECT_NAME)_OBJC_FILES = $(wildcard *.m)
+ 
+-ifneq ($(GNUSTEP_TARGET_OS), mingw32)
++# Core Text's fonts are found by Fontconfig and read by FreeType on every
++# system, Windows too (MSYS2 has both): without them no font is found.
+ $(SUBPROJECT_NAME)_OBJC_FILES += Fontconfig/OPFontconfigFontDescriptor.m
+ $(SUBPROJECT_NAME)_OBJC_FILES += FreeType/OPFreeTypeFont.m
+-endif
+ 
+ $(SUBPROJECT_NAME)_HEADER_FILES_DIR = ../../Headers/CoreText
+ $(SUBPROJECT_NAME)_INCLUDE_DIRS = -I../../Headers
+@@ -35,9 +35,8 @@ $(SUBPROJECT_NAME)_HEADER_FILES = \
+ ADDITIONAL_OBJCFLAGS += -Wall -g -O0 -std=gnu99 -DINTERNAL_BUILD_OBJC -Wno-error=int-conversion
+ ADDITIONAL_CPPFLAGS += $(shell pkg-config --cflags cairo)
+ 
+-ifneq ($(GNUSTEP_TARGET_OS), mingw32)
+ ADDITIONAL_CPPFLAGS += $(shell pkg-config --cflags freetype2)
+-else
++ifeq ($(GNUSTEP_TARGET_OS), mingw32)
+ ADDITIONAL_CPPFLAGS += -D__MINGW__
+ endif
+ 
+-- 
+2.50.1 (Apple Git-155)
+
