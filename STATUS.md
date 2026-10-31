@@ -1042,6 +1042,19 @@ reuse change the two after an edit fail; the NSLayoutManager, NSTextView and
 GSHorizontalTypesetter suites pass with it, and with every libs-gui patch
 here applied.
 
+Added on 2026-10-31 for XFormsKit on Windows, whose SVG <text> drew
+nothing there: `windows-fontconfig-text` (libs-opal). OpalText left its
+Fontconfig font descriptor and FreeType font out of the Windows build and
+linked neither library, so every CTFontCreateWithName() answered a font with
+no glyphs, advances or ascent. MSYS2 has both, and Fontconfig finds Windows'
+own fonts, so they are now built and linked there as everywhere else; graphics
+fonts stay Win32's through cairo, by the family the descriptor resolved to.
+On the laptop (MSYS2 CLANG64) "Helvetica" had no glyphs and an ascent of 0
+without it and resolves to Arial (ascent 18.1) with it; XFormsKit's
+`XFSVGRenderTests` text tests find no ink without it and pass with it, and
+all 293 of its tests and 458 W3C ones pass on Windows. Its commit says
+"Patch done with help of AI." and carries no Claude trailer.
+
 Added on 2026-10-31 for LogBook on Windows, whose sync check took five
 minutes on a laptop and lost a receipt's photo on CI: `urlsession-windows-write`
 and `bplist-collections-by-identity` (libs-base). On Windows NSURLSession
@@ -1452,6 +1465,7 @@ among it, passes with this gui and fails without it.
 | `colorspace-srgb` | libs-gui | test | not sent yet | (none: RDLKit will use it from here) |
 | `cgrectunion-size` | libs-opal | none | [#71](https://github.com/gnustep/libs-opal/pull/71) | GSXFormsKit |
 | `freetype-advance-without-size` | libs-opal | test | [#72](https://github.com/gnustep/libs-opal/pull/72) | (none: XFormsKit uses it from here) |
+| `windows-fontconfig-text` | libs-opal | none here (XFormsKit's SVG text tests on Windows) | not sent yet | (none: XFormsKit uses it from here) |
 | `cfstring-overrelease` | libs-corebase | none | [#166](https://github.com/gnustep/libs-corebase/pull/166) | gnustep-build |
 | `gsunicode-write-name` | libs-corebase | none (a compile error on Windows; the Windows stack build is the check) | not sent yet | (none: the Windows stack uses it from here) |
 | `mingw-mode-t` | libdispatch | none (a header that does not compile on MinGW; the Windows stack build is the check) | not sent yet | (none: the Windows stack uses it from here) |
