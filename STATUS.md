@@ -1067,6 +1067,25 @@ without it and resolves to Arial (ascent 18.1) with it; XFormsKit's
 all 293 of its tests and 458 W3C ones pass on Windows. Its commit says
 "Patch done with help of AI." and carries no Claude trailer.
 
+Added on 2026-11-05 for XFormsKit's designer, whose inspectors are to bind
+their fields to view models that validate what is typed:
+`textfield-binding-end-editing` (libs-gui).  A text field's value binding
+gave the edited text to the bound object only from -sendAction:to:, so
+editing that ended by tabbing or clicking away left the old value there,
+and NSValidatesImmediatelyBindingOption was never read.  Checked on macOS
+15 first: editing that ends sets the value with or without the option;
+with it, the bound object validates the value at -textShouldEndEditing:,
+a value the validator replaces is set and shown, and one it refuses is
+presented by the field (-presentError:modalForWindow:...), which keeps
+editing.  The patch does the same: -[NSControl textDidEndEditing:] sets the
+binding's value, and -[NSTextField textShouldEndEditing:] validates when
+asked.  A bound checkbox already sets its value when clicked.
+`NSTextField/endEditingBinding.m` in libs-gui's suite: on master 1dd8b76c6
+10 of its 15 checks fail, with the patch all pass, and the whole gui suite
+passes 4939; with every libs-gui patch here applied the suite passes but
+for `GSXib5KeyedUnarchiver/formatters.m`, which wants libs-base's
+`formatter-keyed-attributes` and fails the same without this patch.
+
 Added on 2026-10-31 for LogBook on Windows, whose sync check took five
 minutes on a laptop and lost a receipt's photo on CI: `urlsession-windows-write`
 and `bplist-collections-by-identity` (libs-base). On Windows NSURLSession
@@ -1450,6 +1469,7 @@ among it, passes with this gui and fails without it.
 | `urlsession-windows-write` | libs-base | test | not sent yet | (none: LogBook's sync on Windows uses it from here) |
 | `bplist-collections-by-identity` | libs-base | test | not sent yet | (none: FreeCoreData's SQLite store, as LogBook makes them, uses it from here) |
 | `layoutmanager-should-set-line-fragment-rect` | libs-gui | test | not sent yet | (none: UDCode's diff editor will use it from here) |
+| `textfield-binding-end-editing` | libs-gui | test | not sent yet | (none: XFormsKit's designer uses it from here) |
 | `controller-to-many-content` | libs-gui | test | not sent yet (after `controller-entity-mode`) | (none: Logbook adds records through it) |
 | `controller-to-many-set` | libs-gui | test | not sent yet (after `controller-to-many-content`) | (none: Logbook filters records through it) |
 | `controller-value-bindings` | libs-gui | test | not sent yet | (none: Logbook's pick lists bind their order through it) |
