@@ -1085,6 +1085,18 @@ asked.  A bound checkbox already sets its value when clicked.
 passes 4939; with every libs-gui patch here applied the suite passes but
 for `GSXib5KeyedUnarchiver/formatters.m`, which wants libs-base's
 `formatter-keyed-attributes` and fails the same without this patch.
+With it, for the same designer, `textview-field-editor-undo` (libs-gui).
+A field editor that resigned first responder called -removeAllActions on
+its undo manager, which is its window's, a document's: every text field
+whose editing ended took the document's whole undo history with it,
+including the change the end of editing had just made (a bound value
+set), and closed any undo group open around it.  On macOS 15 a window's
+other undo actions survive a field's editing, and the typing is not left
+to undo.  The typing's actions are registered with the text storage, so
+the field editor now removes only those (-removeAllActionsWithTarget:).
+`NSTextView/fieldEditorUndo.m`: on master 1dd8b76c6 3 of its 6 checks
+fail, with the patch all pass; the whole gui suite passes 4930, and with
+every libs-gui patch here 5563, but for `formatters.m` as above.
 
 Added on 2026-10-31 for LogBook on Windows, whose sync check took five
 minutes on a laptop and lost a receipt's photo on CI: `urlsession-windows-write`
@@ -1470,6 +1482,7 @@ among it, passes with this gui and fails without it.
 | `bplist-collections-by-identity` | libs-base | test | not sent yet | (none: FreeCoreData's SQLite store, as LogBook makes them, uses it from here) |
 | `layoutmanager-should-set-line-fragment-rect` | libs-gui | test | not sent yet | (none: UDCode's diff editor will use it from here) |
 | `textfield-binding-end-editing` | libs-gui | test | not sent yet | (none: XFormsKit's designer uses it from here) |
+| `textview-field-editor-undo` | libs-gui | test | not sent yet | (none: XFormsKit's designer uses it from here) |
 | `controller-to-many-content` | libs-gui | test | not sent yet (after `controller-entity-mode`) | (none: Logbook adds records through it) |
 | `controller-to-many-set` | libs-gui | test | not sent yet (after `controller-to-many-content`) | (none: Logbook filters records through it) |
 | `controller-value-bindings` | libs-gui | test | not sent yet | (none: Logbook's pick lists bind their order through it) |
