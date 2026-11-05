@@ -1,0 +1,331 @@
+From 3d1324e387a093fd9b723227dc0a0635d33bed64 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Thu, 5 Nov 2026 06:28:56 +0000
+Subject: [PATCH] NSTextField: a value binding set when editing ends, validated
+ when asked
+
+A text field bound with NSValueBinding gave its edited text to the bound
+object only when it sent its action (-[NSControl sendAction:to:]), so a
+field whose editing ended by tabbing or clicking away, or whose cell does
+not send its action on end editing, left the bound object with the old
+value.  And NSValidatesImmediatelyBindingOption, which AppKit declares
+and libs-gui exports, was never read: the bound object's
+-validateValue:forKeyPath:error: was not called.
+
+On macOS 15, for a field bound to a key of a model object:
+
+- editing that ends sets the edited value on the bound object, with or
+  without the option, and without the option nothing is validated;
+- with the option, -textShouldEndEditing: has the bound object validate
+  the value.  A value the validator replaces is the one set, and the field
+  shows it.  A value it refuses is presented as an error by the field
+  (-presentError:modalForWindow:delegate:didPresentSelector:contextInfo:),
+  the bound object keeps its value, and the field goes on editing until
+  the value is corrected.
+
+So -[NSControl textDidEndEditing:] sets the value of its value binding
+once the cell has the edited text, and -[NSTextField
+textShouldEndEditing:], after its formatter and delegate checks, has the
+bound object validate the value (through the formatter and the binding's
+value transformer) when the binding has the option.  A validator that
+refuses a value without giving an error beeps.  A field whose editing ends
+with Return still sends its action, which sets the value again, as it did.
+
+Tests/gui/NSTextField/endEditingBinding.m checks each of these; it
+passes with the change, and without it 10 of its 15 checks fail.  The
+rest of the gui suite passes as before.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/NSControl.m                        |   8 +
+ Source/NSTextField.m                      |  51 ++++++
+ Tests/gui/NSTextField/endEditingBinding.m | 185 ++++++++++++++++++++++
+ 3 files changed, 244 insertions(+)
+ create mode 100644 Tests/gui/NSTextField/endEditingBinding.m
+
+diff --git a/Source/NSControl.m b/Source/NSControl.m
+index e284a776a..d08d41f6d 100644
+--- a/Source/NSControl.m
++++ b/Source/NSControl.m
+@@ -649,10 +649,18 @@ static NSNotificationCenter *nc;
+ - (void) textDidEndEditing: (NSNotification *)aNotification
+ {
+   NSMutableDictionary *dict;
++  GSKeyValueBinding *theBinding;
+ 
+   [self validateEditing];
+   [self abortEditing];
+ 
++  theBinding = [GSKeyValueBinding getBinding: NSValueBinding
++                                   forObject: self];
++  if (theBinding != nil)
++    {
++      [theBinding reverseSetValueFor: @"objectValue"];
++    }
++
+   dict = [[NSMutableDictionary alloc] initWithDictionary: 
+ 					[aNotification userInfo]];
+   [dict setObject: [aNotification object] forKey: @"NSFieldEditor"];
+diff --git a/Source/NSTextField.m b/Source/NSTextField.m
+index 2ebd2772b..da219567c 100644
+--- a/Source/NSTextField.m
++++ b/Source/NSTextField.m
+@@ -736,6 +736,8 @@ static Class textFieldCellClass;
+ 
+ - (BOOL) textShouldEndEditing: (NSText*)textObject
+ {
++  GSKeyValueBinding *theBinding;
++
+   if ([_cell isEntryAcceptable: [textObject text]] == NO)
+     {
+       [self sendAction: _error_action to: [self target]];
+@@ -770,6 +772,55 @@ static Class textFieldCellClass;
+         }
+     }
+ 
++  theBinding = [GSKeyValueBinding getBinding: NSValueBinding forObject: self];
++  if (theBinding != nil)
++    {
++      NSDictionary *options = [theBinding->info objectForKey: NSOptionsKey];
++
++      if ([[options objectForKey: NSValidatesImmediatelyBindingOption] boolValue])
++        {
++          NSFormatter *formatter = [_cell formatter];
++          NSString *string = [textObject text];
++          id value = string;
++          id validated;
++          NSError *error = nil;
++
++          if (formatter != nil)
++            {
++              [formatter getObjectValue: &value
++                              forString: string
++                       errorDescription: NULL];
++            }
++          value = [theBinding reverseTransformValue: value withOptions: options];
++          validated = value;
++          if ([[theBinding->info objectForKey: NSObservedObjectKey]
++                validateValue: &validated
++                   forKeyPath: [theBinding->info objectForKey: NSObservedKeyPathKey]
++                        error: &error] == NO)
++            {
++              if (error != nil)
++                {
++                  [self presentError: error
++                      modalForWindow: _window
++                            delegate: nil
++                  didPresentSelector: NULL
++                         contextInfo: NULL];
++                }
++              else
++                {
++                  NSBeep();
++                }
++              return NO;
++            }
++          if (validated != value)
++            {
++              [_cell setObjectValue:
++                [theBinding transformValue: validated withOptions: options]];
++              [textObject setString: [_cell stringValue]];
++            }
++        }
++    }
++
+   // In all other cases
+   return YES;
+ }
+diff --git a/Tests/gui/NSTextField/endEditingBinding.m b/Tests/gui/NSTextField/endEditingBinding.m
+new file mode 100644
+index 000000000..6b20c59ed
+--- /dev/null
++++ b/Tests/gui/NSTextField/endEditingBinding.m
+@@ -0,0 +1,185 @@
++/* A text field's value binding gives the edited value to the bound object
++   when editing ends, as it does on macOS, and not only when the field sends
++   its action.  With NSValidatesImmediately the bound object validates the
++   value first: a value the validator replaces is the one set and shown, and
++   one it refuses is presented as an error to the field, which keeps editing
++   and leaves the bound object alone.  A window and a field editor are
++   needed, so the set keeps the usual backend skip guard. */
++#include "Testing.h"
++
++#include <Foundation/NSAutoreleasePool.h>
++#include <Foundation/NSDictionary.h>
++#include <Foundation/NSError.h>
++#include <Foundation/NSValue.h>
++
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSKeyValueBinding.h>
++#include <AppKit/NSTextField.h>
++#include <AppKit/NSTextView.h>
++#include <AppKit/NSWindow.h>
++
++@interface Recorder : NSObject
++{
++@public
++  NSString *name;
++  int validations;
++}
++- (NSString *) name;
++- (void) setName: (NSString *)aString;
++@end
++
++@implementation Recorder
++- (NSString *) name
++{
++  return name;
++}
++- (void) setName: (NSString *)aString
++{
++  ASSIGN(name, aString);
++}
++- (BOOL) validateName: (id *)value error: (NSError **)error
++{
++  validations++;
++  if ([*value isEqual: @"bad"])
++    {
++      if (error != NULL)
++        {
++          *error = [NSError errorWithDomain: @"Test" code: 1 userInfo: nil];
++        }
++      return NO;
++    }
++  if ([*value isEqual: @"lower"])
++    {
++      *value = @"LOWER";
++    }
++  return YES;
++}
++- (void) dealloc
++{
++  RELEASE(name);
++  [super dealloc];
++}
++@end
++
++@interface Field : NSTextField
++{
++@public
++  NSError *presented;
++}
++@end
++
++@implementation Field
++- (void) presentError: (NSError *)error
++       modalForWindow: (NSWindow *)window
++             delegate: (id)delegate
++   didPresentSelector: (SEL)selector
++          contextInfo: (void *)info
++{
++  presented = error;
++}
++@end
++
++static Field *
++boundField(NSWindow *win, Recorder *model, BOOL validates)
++{
++  Field *field = AUTORELEASE([[Field alloc]
++    initWithFrame: NSMakeRect(10, 10, 180, 22)]);
++  NSDictionary *options = nil;
++
++  [[win contentView] addSubview: field];
++  if (validates)
++    {
++      options = [NSDictionary dictionaryWithObject: [NSNumber numberWithBool: YES]
++                                            forKey: NSValidatesImmediatelyBindingOption];
++    }
++  [field bind: NSValueBinding toObject: model withKeyPath: @"name" options: options];
++  return field;
++}
++
++/* The field edited to text, and asked to end editing. */
++static BOOL
++edit(NSWindow *win, NSTextField *field, NSString *text)
++{
++  NSText *editor;
++
++  [win makeFirstResponder: field];
++  editor = [field currentEditor];
++  [editor setString: text];
++  [(NSTextView *)editor didChangeText];
++  return [win makeFirstResponder: nil];
++}
++
++int
++main(int argc, const char **argv)
++{
++  Recorder *model;
++  NSWindow *win;
++  Field *field;
++
++  START_SET("NSTextField value binding at the end of editing")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  NS_DURING
++    {
++      win = AUTORELEASE([[NSWindow alloc]
++        initWithContentRect: NSMakeRect(0, 0, 200, 60)
++                  styleMask: NSTitledWindowMask
++                    backing: NSBackingStoreBuffered
++                      defer: NO]);
++      [win makeKeyAndOrderFront: nil];
++
++      model = AUTORELEASE([[Recorder alloc] init]);
++      [model setName: @"start"];
++      field = boundField(win, model, NO);
++      [win makeFirstResponder: field];
++      if ([field currentEditor] == nil)
++        {
++          SKIP("the text field did not get a field editor")
++        }
++
++      PASS(edit(win, field, @"typed"), "editing ends");
++      PASS_EQUAL([model name], @"typed",
++        "the edited value reaches the bound object when editing ends");
++      PASS(model->validations == 0,
++        "without NSValidatesImmediately the value is not validated");
++      PASS(edit(win, field, @"bad"), "an invalid value ends editing too");
++      PASS_EQUAL([model name], @"bad", "and is set unvalidated");
++      [field unbind: NSValueBinding];
++
++      model = AUTORELEASE([[Recorder alloc] init]);
++      [model setName: @"start"];
++      field = boundField(win, model, YES);
++
++      PASS(edit(win, field, @"lower"), "a valid value ends editing");
++      PASS(model->validations == 1, "the bound object validates the value");
++      PASS_EQUAL([model name], @"LOWER", "the value the validator gives is set");
++      PASS_EQUAL([field stringValue], @"LOWER", "and shown");
++
++      PASS(edit(win, field, @"bad") == NO, "an invalid value keeps the field editing");
++      PASS([field currentEditor] != nil, "the field editor is still the field's");
++      PASS_EQUAL([model name], @"LOWER", "the bound object keeps its value");
++      PASS(field->presented != nil
++        && [[field->presented domain] isEqualToString: @"Test"],
++        "the validation error is presented by the field");
++
++      [[field currentEditor] setString: @"good"];
++      PASS([win makeFirstResponder: nil], "a corrected value ends editing");
++      PASS_EQUAL([model name], @"good", "and reaches the bound object");
++      [field unbind: NSValueBinding];
++    }
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException]
++      || [[localException name] isEqualToString: @"NSWindowServerCommunicationException"])
++      SKIP("No display available")
++  NS_ENDHANDLER
++
++  END_SET("NSTextField value binding at the end of editing")
++
++  return 0;
++}
+-- 
+2.43.0
+

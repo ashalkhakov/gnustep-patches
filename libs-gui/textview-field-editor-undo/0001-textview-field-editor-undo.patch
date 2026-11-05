@@ -1,0 +1,169 @@
+From 513218b1685d56e399560436fe2d45047960ec75 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Thu, 5 Nov 2026 07:11:39 +0000
+Subject: [PATCH] NSTextView: a field editor ending editing removes its
+ typing's undo only
+
+A field editor that resigned first responder called -removeAllActions
+on its undo manager.  A field editor's undo manager is its window's,
+which in a document window is the document's: so every text field whose
+editing ended took the document's whole undo history with it, including
+a change made by the end of editing itself (a bound value set, an
+action sent), and closed any undo group open around it, so that the
+next registration raised "forwardInvocation without beginUndoGrouping".
+
+On macOS 15, an action registered on a window's undo manager is still
+there, and is what Undo undoes, after a text field in that window has
+been edited and its editing has ended; the typing itself is not undone.
+
+The typing's undo actions are registered with the text storage as their
+target (-shouldChangeTextInRange:replacementString:), so the field
+editor now removes only those, with -removeAllActionsWithTarget:, and
+forgets the undo object it was coalescing typing into.  Undo groups
+are left as they are.
+
+Tests/gui/NSTextView/fieldEditorUndo.m checks this; it passes with the
+change, and without it 3 of its 6 checks fail.  The rest of the gui
+suite passes as before.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/NSTextView.m                    |   3 +-
+ Tests/gui/NSTextView/fieldEditorUndo.m | 111 +++++++++++++++++++++++++
+ 2 files changed, 113 insertions(+), 1 deletion(-)
+ create mode 100644 Tests/gui/NSTextView/fieldEditorUndo.m
+
+diff --git a/Source/NSTextView.m b/Source/NSTextView.m
+index fb42d939d..7a1c6763c 100644
+--- a/Source/NSTextView.m
++++ b/Source/NSTextView.m
+@@ -1799,7 +1799,8 @@ to make sure syncing is handled properly in all cases.
+ 
+   if (_tf.is_field_editor)
+     {
+-      [[self undoManager] removeAllActions];
++      [[self undoManager] removeAllActionsWithTarget: _textStorage];
++      DESTROY(_undoObject);
+     }
+ 
+   return YES;
+diff --git a/Tests/gui/NSTextView/fieldEditorUndo.m b/Tests/gui/NSTextView/fieldEditorUndo.m
+new file mode 100644
+index 000000000..505a5c45f
+--- /dev/null
++++ b/Tests/gui/NSTextView/fieldEditorUndo.m
+@@ -0,0 +1,111 @@
++/* A field editor that stops editing takes its typing's undo actions off
++   its undo manager, and only those: the window's undo manager, which is
++   usually a document's, keeps every other action it had, and an undo
++   group open around the end of editing stays open.  A window and a field
++   editor are needed, so the set keeps the usual backend skip guard. */
++#include "Testing.h"
++
++#include <Foundation/NSAutoreleasePool.h>
++#include <Foundation/NSUndoManager.h>
++
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSTextField.h>
++#include <AppKit/NSTextView.h>
++#include <AppKit/NSWindow.h>
++
++@interface Owner : NSObject
++{
++@public
++  NSUndoManager *undoManager;
++  int undone;
++}
++- (void) undoIt: (id)sender;
++@end
++
++@implementation Owner
++- (NSUndoManager *) windowWillReturnUndoManager: (NSWindow *)window
++{
++  return undoManager;
++}
++- (void) undoIt: (id)sender
++{
++  undone++;
++}
++@end
++
++int
++main(int argc, const char **argv)
++{
++  Owner *owner;
++  NSWindow *win;
++  NSTextField *field;
++  NSText *editor;
++
++  START_SET("NSTextView field editor undo at the end of editing")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  NS_DURING
++    {
++      owner = AUTORELEASE([[Owner alloc] init]);
++      owner->undoManager = AUTORELEASE([[NSUndoManager alloc] init]);
++      [owner->undoManager setGroupsByEvent: NO];
++
++      win = AUTORELEASE([[NSWindow alloc]
++        initWithContentRect: NSMakeRect(0, 0, 200, 60)
++                  styleMask: NSTitledWindowMask
++                    backing: NSBackingStoreBuffered
++                      defer: NO]);
++      [win setDelegate: (id)owner];
++      [win makeKeyAndOrderFront: nil];
++      field = AUTORELEASE([[NSTextField alloc]
++        initWithFrame: NSMakeRect(10, 10, 180, 22)]);
++      [[win contentView] addSubview: field];
++
++      [owner->undoManager beginUndoGrouping];
++      [owner->undoManager registerUndoWithTarget: owner
++                                        selector: @selector(undoIt:)
++                                          object: nil];
++      [owner->undoManager endUndoGrouping];
++
++      [win makeFirstResponder: field];
++      editor = [field currentEditor];
++      if (editor == nil)
++        {
++          SKIP("the text field did not get a field editor")
++        }
++      [owner->undoManager beginUndoGrouping];
++      [(NSTextView *)editor insertText: @"typed"];
++      [owner->undoManager endUndoGrouping];
++
++      [owner->undoManager beginUndoGrouping];
++      PASS([win makeFirstResponder: nil], "editing ends");
++      PASS([owner->undoManager groupingLevel] == 1,
++        "an undo group open around the end of editing stays open");
++      if ([owner->undoManager groupingLevel] > 0)
++        {
++          [owner->undoManager endUndoGrouping];
++        }
++
++      PASS_EQUAL([field stringValue], @"typed", "the field has the typed text");
++      PASS([owner->undoManager canUndo],
++        "the undo manager keeps the actions that are not the typing's");
++      [owner->undoManager undo];
++      PASS(owner->undone == 1, "the action registered before editing is the one undone");
++      PASS_EQUAL([field stringValue], @"typed", "the typing is not undone");
++    }
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException]
++      || [[localException name] isEqualToString: @"NSWindowServerCommunicationException"])
++      SKIP("No display available")
++  NS_ENDHANDLER
++
++  END_SET("NSTextView field editor undo at the end of editing")
++
++  return 0;
++}
+-- 
+2.43.0
+
