@@ -1,0 +1,447 @@
+From 2121f8cefd2b286b6aee1db7f6d662ae0e22c262 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Thu, 5 Nov 2026 08:06:34 +0000
+Subject: [PATCH] NSControl, NSCell: typing undone on the editing's own undo
+ manager
+
+What was typed into a text field could not be undone: every cell's
+allowsUndo was NO unless set, and keyed decoding never read it (a xib's
+cells came out NO whatever the xib said).  And a field editor that did
+allow undo, a custom one say, registered its typing on its window's
+undo manager, which is usually a document's, where it does not belong;
+one that groups only when told to raises on it.
+
+On macOS 15 every cell allows undo unless told not to (NSCell,
+NSActionCell, NSTextFieldCell, NSButtonCell, NSFormCell...), a xib's
+cell does unless it says allowsUndo="NO", and keyed archiving keeps the
+setting.  While a field is edited, its field editor's undo manager is
+one of the cell's (an NSCellUndoManager), not the window's: the window's
+gets no typing, Undo in the field undoes the typing, and the next field
+edited starts with nothing to undo.
+
+So a cell allows undo from -initTextCell:, -initImageCell: and keyed
+decoding, which reads the flag -encodeWithCoder: already writes
+(NSCellFlags2 0x1000); the xib unarchiver sets that flag from
+allowsUndo="NO"; and NSControl answers -undoManagerForTextView: for its
+field editor with an undo manager of the editing's own, made when the
+editing first asks and dropped when it ends.
+
+Tests/gui/NSCell/allowsUndo.m (4 of its 5 checks fail without the
+change), Tests/gui/NSControl/editingUndo.m (5 of 10) and
+Tests/gui/GSXib5KeyedUnarchiver/cellUndo.m with CellUndo.xib (1 of 3)
+check each of these; with the change they pass, and so does the rest of
+the gui suite.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/GSXib5KeyedUnarchiver.m               |   3 +-
+ Source/NSCell.m                              |   4 +
+ Source/NSControl.m                           |  29 +++++
+ Tests/gui/GSXib5KeyedUnarchiver/CellUndo.xib |  27 +++++
+ Tests/gui/GSXib5KeyedUnarchiver/cellUndo.m   |  58 ++++++++++
+ Tests/gui/NSCell/allowsUndo.m                |  49 ++++++++
+ Tests/gui/NSControl/editingUndo.m            | 112 +++++++++++++++++++
+ 7 files changed, 281 insertions(+), 1 deletion(-)
+ create mode 100644 Tests/gui/GSXib5KeyedUnarchiver/CellUndo.xib
+ create mode 100644 Tests/gui/GSXib5KeyedUnarchiver/cellUndo.m
+ create mode 100644 Tests/gui/NSCell/allowsUndo.m
+ create mode 100644 Tests/gui/NSControl/editingUndo.m
+
+diff --git a/Source/GSXib5KeyedUnarchiver.m b/Source/GSXib5KeyedUnarchiver.m
+index 58582b7f2..c19f4d56f 100644
+--- a/Source/GSXib5KeyedUnarchiver.m
++++ b/Source/GSXib5KeyedUnarchiver.m
+@@ -2463,7 +2463,8 @@ didStartElement: (NSString*)elementName
+       mask.flags.allowsMixedState             = [[attributes objectForKey: @"allowsMixedState"] boolValue];
+       mask.flags.sendsActionOnEndEditing      = [[attributes objectForKey: @"sendsActionOnEndEditing"] boolValue];
+       mask.flags.controlSize                  = NSRegularControlSize;
+-      mask.flags.doesNotAllowUndo             = 0;
++      mask.flags.doesNotAllowUndo             = ([attributes objectForKey: @"allowsUndo"] != nil
++                                                 && ![[attributes objectForKey: @"allowsUndo"] boolValue]);
+       mask.flags.controlTint                  = NSDefaultControlTint;
+ 
+       // Alignment
+diff --git a/Source/NSCell.m b/Source/NSCell.m
+index db95dfd23..ec19f8385 100644
+--- a/Source/NSCell.m
++++ b/Source/NSCell.m
+@@ -163,6 +163,7 @@ static NSColor *dtxtCol;
+   _cell.type = NSImageCellType;
+   _cell_image = RETAIN (anImage);
+   _cell.image_position = NSImageOnly;
++  _cell.allows_undo = YES;
+   _font = RETAIN ([fontClass systemFontOfSize: 0]);
+ 
+   // Implicitly set by allocation:
+@@ -198,6 +199,7 @@ static NSColor *dtxtCol;
+ {
+   _cell.type = NSTextCellType;
+   _contents = RETAIN (aString);
++  _cell.allows_undo = YES;
+   _font = RETAIN ([fontClass systemFontOfSize: 0]);
+ 
+   // Implicitly set by allocation:
+@@ -2613,6 +2615,7 @@ static NSColor *dtxtCol;
+ {
+   if ([aDecoder allowsKeyedCoding])
+     {
++      _cell.allows_undo = YES;
+       id contents = [aDecoder decodeObjectForKey: @"NSContents"];
+ 
+       // initialize based on content...
+@@ -2680,6 +2683,7 @@ static NSColor *dtxtCol;
+ 	  [self setLineBreakMode: ((cFlags2 & 0xE00) >> 9)];
+           [self setControlSize: ((cFlags2 & 0xE0000) >> 17)];
+           [self setSendsActionOnEndEditing: ((cFlags2 & 0x400000) == 0x400000)];
++          [self setAllowsUndo: ((cFlags2 & 0x1000) == 0)];
+           [self setAllowsMixedState: ((cFlags2 & 0x1000000) == 0x1000000)];
+           [self setRefusesFirstResponder: ((cFlags2 & 0x2000000) == 0x2000000)];
+           [self setAlignment: ((cFlags2 & 0x1C000000) >> 26)];
+diff --git a/Source/NSControl.m b/Source/NSControl.m
+index e284a776a..c2793213c 100644
+--- a/Source/NSControl.m
++++ b/Source/NSControl.m
+@@ -34,6 +34,7 @@
+ #import <Foundation/NSException.h>
+ #import <Foundation/NSKeyValueCoding.h>
+ #import <Foundation/NSKeyValueObserving.h>
++#import <Foundation/NSMapTable.h>
+ #import <Foundation/NSNotification.h>
+ #import <Foundation/NSValue.h>
+ #import "AppKit/NSActionCell.h"
+@@ -59,6 +60,8 @@ static Class usedCellClass;
+ static Class cellClass;
+ static Class actionCellClass;
+ static NSNotificationCenter *nc;
++/* The undo manager of each control's editing, while it lasts. */
++static NSMapTable *editingUndoManagers;
+ 
+ /**<p>TODO Description</p>
+  */
+@@ -78,6 +81,8 @@ static NSNotificationCenter *nc;
+       actionCellClass = [NSActionCell class];
+       // Cache the notifiaction centre for editing notifications
+       nc = [NSNotificationCenter defaultCenter];
++      editingUndoManagers = NSCreateMapTable(NSNonOwnedPointerMapKeyCallBacks,
++                                             NSObjectMapValueCallBacks, 0);
+  
+      // expose bindings
+       [self exposeBinding: NSValueBinding];
+@@ -123,6 +128,7 @@ static NSNotificationCenter *nc;
+ - (void) dealloc
+ {
+   [GSKeyValueBinding unbindAllForObject: self];
++  NSMapRemove(editingUndoManagers, self);
+   RELEASE(_cell);
+   [super dealloc];
+ }
+@@ -594,6 +600,28 @@ static NSNotificationCenter *nc;
+    the NSFieldEditor as user info </p><p>See Also:
+    [NSNotificationCenter-postNotificationName:object:userInfo:]</p>
+ */
++/** <p>The undo manager of the field editor's typing: one of this
++    editing's own, not the window's, which keeps the window's undo free of
++    the typing as Cocoa's cells do.  It goes when editing ends.</p>
++ */
++- (NSUndoManager *) undoManagerForTextView: (NSTextView *)textView
++{
++  NSUndoManager *undo;
++
++  if (![textView isFieldEditor])
++    {
++      return nil;
++    }
++  undo = NSMapGet(editingUndoManagers, self);
++  if (undo == nil)
++    {
++      undo = [[NSUndoManager alloc] init];
++      NSMapInsert(editingUndoManagers, self, undo);
++      RELEASE(undo);
++    }
++  return undo;
++}
++
+ - (void) textDidBeginEditing: (NSNotification *)aNotification
+ {
+   NSMutableDictionary *dict;
+@@ -661,6 +689,7 @@ static NSNotificationCenter *nc;
+       object: self
+       userInfo: dict];
+   RELEASE(dict);
++  NSMapRemove(editingUndoManagers, self);
+ }
+ 
+ /**<p>Recalculates the internal size by sending [NSCell-calcDrawInfo:] 
+diff --git a/Tests/gui/GSXib5KeyedUnarchiver/CellUndo.xib b/Tests/gui/GSXib5KeyedUnarchiver/CellUndo.xib
+new file mode 100644
+index 000000000..926d360ab
+--- /dev/null
++++ b/Tests/gui/GSXib5KeyedUnarchiver/CellUndo.xib
+@@ -0,0 +1,27 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<document type="com.apple.InterfaceBuilder3.Cocoa.XIB" version="3.0" toolsVersion="22505" targetRuntime="MacOSX.Cocoa" propertyAccessControl="none" useAutolayout="NO">
++    <dependencies>
++        <plugIn identifier="com.apple.InterfaceBuilder.CocoaPlugin" version="22505"/>
++    </dependencies>
++    <objects>
++        <customObject id="-2" userLabel="File's Owner" customClass="NSObject"/>
++        <customObject id="-1" userLabel="First Responder" customClass="FirstResponder"/>
++        <customObject id="-3" userLabel="Application" customClass="NSObject"/>
++        <textField verticalHuggingPriority="750" id="F1" userLabel="Undoing">
++            <rect key="frame" x="0.0" y="30" width="180" height="22"/>
++            <textFieldCell key="cell" scrollable="YES" lineBreakMode="clipping" selectable="YES" editable="YES" borderStyle="bezel" title="undoing" drawsBackground="YES" id="C1">
++                <font key="font" metaFont="system"/>
++                <color key="textColor" name="controlTextColor" catalog="System" colorSpace="catalog"/>
++                <color key="backgroundColor" name="textBackgroundColor" catalog="System" colorSpace="catalog"/>
++            </textFieldCell>
++        </textField>
++        <textField verticalHuggingPriority="750" id="F2" userLabel="Not undoing">
++            <rect key="frame" x="0.0" y="0.0" width="180" height="22"/>
++            <textFieldCell key="cell" scrollable="YES" lineBreakMode="clipping" selectable="YES" editable="YES" allowsUndo="NO" borderStyle="bezel" title="not undoing" drawsBackground="YES" id="C2">
++                <font key="font" metaFont="system"/>
++                <color key="textColor" name="controlTextColor" catalog="System" colorSpace="catalog"/>
++                <color key="backgroundColor" name="textBackgroundColor" catalog="System" colorSpace="catalog"/>
++            </textFieldCell>
++        </textField>
++    </objects>
++</document>
+diff --git a/Tests/gui/GSXib5KeyedUnarchiver/cellUndo.m b/Tests/gui/GSXib5KeyedUnarchiver/cellUndo.m
+new file mode 100644
+index 000000000..d98cc8950
+--- /dev/null
++++ b/Tests/gui/GSXib5KeyedUnarchiver/cellUndo.m
+@@ -0,0 +1,58 @@
++#import "ObjectTesting.h"
++
++#import <Foundation/NSData.h>
++#import <AppKit/NSApplication.h>
++#import <AppKit/NSTextField.h>
++#import <Additions/GNUstepGUI/GSXibKeyedUnarchiver.h>
++
++/* A xib's cell allows undo unless the xib says allowsUndo="NO". */
++int main()
++{
++  START_SET("GSXib5KeyedUnarchiver cell allowsUndo")
++
++  NS_DURING
++    {
++      [NSApplication sharedApplication];
++    }
++  NS_HANDLER
++    {
++      if ([[localException name]
++	isEqualToString: NSInternalInconsistencyException ])
++	{
++	  SKIP("It looks like GNUstep backend is not yet installed")
++	}
++    }
++  NS_ENDHANDLER
++
++  NSData		*data;
++  GSXibKeyedUnarchiver	*unarchiver;
++  NSArray		*rootObjects;
++  NSEnumerator		*enumerator;
++  NSTextField		*undoing = nil;
++  NSTextField		*notUndoing = nil;
++  id			element;
++
++  data = [NSData dataWithContentsOfFile: @"CellUndo.xib"];
++  unarchiver = [GSXibKeyedUnarchiver unarchiverForReadingWithData: data];
++  rootObjects = [unarchiver decodeObjectForKey: @"IBDocument.RootObjects"];
++
++  enumerator = [rootObjects objectEnumerator];
++  while ((element = [enumerator nextObject]) != nil)
++    {
++      if ([element isKindOfClass: [NSTextField class]])
++	{
++          if ([[element stringValue] isEqualToString: @"undoing"])
++            undoing = element;
++          else
++            notUndoing = element;
++	}
++    }
++
++  PASS(undoing != nil && notUndoing != nil, "the two text fields were found")
++  PASS([[undoing cell] allowsUndo], "a cell allows undo when the xib says nothing")
++  PASS([[notUndoing cell] allowsUndo] == NO, "and not when it says allowsUndo=\"NO\"")
++
++  END_SET("GSXib5KeyedUnarchiver cell allowsUndo")
++
++  return 0;
++}
+diff --git a/Tests/gui/NSCell/allowsUndo.m b/Tests/gui/NSCell/allowsUndo.m
+new file mode 100644
+index 000000000..015fc1eea
+--- /dev/null
++++ b/Tests/gui/NSCell/allowsUndo.m
+@@ -0,0 +1,49 @@
++/* A cell allows undo unless told not to, as Cocoa's cells do, and keeps
++   what it was told through keyed archiving. */
++#include "Testing.h"
++
++#include <Foundation/NSAutoreleasePool.h>
++#include <Foundation/NSKeyedArchiver.h>
++
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSButtonCell.h>
++#include <AppKit/NSCell.h>
++#include <AppKit/NSImage.h>
++#include <AppKit/NSTextFieldCell.h>
++
++static NSCell *
++roundTrip(NSCell *cell)
++{
++  return [NSKeyedUnarchiver unarchiveObjectWithData:
++    [NSKeyedArchiver archivedDataWithRootObject: cell]];
++}
++
++int
++main(int argc, const char **argv)
++{
++  NSCell *cell;
++
++  START_SET("NSCell allowsUndo")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  PASS([AUTORELEASE([[NSCell alloc] init]) allowsUndo], "a cell allows undo");
++  PASS([AUTORELEASE([[NSTextFieldCell alloc] initTextCell: @"x"]) allowsUndo],
++    "a text field cell allows undo");
++  PASS([AUTORELEASE([[NSButtonCell alloc] initImageCell: nil]) allowsUndo],
++    "an image cell allows undo");
++
++  cell = AUTORELEASE([[NSTextFieldCell alloc] initTextCell: @"x"]);
++  PASS([roundTrip(cell) allowsUndo], "a cell that allows undo still does after keyed archiving");
++  [cell setAllowsUndo: NO];
++  PASS([roundTrip(cell) allowsUndo] == NO, "a cell that does not still does not");
++
++  END_SET("NSCell allowsUndo")
++
++  return 0;
++}
+diff --git a/Tests/gui/NSControl/editingUndo.m b/Tests/gui/NSControl/editingUndo.m
+new file mode 100644
+index 000000000..487f161d0
+--- /dev/null
++++ b/Tests/gui/NSControl/editingUndo.m
+@@ -0,0 +1,112 @@
++/* What is typed into a control can be undone, on an undo manager of the
++   editing's own, as with Cocoa's cells, not on the window's: the window's
++   undo manager, usually a document's, gets no typing (one that groups
++   only when told to would raise on it), Undo in the field undoes the
++   typing, and the next editing starts with nothing to undo.  A window
++   and a field editor are needed, so the set keeps the usual backend skip
++   guard. */
++#include "Testing.h"
++
++#include <Foundation/NSAutoreleasePool.h>
++#include <Foundation/NSUndoManager.h>
++
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSTextField.h>
++#include <AppKit/NSTextView.h>
++#include <AppKit/NSWindow.h>
++
++@interface Owner : NSObject
++{
++@public
++  NSUndoManager *undoManager;
++}
++@end
++
++@implementation Owner
++- (NSUndoManager *) windowWillReturnUndoManager: (NSWindow *)window
++{
++  return undoManager;
++}
++@end
++
++int
++main(int argc, const char **argv)
++{
++  Owner *owner;
++  NSWindow *win;
++  NSTextField *field;
++  NSTextField *other;
++  NSTextView *editor;
++  NSUndoManager *typing;
++  BOOL raised;
++
++  START_SET("NSControl undo while editing")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  NS_DURING
++    {
++      owner = AUTORELEASE([[Owner alloc] init]);
++      owner->undoManager = AUTORELEASE([[NSUndoManager alloc] init]);
++      /* a document's, grouping only when told to */
++      [owner->undoManager setGroupsByEvent: NO];
++
++      win = AUTORELEASE([[NSWindow alloc]
++        initWithContentRect: NSMakeRect(0, 0, 200, 80)
++                  styleMask: NSTitledWindowMask
++                    backing: NSBackingStoreBuffered
++                      defer: NO]);
++      [win setDelegate: (id)owner];
++      [win makeKeyAndOrderFront: nil];
++      field = AUTORELEASE([[NSTextField alloc]
++        initWithFrame: NSMakeRect(10, 10, 180, 22)]);
++      other = AUTORELEASE([[NSTextField alloc]
++        initWithFrame: NSMakeRect(10, 40, 180, 22)]);
++      [[win contentView] addSubview: field];
++      [[win contentView] addSubview: other];
++
++      [win makeFirstResponder: field];
++      editor = (NSTextView *)[field currentEditor];
++      if (editor == nil)
++        {
++          SKIP("the text field did not get a field editor")
++        }
++      PASS([editor allowsUndo], "the window's field editor allows undo");
++      typing = [editor undoManager];
++      PASS(typing != nil && typing != owner->undoManager,
++        "the field editor undoes on a manager that is not the window's");
++
++      raised = NO;
++      NS_DURING
++        [editor insertText: @"abc"];
++      NS_HANDLER
++        raised = YES;
++      NS_ENDHANDLER
++      PASS(raised == NO, "typing does not raise on a window's manager that groups explicitly");
++      PASS_EQUAL([editor string], @"abc", "the typing is there");
++      PASS([owner->undoManager canUndo] == NO, "the window's undo manager has no typing");
++      PASS([typing canUndo], "the editing's has");
++      [typing undo];
++      PASS_EQUAL([editor string], @"", "undo in the field undoes the typing");
++
++      [editor insertText: @"abc"];
++      PASS([win makeFirstResponder: other], "the next field is edited");
++      PASS([[[other currentEditor] undoManager] canUndo] == NO,
++        "and starts with nothing to undo");
++      PASS_EQUAL([field stringValue], @"abc", "the first field keeps what was typed");
++    }
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException]
++      || [[localException name] isEqualToString: @"NSWindowServerCommunicationException"])
++      SKIP("No display available")
++  NS_ENDHANDLER
++
++  END_SET("NSControl undo while editing")
++
++  return 0;
++}
+-- 
+2.43.0
+
