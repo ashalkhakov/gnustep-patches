@@ -1097,6 +1097,23 @@ the field editor now removes only those (-removeAllActionsWithTarget:).
 `NSTextView/fieldEditorUndo.m`: on master 1dd8b76c6 3 of its 6 checks
 fail, with the patch all pass; the whole gui suite passes 4930, and with
 every libs-gui patch here 5563, but for `formatters.m` as above.
+Then `control-editing-undo` (libs-gui), which RDLKit's designer had
+worked around with a field editor of its own and an undo manager of its
+own.  What was typed into a text field could not be undone: every
+cell's allowsUndo was NO unless set, and keyed decoding never read it;
+and a field editor that did allow undo registered its typing on the
+window's undo manager, a document's, where one that groups explicitly
+raises on it.  On macOS 15 every cell allows undo unless a xib says
+allowsUndo="NO", and the field editor's undo manager while a field is
+edited is the cell's (NSCellUndoManager): the window's gets no typing,
+and the next field starts with nothing to undo.  The patch does the
+same: cells allow undo by default and decode the flag (the xib
+unarchiver sets it from allowsUndo="NO"), and NSControl answers
+-undoManagerForTextView: with an undo manager of the editing's own.
+`NSCell/allowsUndo.m` (4 of 5 fail on master 1dd8b76c6),
+`NSControl/editingUndo.m` (5 of 10) and `GSXib5KeyedUnarchiver/cellUndo.m`
+(1 of 3) pass with it; the whole gui suite passes 4942, and with every
+libs-gui patch here 5581, but for `formatters.m` as above.
 
 Added on 2026-10-31 for LogBook on Windows, whose sync check took five
 minutes on a laptop and lost a receipt's photo on CI: `urlsession-windows-write`
@@ -1483,6 +1500,7 @@ among it, passes with this gui and fails without it.
 | `layoutmanager-should-set-line-fragment-rect` | libs-gui | test | not sent yet | (none: UDCode's diff editor will use it from here) |
 | `textfield-binding-end-editing` | libs-gui | test | not sent yet | (none: XFormsKit's designer uses it from here) |
 | `textview-field-editor-undo` | libs-gui | test | not sent yet | (none: XFormsKit's designer uses it from here) |
+| `control-editing-undo` | libs-gui | test | not sent yet | (none: XFormsKit's and RDLKit's designers use it from here) |
 | `controller-to-many-content` | libs-gui | test | not sent yet (after `controller-entity-mode`) | (none: Logbook adds records through it) |
 | `controller-to-many-set` | libs-gui | test | not sent yet (after `controller-to-many-content`) | (none: Logbook filters records through it) |
 | `controller-value-bindings` | libs-gui | test | not sent yet | (none: Logbook's pick lists bind their order through it) |
