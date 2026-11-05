@@ -1,0 +1,177 @@
+From 98803553c822a935c51b833887b9d01e6bf0c2d5 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Thu, 5 Nov 2026 14:49:40 +0000
+Subject: [PATCH] NSMenu: a delegate's update does not ask it to update the
+ menu again
+
+-update asks the menu's delegate to update it (-menuNeedsUpdate:, or
+-numberOfItemsInMenu: and -menu:updateItem:...).  What the delegate does
+there, adding, removing and changing items, reaches -itemChanged:, which
+calls -update, which asked the delegate again: a delegate rebuilding its
+items was asked once more for each of them, and a menu redrawn as its
+items change, as a menu in a window (a Windows theme's) is, asked it
+without end.  Applications guarded their delegates against it.
+
+On macOS 15 -update does not ask the delegate at all; it is asked when
+the menu is about to be shown, once.  GNUstep keeps asking it from
+-update, but now once: while a menu's delegate updates it, the changes
+it makes do not ask it again.  A change made outside the delegate's
+update still does.
+
+Tests/gui/NSMenu/delegateUpdate.m checks this; it passes with the change,
+and without it 3 of its 4 checks fail.  The rest of the NSMenu and
+NSMenuItem tests pass as before.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/NSMenu.m                   | 29 ++++++++++
+ Tests/gui/NSMenu/delegateUpdate.m | 90 +++++++++++++++++++++++++++++++
+ 2 files changed, 119 insertions(+)
+ create mode 100644 Tests/gui/NSMenu/delegateUpdate.m
+
+diff --git a/Source/NSMenu.m b/Source/NSMenu.m
+index 927d9cdba..4040ce815 100644
+--- a/Source/NSMenu.m
++++ b/Source/NSMenu.m
+@@ -39,6 +39,7 @@
+ #import <Foundation/NSCharacterSet.h>
+ #import <Foundation/NSDebug.h>
+ #import <Foundation/NSException.h>
++#import <Foundation/NSHashTable.h>
+ #import <Foundation/NSProcessInfo.h>
+ #import <Foundation/NSString.h>
+ #import <Foundation/NSNotification.h>
+@@ -943,6 +944,34 @@ static BOOL menuBarVisible = YES;
+ }
+ 
+ - (void) _updateMenuWithDelegate
++{
++  /* The changes a delegate makes while it updates the menu (adding,
++     removing and changing items) do not ask it to update the menu again. */
++  static NSHashTable *updating = nil;
++
++  if (updating == nil)
++    {
++      updating = NSCreateHashTable(NSNonOwnedPointerHashCallBacks, 0);
++    }
++  if (NSHashGet(updating, self) != NULL)
++    {
++      return;
++    }
++  NSHashInsert(updating, self);
++  NS_DURING
++    {
++      [self _askDelegateToUpdate];
++    }
++  NS_HANDLER
++    {
++      NSHashRemove(updating, self);
++      [localException raise];
++    }
++  NS_ENDHANDLER
++  NSHashRemove(updating, self);
++}
++
++- (void) _askDelegateToUpdate
+ {
+   if ([_delegate respondsToSelector: @selector(menuNeedsUpdate:)])
+     {
+diff --git a/Tests/gui/NSMenu/delegateUpdate.m b/Tests/gui/NSMenu/delegateUpdate.m
+new file mode 100644
+index 000000000..afeb7bac6
+--- /dev/null
++++ b/Tests/gui/NSMenu/delegateUpdate.m
+@@ -0,0 +1,90 @@
++/* A menu's delegate that fills it in -menuNeedsUpdate: is asked once for
++   an update, not again for each item it adds or changes there: the
++   changes it makes to the menu while it updates it do not update it
++   anew.  Without that a delegate rebuilding its items was asked again
++   for every item, and a menu redrawn as its items change (in a window,
++   as a Windows theme draws it) asked it without end. */
++#include "Testing.h"
++
++#include <Foundation/NSAutoreleasePool.h>
++
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSMenu.h>
++#include <AppKit/NSMenuItem.h>
++
++@interface Filler : NSObject
++{
++@public
++  int calls;
++}
++@end
++
++@implementation Filler
++- (void) menuNeedsUpdate: (NSMenu *)menu
++{
++  NSMenuItem *item;
++
++  calls++;
++  if (calls > 20)
++    {
++      return;
++    }
++  while ([menu numberOfItems] > 0)
++    {
++      [menu removeItemAtIndex: 0];
++    }
++  item = [menu addItemWithTitle: @"One" action: NULL keyEquivalent: @""];
++  [item setRepresentedObject: @"1"];
++  item = [menu addItemWithTitle: @"Two" action: NULL keyEquivalent: @""];
++  [item setRepresentedObject: @"2"];
++  [item setEnabled: NO];
++}
++@end
++
++int
++main(int argc, const char **argv)
++{
++  START_SET("NSMenu -update and its delegate")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  NS_DURING
++    {
++      NSMenu *main = AUTORELEASE([[NSMenu alloc] initWithTitle: @"Main"]);
++      NSMenuItem *holder = [main addItemWithTitle: @"Versions" action: NULL keyEquivalent: @""];
++      NSMenu *menu = AUTORELEASE([[NSMenu alloc] initWithTitle: @"Versions"]);
++      Filler *filler = AUTORELEASE([[Filler alloc] init]);
++
++      [menu setDelegate: (id)filler];
++      [main setSubmenu: menu forItem: holder];
++
++      [menu update];
++      PASS(filler->calls == 1, "an update asks the delegate once");
++      PASS([menu numberOfItems] == 2
++        && [[[menu itemAtIndex: 1] title] isEqualToString: @"Two"],
++        "the delegate's items are the menu's");
++
++      filler->calls = 0;
++      [[menu itemAtIndex: 0] setTitle: @"Uno"];
++      PASS(filler->calls == 1, "a change made outside the delegate's update asks it again, once");
++
++      filler->calls = 0;
++      [menu update];
++      [menu update];
++      PASS(filler->calls == 2, "each update asks it once");
++    }
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException]
++      || [[localException name] isEqualToString: @"NSWindowServerCommunicationException"])
++      SKIP("No display available")
++  NS_ENDHANDLER
++
++  END_SET("NSMenu -update and its delegate")
++
++  return 0;
++}
+-- 
+2.43.0
+

@@ -1,0 +1,3930 @@
+From 34d90daefdf0cbb047130f3db616b67b468512d6 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Thu, 5 Nov 2026 15:39:11 +0000
+Subject: [PATCH] NSPredicateEditor: one set of pop-ups over all its templates,
+ as on OS X
+
+A predicate editor made each row from the views of one template, so a row
+offered only that template's left expressions and operators, and could
+never become a row of another template.  NSPredicateEditorRowTemplate's
++templatesWithAttributeKeyPaths:inEntityDescription: returned nil, which
+left an editor for a Core Data entity with nothing to offer.  The rows had
+a plus button and no minus, and nothing a user did sent the editor's
+action.  The editor, the rule editor and the templates also lost
+everything a xib or a keyed archive said about them, and a xib connecting
+an editor's action could not be loaded at all: NSRuleEditor declared
+_target and _action but had no accessors, so -setTarget: went to
+NSControl's, which hand it to the cell, and a plain NSCell raises.
+
+What OS X 15 does with the same templates and steps:
+
+- A rule editor keeps the target and the action it is given, and giving a
+  predicate editor a predicate does not send it.
+- A rule editor walks its criteria from its delegate.  A criterion with
+  brothers is shown in a pop-up of them all, one with none as a label, and
+  a view as it is.  Choosing another criterion walks the row on from it,
+  keeping the titles that follow where it can.  Each row has a plus, which
+  adds a row beneath a compound row or after a simple one, and a minus.
+  Choosing, adding and removing send the action.  The editor is flipped
+  and as tall as its rows.
+- A predicate editor has no delegate: it is its own, over a tree of its
+  templates' pop-ups, where items with the same title at the same place
+  are one criterion.  Its display values are titles, and the views of the
+  row's own copy of its template.  Choosing a criterion of another template
+  switches the row to it.  Typing in a row sends the action.  A predicate
+  no template can show raises NSInvalidArgumentException; new templates
+  keep the rows they can show.
+- A compound template gives the row itself for one subpredicate and
+  TRUEPREDICATE for none; NOT of several is NOT of their OR.
+- Templates for key paths: one per key path, with OS X's operators for the
+  attribute's type, through relationships; a binary attribute or a key
+  with no attribute raises.  The entity is only sent messages, since
+  GNUstep has no CoreData of its own.
+- A keyed archive keeps a rule editor's nesting mode, row height,
+  editability and whether all rows can go (NSRuleEditor... keys), and a
+  template as its views, whose items stand for what they offer
+  (NSPredicateTemplate... keys, NSRepObject for a menu item's object).
+  A xib keeps the same as nestingMode, rowHeight, canRemoveAllRows,
+  rowTemplates, rowType, rightExpressionObject and the menus of
+  popUpMenus, with <expression> elements, which the xib parser makes
+  objects of NSExpression, a cluster that cannot read a xib.
+
+The tests, checked against OS X: NSPredicateEditor/criteria.m (48),
+NSPredicateEditorRowTemplate/keyPaths.m (28), NSRuleEditor/rows.m (26),
+NSRuleEditor/targetAction.m (6) and GSXib5KeyedUnarchiver/predicateEditor.m
+with PredicateEditor.xib, a fetch request's editor from a Core Data model
+editor (24).  Without the change 83 of their checks fail and rows.m
+aborts.  The existing NSRuleEditor, NSPredicateEditor and
+NSPredicateEditorRowTemplate tests pass as before, and so does the rest of
+the gui suite (5056 passed).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Headers/AppKit/NSPredicateEditor.h            |   2 +
+ Source/GSRuleEditorPrivate.h                  |  57 ++
+ Source/GSXib5KeyedUnarchiver.m                | 137 +++-
+ Source/NSMenuItem.m                           |   6 +
+ Source/NSPredicateEditor.m                    | 560 +++++++++++--
+ Source/NSPredicateEditorRowTemplate.m         | 327 +++++++-
+ Source/NSRuleEditor.m                         | 769 +++++++++++++++---
+ .../GSXib5KeyedUnarchiver/PredicateEditor.xib | 124 +++
+ .../GSXib5KeyedUnarchiver/predicateEditor.m   | 155 ++++
+ Tests/gui/NSPredicateEditor/criteria.m        | 357 ++++++++
+ .../NSPredicateEditorRowTemplate/keyPaths.m   | 309 +++++++
+ Tests/gui/NSRuleEditor/rows.m                 | 320 ++++++++
+ Tests/gui/NSRuleEditor/targetAction.m         | 102 +++
+ 13 files changed, 3006 insertions(+), 219 deletions(-)
+ create mode 100644 Source/GSRuleEditorPrivate.h
+ create mode 100644 Tests/gui/GSXib5KeyedUnarchiver/PredicateEditor.xib
+ create mode 100644 Tests/gui/GSXib5KeyedUnarchiver/predicateEditor.m
+ create mode 100644 Tests/gui/NSPredicateEditor/criteria.m
+ create mode 100644 Tests/gui/NSPredicateEditorRowTemplate/keyPaths.m
+ create mode 100644 Tests/gui/NSRuleEditor/rows.m
+ create mode 100644 Tests/gui/NSRuleEditor/targetAction.m
+
+diff --git a/Headers/AppKit/NSPredicateEditor.h b/Headers/AppKit/NSPredicateEditor.h
+index 59725091e..94ecfca3c 100644
+--- a/Headers/AppKit/NSPredicateEditor.h
++++ b/Headers/AppKit/NSPredicateEditor.h
+@@ -38,6 +38,8 @@
+ APPKIT_EXPORT_CLASS
+ @interface NSPredicateEditor : NSRuleEditor {
+   NSArray *_rowTemplates;
++  NSMutableArray *_simpleCriteria;
++  NSMutableArray *_compoundCriteria;
+ }
+ 
+ - (NSArray *) rowTemplates;
+diff --git a/Source/GSRuleEditorPrivate.h b/Source/GSRuleEditorPrivate.h
+new file mode 100644
+index 000000000..0ac040df0
+--- /dev/null
++++ b/Source/GSRuleEditorPrivate.h
+@@ -0,0 +1,57 @@
++/** <title>GSRuleEditorPrivate</title>
++
++   <abstract>What NSRuleEditor leaves to the classes made from it</abstract>
++
++   Copyright (C) 2026 Free Software Foundation, Inc.
++
++   This file is part of the GNUstep GUI Library.
++
++   This library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2 of the License, or (at your option) any later version.
++
++   This library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.	 See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with this library; see the file COPYING.LIB.
++   If not, see <http://www.gnu.org/licenses/> or write to the
++   Free Software Foundation, 51 Franklin Street, Fifth Floor,
++   Boston, MA 02110-1301, USA.
++*/
++
++#ifndef _GNUstep_H_GSRuleEditorPrivate
++#define _GNUstep_H_GSRuleEditorPrivate
++
++#import "AppKit/NSRuleEditor.h"
++
++/* The delegate's answers; NSPredicateEditor gives its own. */
++@interface NSRuleEditor (GSRuleEditorCriteria)
++- (NSInteger) _numberOfChildrenForCriterion: (id)criterion
++                                withRowType: (NSRuleEditorRowType)type;
++- (id) _child: (NSInteger)index
++ forCriterion: (id)criterion
++  withRowType: (NSRuleEditorRowType)type;
++- (id) _displayValueForCriterion: (id)criterion inRow: (NSInteger)row;
++- (NSDictionary *) _predicatePartsForCriterion: (id)criterion
++                              withDisplayValue: (id)value
++                                         inRow: (NSInteger)row;
++
++/* Sent once a row's criteria are chosen, before their display values. */
++- (void) _criteriaDidChangeInRow: (NSInteger)row;
++
++/* Gives a row the criteria, asking for their display values afresh. */
++- (void) _setCriteria: (NSArray *)criteria forRowAtIndex: (NSInteger)row;
++
++/* Something a class made from the rule editor keeps with a row. */
++- (id) _infoForRow: (NSInteger)row;
++- (void) _setInfo: (id)info forRow: (NSInteger)row;
++
++/* After a user's change: notify and send the action. */
++- (void) _userDidChangeRows;
++@end
++
++#endif /* _GNUstep_H_GSRuleEditorPrivate */
+diff --git a/Source/GSXib5KeyedUnarchiver.m b/Source/GSXib5KeyedUnarchiver.m
+index 58582b7f2..7f364feaa 100644
+--- a/Source/GSXib5KeyedUnarchiver.m
++++ b/Source/GSXib5KeyedUnarchiver.m
+@@ -58,6 +58,8 @@
+ #import "AppKit/NSPathCell.h"
+ #import "AppKit/NSPopUpButton.h"
+ #import "AppKit/NSPopUpButtonCell.h"
++#import "AppKit/NSRuleEditor.h"
++#import <Foundation/NSExpression.h>
+ #import "AppKit/NSScroller.h"
+ #import "AppKit/NSScrollView.h"
+ #import "AppKit/NSSliderCell.h"
+@@ -212,6 +214,7 @@ static NSArray      *XmlBoolDefaultYes  = nil;
+                             @"NSMutableArray", @"allowedToolbarItems",
+                             @"NSMutableArray", @"defaultToolbarItems",
+                             @"NSMutableArray", @"rowTemplates",
++                            @"NSMutableArray", @"popUpMenus",
+                             @"NSMutableArray", @"constraints",
+                             @"NSMutableArray", @"rows",
+                             @"NSMutableArray", @"columns",
+@@ -336,6 +339,10 @@ static NSArray      *XmlBoolDefaultYes  = nil;
+ 					   @"childrenKeyPath", @"NSTreeContentChildrenKey", // NSTreeController
+ 					   @"countKeyPath", @"NSTreeContentCountKey",
+ 					   @"leafKeyPath", @"NSTreeContentLeafKey",					 
++                                           @"representedObject", @"NSRepObject",
++                                           @"rowHeight", @"NSRuleEditorSliceHeight", // NSRuleEditor
++                                           @"editable", @"NSRuleEditorEditable",
++                                           @"rowTemplates", @"NSPredicateTemplates", // NSPredicateEditor
+                                            nil];
+           RETAIN(XmlKeyMapTable);
+ 
+@@ -369,6 +376,10 @@ static NSArray      *XmlBoolDefaultYes  = nil;
+                                     @"NSSharedData", @"NSFlags", @"NSTVFlags",
+                                     @"NSDefaultParagraphStyle",
+                                     @"NSpiFlags", @"NSStackViewContainerNonDroppedViews",
++                                    @"NSRuleEditorNestingMode", @"NSRuleEditorDisallowEmpty",
++                                    @"NSPredicateTemplateType", @"NSPredicateTemplateViews",
++                                    @"NSPredicateTemplateRightAttributeType",
++                                    @"NSPredicateTemplateRightIsWildcard",
+                                     nil];
+           RETAIN(XmlKeysDefined);
+ 
+@@ -457,6 +468,14 @@ static NSArray      *XmlBoolDefaultYes  = nil;
+                @"decodeSecondAttribute:", @"NSSecondAttribute",
+                @"decodeRelation:", @"NSRelation",
+                @"decodeTransitionStyle:", @"NSTransitionStyle",
++               @"decodeRuleEditorNestingModeForElement:", @"NSRuleEditorNestingMode",
++               @"decodeRuleEditorDisallowEmptyForElement:", @"NSRuleEditorDisallowEmpty",
++               @"decodePredicateTemplateTypeForElement:", @"NSPredicateTemplateType",
++               @"decodePredicateTemplateViewsForElement:", @"NSPredicateTemplateViews",
++               @"decodePredicateTemplateRightAttributeTypeForElement:",
++                 @"NSPredicateTemplateRightAttributeType",
++               @"decodePredicateTemplateRightIsWildcardForElement:",
++                 @"NSPredicateTemplateRightIsWildcard",
+ 	       @"decodeShadowOffsetHoriz:", @"NSShadowHoriz",
+ 	       @"decodeShadowOffsetVert:", @"NSShadowVert",
+                @"decodeDatePickerElementsForElement:", @"NSDatePickerElements",
+@@ -2573,6 +2592,113 @@ didStartElement: (NSString*)elementName
+   return object;
+ }
+ 
++- (id) decodeRuleEditorNestingModeForElement: (GSXibElement*)element
++{
++  NSString *mode = [element attributeForKey: @"nestingMode"];
++  NSUInteger value = NSRuleEditorNestingModeCompound;
++
++  if ([@"single" isEqualToString: mode])
++    value = NSRuleEditorNestingModeSingle;
++  else if ([@"list" isEqualToString: mode])
++    value = NSRuleEditorNestingModeList;
++  else if ([@"simple" isEqualToString: mode])
++    value = NSRuleEditorNestingModeSimple;
++  return [NSNumber numberWithUnsignedInteger: value];
++}
++
++- (id) decodeRuleEditorDisallowEmptyForElement: (GSXibElement*)element
++{
++  return [NSNumber numberWithBool:
++    ![[element attributeForKey: @"canRemoveAllRows"] boolValue]];
++}
++
++- (id) decodePredicateTemplateTypeForElement: (GSXibElement*)element
++{
++  /* The archived types: 1 for a comparison, 2 for a compound row. */
++  return [NSNumber numberWithInteger:
++    [@"compound" isEqualToString: [element attributeForKey: @"rowType"]]
++      ? 2 : 1];
++}
++
++/* A xib keeps the menus of a template's pop-ups; an archive, the pop-ups. */
++- (id) decodePredicateTemplateViewsForElement: (GSXibElement*)element
++{
++  GSXibElement *menusElement = (GSXibElement*)[element elementForKey: @"popUpMenus"];
++  NSArray *menus = [self objectForXib: menusElement];
++  NSMutableArray *views = [NSMutableArray array];
++  NSEnumerator *e = [menus objectEnumerator];
++  NSMenu *menu;
++
++  while ((menu = [e nextObject]) != nil)
++    {
++      NSPopUpButton *popUp = [[NSPopUpButton alloc]
++        initWithFrame: NSMakeRect(0.0, 0.0, 100.0, 22.0) pullsDown: NO];
++
++      [popUp setMenu: menu];
++      if ([popUp numberOfItems] > 0)
++        {
++          [popUp selectItemAtIndex: 0];
++        }
++      [views addObject: popUp];
++      RELEASE(popUp);
++    }
++
++  return views;
++}
++
++- (GSXibElement*) _rightExpressionElementOf: (GSXibElement*)element
++{
++  return (GSXibElement*)[element elementForKey: @"rightExpressionObject"];
++}
++
++- (id) decodePredicateTemplateRightAttributeTypeForElement: (GSXibElement*)element
++{
++  GSXibElement *right = [self _rightExpressionElementOf: element];
++
++  if ([@"integer" isEqualToString: [right type]])
++    {
++      return [NSNumber numberWithInteger:
++        [[right attributeForKey: @"value"] integerValue]];
++    }
++  return [NSNumber numberWithInteger: 0];
++}
++
++- (id) decodePredicateTemplateRightIsWildcardForElement: (GSXibElement*)element
++{
++  GSXibElement *right = [self _rightExpressionElementOf: element];
++
++  return [NSNumber numberWithBool:
++    (right == nil || [@"integer" isEqualToString: [right type]])];
++}
++
++- (id) decodeExpressionForElement: (GSXibElement*)element
++{
++  NSString *type = [element attributeForKey: @"type"];
++
++  if ([@"keyPath" isEqualToString: type])
++    {
++      return [NSExpression expressionForKeyPath:
++        [self objectForXib: (GSXibElement*)[element elementForKey: @"keyPath"]]];
++    }
++  else if ([@"constant" isEqualToString: type])
++    {
++      return [NSExpression expressionForConstantValue:
++        [self objectForXib: (GSXibElement*)[element elementForKey: @"constantValue"]]];
++    }
++  else if ([@"variable" isEqualToString: type])
++    {
++      return [NSExpression expressionForVariable:
++        [self objectForXib: (GSXibElement*)[element elementForKey: @"variable"]]];
++    }
++  else if ([@"evaluatedObject" isEqualToString: type])
++    {
++      return [NSExpression expressionForEvaluatedObject];
++    }
++
++  NSWarnMLog(@"no expression of type %@", type);
++  return nil;
++}
++
+ - (id) decodeDatePickerElementsForElement: (GSXibElement*)element
+ {
+   GSXibElement *elements = [element elementForKey: @"datePickerElements"];
+@@ -3209,7 +3335,16 @@ didStartElement: (NSString*)elementName
+ 
+ - (id) objectForXib: (GSXibElement*)element
+ {
+-  id object = [super objectForXib: element];
++  id object;
++
++  /* NSExpression is a cluster that cannot read a xib. */
++  if ([@"object" isEqualToString: [element type]]
++    && [@"NSExpression" isEqualToString: [element attributeForKey: @"class"]])
++    {
++      return [self decodeExpressionForElement: element];
++    }
++
++  object = [super objectForXib: element];
+ 
+   // If no object check other possibilities related to XIB 5...
+   if (object == nil)
+diff --git a/Source/NSMenuItem.m b/Source/NSMenuItem.m
+index bd184f605..a8646541b 100644
+--- a/Source/NSMenuItem.m
++++ b/Source/NSMenuItem.m
+@@ -602,6 +602,7 @@ static Class imageClass;
+       [aCoder encodeObject: _mixedStateImage forKey: @"NSMixedImage"]; 
+       [aCoder encodeObject: _target forKey: @"NSTarget"];
+       [aCoder encodeObject: _menu forKey: @"NSMenu"];
++      [aCoder encodeObject: _representedObject forKey: @"NSRepObject"];
+ 
+       // If the menu is owned by a popup, then don't encode the children.
+       // This prevents an assertion error in IB as these keys should not 
+@@ -690,6 +691,11 @@ static Class imageClass;
+          id target = [aDecoder decodeObjectForKey: @"NSTarget"];
+          [self setTarget: target];
+         }
++      if ([aDecoder containsValueForKey: @"NSRepObject"])
++        {
++          [self setRepresentedObject:
++            [aDecoder decodeObjectForKey: @"NSRepObject"]];
++        }
+       if ([aDecoder containsValueForKey: @"NSMixedImage"])
+         {
+           NSImage *mixedImage = [aDecoder decodeObjectForKey: @"NSMixedImage"];
+diff --git a/Source/NSPredicateEditor.m b/Source/NSPredicateEditor.m
+index 10c3449cc..fac423edf 100644
+--- a/Source/NSPredicateEditor.m
++++ b/Source/NSPredicateEditor.m
+@@ -29,22 +29,116 @@
+ #import <Foundation/NSArray.h>
+ #import <Foundation/NSDebug.h>
+ #import <Foundation/NSEnumerator.h>
++#import <Foundation/NSException.h>
+ #import <Foundation/NSIndexSet.h>
++#import <Foundation/NSNotification.h>
+ #import <Foundation/NSPredicate.h>
+ #import <Foundation/NSString.h>
+ #import <Foundation/NSValue.h>
+ 
++#import "AppKit/NSDatePicker.h"
++#import "AppKit/NSMenuItem.h"
++#import "AppKit/NSPopUpButton.h"
+ #import "AppKit/NSPredicateEditor.h"
+ #import "AppKit/NSPredicateEditorRowTemplate.h"
++#import "AppKit/NSTextField.h"
++#import "GSGuiPrivate.h"
++#import "GSRuleEditorPrivate.h"
++
++/* A pop-up item shared by the templates that have it there, or a view. */
++@interface GSPredicateEditorCriterion : NSObject
++{
++@public
++  NSString       *title;	// nil for a view
++  NSUInteger      level;
++  NSMutableArray *children;
++  NSMutableArray *templates;	// the templates it belongs to
++  NSMutableArray *indexes;	// for each, its item in that template's pop-up
++}
++- (NSUInteger) indexForTemplate: (id)template;
++@end
++
++@implementation GSPredicateEditorCriterion
++
++- (id) init
++{
++  if ((self = [super init]) != nil)
++    {
++      children = [NSMutableArray new];
++      templates = [NSMutableArray new];
++      indexes = [NSMutableArray new];
++    }
++  return self;
++}
++
++- (void) dealloc
++{
++  RELEASE(title);
++  RELEASE(children);
++  RELEASE(templates);
++  RELEASE(indexes);
++  [super dealloc];
++}
++
++- (NSUInteger) indexForTemplate: (id)template
++{
++  NSUInteger i = [templates indexOfObjectIdenticalTo: template];
++
++  if (i == NSNotFound)
++    {
++      return NSNotFound;
++    }
++
++  return [[indexes objectAtIndex: i] unsignedIntegerValue];
++}
++
++- (NSString *) description
++{
++  return title != nil ? title : @"";
++}
++
++@end
++
++/* A row's template, and the copy whose views are the row's. */
++@interface GSPredicateEditorRowState : NSObject
++{
++@public
++  NSPredicateEditorRowTemplate *source;
++  NSPredicateEditorRowTemplate *copy;
++}
++@end
++
++@implementation GSPredicateEditorRowState
++
++- (void) dealloc
++{
++  RELEASE(source);
++  RELEASE(copy);
++  [super dealloc];
++}
++
++@end
+ 
+ @interface NSPredicateEditor (Private)
+-- (NSPredicateEditorRowTemplate *) _templateForRowType: (NSRuleEditorRowType)type;
++- (void) _rebuildCriteria;
++- (void) _addTemplate: (NSPredicateEditorRowTemplate *)template
++                views: (NSArray *)views
++                level: (NSUInteger)level
++                   to: (NSMutableArray *)siblings;
++- (NSArray *) _criteriaForRowType: (NSRuleEditorRowType)type;
++- (NSArray *) _templatesOfCriteria: (NSArray *)criteria;
++- (GSPredicateEditorRowState *) _stateOfRow: (NSInteger)index;
++- (void) _syncState: (GSPredicateEditorRowState *)state
++       withCriteria: (NSArray *)criteria;
++- (void) _wireViewsOf: (NSPredicateEditorRowTemplate *)template;
++- (NSArray *) _criteriaShowing: (NSPredicateEditorRowTemplate *)copy
++                    ofTemplate: (NSPredicateEditorRowTemplate *)template
++                       rowType: (NSRuleEditorRowType)type;
+ - (NSPredicateEditorRowTemplate *) _templateForPredicate: (NSPredicate *)predicate;
+-- (NSPredicateEditorRowTemplate *) _templateOfRow: (NSInteger)index;
+-- (void) _fillRow: (NSInteger)index
+-     withTemplate: (NSPredicateEditorRowTemplate *)template;
++- (BOOL) _canShowPredicate: (NSPredicate *)predicate;
+ - (void) _addRowsForPredicate: (NSPredicate *)predicate
+                 asSubrowOfRow: (NSInteger)parent;
++- (void) _templateControlValueDidChange: (id)sender;
+ @end
+ 
+ @implementation NSPredicateEditor
+@@ -57,6 +151,9 @@
+       return nil;
+     }
+ 
++  _simpleCriteria = [[NSMutableArray alloc] init];
++  _compoundCriteria = [[NSMutableArray alloc] init];
++
+   /* An editor starts out able to hold rows together, the way one made in a
+    * nib does.
+    */
+@@ -70,7 +167,7 @@
+       [NSNumber numberWithUnsignedInteger: NSNotPredicateType], nil];
+     compound = [[NSPredicateEditorRowTemplate alloc]
+       initWithCompoundTypes: types];
+-    _rowTemplates = [[NSArray alloc] initWithObjects: compound, nil];
++    [self setRowTemplates: [NSArray arrayWithObject: compound]];
+     RELEASE(compound);
+   }
+ 
+@@ -80,6 +177,8 @@
+ - (void) dealloc
+ {
+   RELEASE(_rowTemplates);
++  RELEASE(_simpleCriteria);
++  RELEASE(_compoundCriteria);
+   [super dealloc];
+ }
+ 
+@@ -88,35 +187,39 @@
+   return _rowTemplates;
+ }
+ 
++/* The rows there are stay, as far as the new templates can show them. */
+ - (void) setRowTemplates: (NSArray *)templates
+ {
+-  ASSIGN(_rowTemplates, templates);
+-}
++  NSPredicate *predicate = nil;
+ 
+-/* A row of a predicate editor is made from one of its templates, so the row
+- * carries the template it was made from and shows that template's views.
+- */
+-- (void) insertRowAtIndex: (NSInteger)index
+-                 withType: (NSRuleEditorRowType)type
+-            asSubrowOfRow: (NSInteger)parentIndex
+-                  animate: (BOOL)flag
+-{
+-  [super insertRowAtIndex: index
+-                 withType: type
+-            asSubrowOfRow: parentIndex
+-                  animate: flag];
++  if ([self numberOfRows] > 0)
++    {
++      predicate = [self predicate];
++    }
+ 
+-  [self _fillRow: index withTemplate: [self _templateForRowType: type]];
++  ASSIGN(_rowTemplates, templates);
++  [self _rebuildCriteria];
++
++  if ([self numberOfRows] > 0)
++    {
++      [self removeRowsAtIndexes: [NSIndexSet indexSetWithIndexesInRange:
++        NSMakeRange(0, (NSUInteger)[self numberOfRows])]
++                 includeSubrows: YES];
++      if (predicate != nil && [self _canShowPredicate: predicate])
++        {
++          [self _addRowsForPredicate: predicate asSubrowOfRow: -1];
++        }
++    }
+ }
+ 
+ - (NSPredicate *) predicateForRow: (NSInteger)index
+ {
+-  NSPredicateEditorRowTemplate *template = [self _templateOfRow: index];
++  GSPredicateEditorRowState *state = [self _stateOfRow: index];
+   NSIndexSet *subrows = [self subrowIndexesForRow: index];
+   NSMutableArray *subpredicates = [NSMutableArray array];
+   NSUInteger subrow = [subrows firstIndex];
+ 
+-  if (template == nil)
++  if (state == nil)
+     {
+       return nil;
+     }
+@@ -132,12 +235,13 @@
+       subrow = [subrows indexGreaterThanIndex: subrow];
+     }
+ 
+-  if ([template compoundTypes] != nil && [subpredicates count] == 0)
++  if ([state->copy compoundTypes] != nil && [subpredicates count] == 0)
+     {
+       return nil;
+     }
+ 
+-  return [template predicateWithSubpredicates: subpredicates];
++  [self _syncState: state withCriteria: [self criteriaForRow: index]];
++  return [state->copy predicateWithSubpredicates: subpredicates];
+ }
+ 
+ - (NSPredicate *) predicate
+@@ -185,6 +289,13 @@
+       return;
+     }
+ 
++  if (object != nil && ![self _canShowPredicate: object])
++    {
++      [NSException raise: NSInvalidArgumentException
++                  format: @"%@ has no row template that can show %@",
++        NSStringFromClass([self class]), [object predicateFormat]];
++    }
++
+   all = [NSIndexSet indexSetWithIndexesInRange:
+     NSMakeRange(0, (NSUInteger)[self numberOfRows])];
+   [self removeRowsAtIndexes: all includeSubrows: YES];
+@@ -195,6 +306,19 @@
+     }
+ }
+ 
++//
++// The values typed into a row
++//
++- (void) controlTextDidChange: (NSNotification *)notification
++{
++  [self sendAction: [self action] to: [self target]];
++}
++
++- (void) controlTextDidEndEditing: (NSNotification *)notification
++{
++  [self sendAction: [self action] to: [self target]];
++}
++
+ //
+ // NSCoding protocol
+ //
+@@ -204,7 +328,7 @@
+ 
+   if ([aCoder allowsKeyedCoding])
+     {
+-      [aCoder encodeObject: _rowTemplates forKey: @"NSRowTemplates"];
++      [aCoder encodeObject: _rowTemplates forKey: @"NSPredicateTemplates"];
+     }
+   else
+     {
+@@ -214,49 +338,335 @@
+ 
+ - (id) initWithCoder: (NSCoder*)aDecoder
+ {
++  NSArray *rowTemplates;
++
+   self = [super initWithCoder: aDecoder];
+   if (nil == self)
+     {
+       return nil;
+     }
+ 
++  _simpleCriteria = [[NSMutableArray alloc] init];
++  _compoundCriteria = [[NSMutableArray alloc] init];
++
+   if ([aDecoder allowsKeyedCoding])
+     {
+-      NSArray *rowTemplates = [aDecoder decodeObjectForKey: @"NSRowTemplates"];
+-
+-      [self setRowTemplates: rowTemplates];
++      rowTemplates = [aDecoder decodeObjectForKey: @"NSPredicateTemplates"];
++      if (rowTemplates == nil)
++        {
++          /* The key GNUstep wrote before. */
++          rowTemplates = [aDecoder decodeObjectForKey: @"NSRowTemplates"];
++        }
+     }
+   else
+     {
+-      NSArray *rowTemplates = [aDecoder decodeObject];
+-
+-      [self setRowTemplates: rowTemplates];
++      rowTemplates = [aDecoder decodeObject];
+     }
+ 
++  [self setRowTemplates: rowTemplates];
++
+   return self;
+ }
+ 
+ @end
+ 
++@implementation NSPredicateEditor (GSRuleEditorCriteria)
++
++- (NSInteger) _numberOfChildrenForCriterion: (id)criterion
++                                withRowType: (NSRuleEditorRowType)type
++{
++  if (criterion == nil)
++    {
++      return [[self _criteriaForRowType: type] count];
++    }
++
++  return [((GSPredicateEditorCriterion *)criterion)->children count];
++}
++
++- (id) _child: (NSInteger)index
++ forCriterion: (id)criterion
++  withRowType: (NSRuleEditorRowType)type
++{
++  NSArray *children;
++
++  children = (criterion == nil ? [self _criteriaForRowType: type]
++    : ((GSPredicateEditorCriterion *)criterion)->children);
++  if (index < 0 || (NSUInteger)index >= [children count])
++    {
++      return nil;
++    }
++
++  return [children objectAtIndex: (NSUInteger)index];
++}
++
++- (id) _displayValueForCriterion: (id)criterion inRow: (NSInteger)row
++{
++  GSPredicateEditorCriterion *node = criterion;
++  GSPredicateEditorRowState *state;
++  NSArray *views;
++
++  if (node->title != nil)
++    {
++      return node->title;
++    }
++
++  state = [self _stateOfRow: row];
++  if (state == nil
++    || [node->templates indexOfObjectIdenticalTo: state->source] == NSNotFound)
++    {
++      return nil;
++    }
++
++  views = [state->copy templateViews];
++  return node->level < [views count] ? [views objectAtIndex: node->level] : nil;
++}
++
++- (NSDictionary *) _predicatePartsForCriterion: (id)criterion
++                              withDisplayValue: (id)value
++                                         inRow: (NSInteger)row
++{
++  return nil;
++}
++
++/* A row shows the first template all its criteria belong to. */
++- (void) _criteriaDidChangeInRow: (NSInteger)row
++{
++  NSArray *criteria = [self criteriaForRow: row];
++  NSArray *candidates = [self _templatesOfCriteria: criteria];
++  GSPredicateEditorRowState *state = [self _stateOfRow: row];
++
++  if (state == nil
++    || [candidates indexOfObjectIdenticalTo: state->source] == NSNotFound)
++    {
++      if ([candidates count] == 0)
++        {
++          [self _setInfo: nil forRow: row];
++          return;
++        }
++
++      state = AUTORELEASE([[GSPredicateEditorRowState alloc] init]);
++      state->source = RETAIN([candidates objectAtIndex: 0]);
++      state->copy = [state->source copy];
++      [self _wireViewsOf: state->copy];
++      [self _setInfo: state forRow: row];
++    }
++
++  [self _syncState: state withCriteria: criteria];
++}
++
++@end
++
+ @implementation NSPredicateEditor (Private)
+ 
+-- (NSPredicateEditorRowTemplate *) _templateForRowType: (NSRuleEditorRowType)type
++- (void) _rebuildCriteria
+ {
+   NSEnumerator *e = [_rowTemplates objectEnumerator];
+   NSPredicateEditorRowTemplate *template;
+-  BOOL wantCompound = (type == NSRuleEditorRowTypeCompound);
++
++  [_simpleCriteria removeAllObjects];
++  [_compoundCriteria removeAllObjects];
+ 
+   while ((template = [e nextObject]) != nil)
+     {
+-      BOOL isCompound = ([template compoundTypes] != nil);
++      [self _addTemplate: template
++                   views: [template templateViews]
++                   level: 0
++                      to: ([template compoundTypes] != nil
++                        ? _compoundCriteria : _simpleCriteria)];
++    }
++}
++
++- (void) _addTemplate: (NSPredicateEditorRowTemplate *)template
++                views: (NSArray *)views
++                level: (NSUInteger)level
++                   to: (NSMutableArray *)siblings
++{
++  id view;
+ 
+-      if (isCompound == wantCompound)
++  if (level >= [views count])
++    {
++      return;
++    }
++
++  view = [views objectAtIndex: level];
++  if ([view isKindOfClass: [NSPopUpButton class]])
++    {
++      NSInteger i;
++
++      for (i = 0; i < [view numberOfItems]; i++)
+         {
+-          return template;
++          NSString *title = [[view itemAtIndex: i] title];
++          NSEnumerator *e = [siblings objectEnumerator];
++          GSPredicateEditorCriterion *node;
++
++          while ((node = [e nextObject]) != nil)
++            {
++              if (node->title != nil && [node->title isEqual: title])
++                {
++                  break;
++                }
++            }
++          if (node == nil)
++            {
++              node = AUTORELEASE([[GSPredicateEditorCriterion alloc] init]);
++              ASSIGNCOPY(node->title, title);
++              node->level = level;
++              [siblings addObject: node];
++            }
++          [node->templates addObject: template];
++          [node->indexes addObject: [NSNumber numberWithInteger: i]];
++          [self _addTemplate: template
++                       views: views
++                       level: level + 1
++                          to: node->children];
+         }
+     }
++  else
++    {
++      GSPredicateEditorCriterion *node;
++
++      node = AUTORELEASE([[GSPredicateEditorCriterion alloc] init]);
++      node->level = level;
++      [node->templates addObject: template];
++      [node->indexes addObject: [NSNumber numberWithInteger: 0]];
++      [siblings addObject: node];
++      [self _addTemplate: template
++                   views: views
++                   level: level + 1
++                      to: node->children];
++    }
++}
+ 
+-  return nil;
++- (NSArray *) _criteriaForRowType: (NSRuleEditorRowType)type
++{
++  return type == NSRuleEditorRowTypeCompound
++    ? _compoundCriteria : _simpleCriteria;
++}
++
++- (NSArray *) _templatesOfCriteria: (NSArray *)criteria
++{
++  NSMutableArray *candidates = nil;
++  NSEnumerator *e = [criteria objectEnumerator];
++  GSPredicateEditorCriterion *node;
++
++  while ((node = [e nextObject]) != nil)
++    {
++      if (candidates == nil)
++        {
++          candidates = [NSMutableArray arrayWithArray: node->templates];
++        }
++      else
++        {
++          NSInteger i;
++
++          for (i = (NSInteger)[candidates count] - 1; i >= 0; i--)
++            {
++              if ([node->templates indexOfObjectIdenticalTo:
++                    [candidates objectAtIndex: i]] == NSNotFound)
++                {
++                  [candidates removeObjectAtIndex: i];
++                }
++            }
++        }
++    }
++
++  return candidates != nil ? candidates : [NSArray array];
++}
++
++- (GSPredicateEditorRowState *) _stateOfRow: (NSInteger)index
++{
++  return [self _infoForRow: index];
++}
++
++- (void) _syncState: (GSPredicateEditorRowState *)state
++       withCriteria: (NSArray *)criteria
++{
++  NSArray *views = [state->copy templateViews];
++  NSEnumerator *e = [criteria objectEnumerator];
++  GSPredicateEditorCriterion *node;
++
++  while ((node = [e nextObject]) != nil)
++    {
++      if (node->title != nil && node->level < [views count])
++        {
++          id view = [views objectAtIndex: node->level];
++          NSUInteger index = [node indexForTemplate: state->source];
++
++          if ([view isKindOfClass: [NSPopUpButton class]] && index != NSNotFound)
++            {
++              [view selectItemAtIndex: (NSInteger)index];
++            }
++        }
++    }
++}
++
++/* What is typed or picked in a row is a change to the editor. */
++- (void) _wireViewsOf: (NSPredicateEditorRowTemplate *)template
++{
++  NSEnumerator *e = [[template templateViews] objectEnumerator];
++  id view;
++
++  while ((view = [e nextObject]) != nil)
++    {
++      if ([view isKindOfClass: [NSPopUpButton class]])
++        {
++          continue;
++        }
++      if ([view isKindOfClass: [NSControl class]])
++        {
++          [view setTarget: self];
++          [view setAction: @selector(_templateControlValueDidChange:)];
++        }
++      if ([view isKindOfClass: [NSTextField class]])
++        {
++          [view setDelegate: self];
++        }
++    }
++}
++
++/* The criteria that show what the copy of the template was set to. */
++- (NSArray *) _criteriaShowing: (NSPredicateEditorRowTemplate *)copy
++                    ofTemplate: (NSPredicateEditorRowTemplate *)template
++                       rowType: (NSRuleEditorRowType)type
++{
++  NSMutableArray *criteria = [NSMutableArray array];
++  NSArray *siblings = [self _criteriaForRowType: type];
++  NSArray *views = [copy templateViews];
++  NSUInteger level;
++
++  for (level = 0; level < [views count]; level++)
++    {
++      id view = [views objectAtIndex: level];
++      NSEnumerator *e = [siblings objectEnumerator];
++      GSPredicateEditorCriterion *node;
++
++      while ((node = [e nextObject]) != nil)
++        {
++          if ([view isKindOfClass: [NSPopUpButton class]])
++            {
++              if (node->title != nil
++                && [node indexForTemplate: template]
++                  == (NSUInteger)[view indexOfSelectedItem])
++                {
++                  break;
++                }
++            }
++          else if (node->title == nil
++            && [node->templates indexOfObjectIdenticalTo: template]
++              != NSNotFound)
++            {
++              break;
++            }
++        }
++      if (node == nil)
++        {
++          break;
++        }
++      [criteria addObject: node];
++      siblings = node->children;
++    }
++
++  return criteria;
+ }
+ 
+ - (NSPredicateEditorRowTemplate *) _templateForPredicate: (NSPredicate *)predicate
+@@ -285,50 +695,37 @@
+   return best;
+ }
+ 
+-- (NSPredicateEditorRowTemplate *) _templateOfRow: (NSInteger)index
+-{
+-  NSArray *criteria = [self criteriaForRow: index];
+-
+-  if ([criteria count] == 0)
+-    {
+-      return nil;
+-    }
+-
+-  return [criteria objectAtIndex: 0];
+-}
+-
+-/* Each row needs views of its own, so it is given a copy of the template it
+- * was made from rather than the template itself.
+- */
+-- (void) _fillRow: (NSInteger)index
+-     withTemplate: (NSPredicateEditorRowTemplate *)template
++- (BOOL) _canShowPredicate: (NSPredicate *)predicate
+ {
+-  NSPredicateEditorRowTemplate *copy;
+-  NSArray *views;
+-  NSMutableArray *criteria;
+-  NSUInteger i;
++  NSPredicateEditorRowTemplate *template;
++  NSEnumerator *e;
++  NSPredicate *sub;
+ 
++  template = [self _templateForPredicate: predicate];
+   if (template == nil)
+     {
+-      return;
++      return NO;
+     }
+ 
+-  copy = AUTORELEASE([template copy]);
+-  views = [copy templateViews];
+-  criteria = [NSMutableArray arrayWithCapacity: [views count]];
+-  for (i = 0; i < [views count]; i++)
++  e = [[template displayableSubpredicatesOfPredicate: predicate]
++    objectEnumerator];
++  while ((sub = [e nextObject]) != nil)
+     {
+-      [criteria addObject: copy];
++      if (![self _canShowPredicate: sub])
++        {
++          return NO;
++        }
+     }
+ 
+-  [self setCriteria: criteria andDisplayValues: views forRowAtIndex: index];
++  return YES;
+ }
+ 
+ - (void) _addRowsForPredicate: (NSPredicate *)predicate
+                 asSubrowOfRow: (NSInteger)parent
+ {
+   NSPredicateEditorRowTemplate *template;
+-  NSPredicateEditorRowTemplate *rowTemplate;
++  GSPredicateEditorRowState *state;
++  NSRuleEditorRowType type;
+   NSInteger index;
+   NSArray *subpredicates;
+ 
+@@ -340,16 +737,24 @@
+       return;
+     }
+ 
++  type = ([template compoundTypes] != nil
++    ? NSRuleEditorRowTypeCompound : NSRuleEditorRowTypeSimple);
+   index = [self numberOfRows];
+-  [super insertRowAtIndex: index
+-                 withType: ([template compoundTypes] != nil
+-                   ? NSRuleEditorRowTypeCompound : NSRuleEditorRowTypeSimple)
+-            asSubrowOfRow: parent
+-                  animate: NO];
+-  [self _fillRow: index withTemplate: template];
+-
+-  rowTemplate = [self _templateOfRow: index];
+-  [rowTemplate setPredicate: predicate];
++  [self insertRowAtIndex: index
++                withType: type
++           asSubrowOfRow: parent
++                 animate: NO];
++
++  state = AUTORELEASE([[GSPredicateEditorRowState alloc] init]);
++  state->source = RETAIN(template);
++  state->copy = [template copy];
++  [self _wireViewsOf: state->copy];
++  [state->copy setPredicate: predicate];
++  [self _setInfo: state forRow: index];
++  [self _setCriteria: [self _criteriaShowing: state->copy
++                                  ofTemplate: template
++                                     rowType: type]
++       forRowAtIndex: index];
+ 
+   subpredicates = [template displayableSubpredicatesOfPredicate: predicate];
+   if (subpredicates != nil)
+@@ -364,4 +769,9 @@
+     }
+ }
+ 
++- (void) _templateControlValueDidChange: (id)sender
++{
++  [self sendAction: [self action] to: [self target]];
++}
++
+ @end
+diff --git a/Source/NSPredicateEditorRowTemplate.m b/Source/NSPredicateEditorRowTemplate.m
+index 6aa47f4fa..904fe26a8 100644
+--- a/Source/NSPredicateEditorRowTemplate.m
++++ b/Source/NSPredicateEditorRowTemplate.m
+@@ -37,6 +37,8 @@
+ #import <Foundation/NSValue.h>
+ 
+ #import "AppKit/NSDatePicker.h"
++#import "AppKit/NSMenu.h"
++#import "AppKit/NSMenuItem.h"
+ #import "AppKit/NSPopUpButton.h"
+ #import "AppKit/NSPredicateEditorRowTemplate.h"
+ #import "AppKit/NSTextField.h"
+@@ -55,8 +57,25 @@ static const double comparisonMatch = 0.81;
+ static const double comparisonMatchOtherOptions = 0.729;
+ static const double compoundMatch = 0.5;
+ 
++/* CoreData's entity and attribute descriptions. */
++@interface NSObject (GSPredicateEditorEntity)
++- (NSDictionary *) attributesByName;
++- (NSDictionary *) relationshipsByName;
++- (id) destinationEntity;
++- (NSAttributeType) attributeType;
++- (NSString *) name;
++@end
++
+ @interface NSPredicateEditorRowTemplate (Private)
+-- (NSPopUpButton *) _popUpButtonWithTitles: (NSArray *)titles;
+++ (id) _attributeForKeyPath: (NSString *)path inEntity: (id)entity;
+++ (NSArray *) _operatorsForAttributeType: (NSAttributeType)type;
++- (void) _setUpFromViews: (NSArray *)views
++                    type: (NSInteger)type
++           attributeType: (NSAttributeType)attributeType
++         rightIsWildcard: (BOOL)wildcard;
++- (NSPopUpButton *) _popUpButtonWithTitles: (NSArray *)titles
++                                    objects: (NSArray *)objects;
++- (void) _takeTitlesFromViews: (NSArray *)views;
+ - (NSPopUpButton *) _popUpButtonAtIndex: (NSUInteger)index;
+ - (NSString *) _titleForExpression: (NSExpression *)expression;
+ - (NSString *) _titleForOperator: (NSPredicateOperatorType)type;
+@@ -71,8 +90,29 @@ static const double compoundMatch = 0.5;
+ + (NSArray *) templatesWithAttributeKeyPaths: (NSArray *)paths
+                          inEntityDescription: (NSEntityDescription *)entityDesc
+ {
+-  /* Entity descriptions belong to CoreData, which GNUstep does not have. */
+-  return nil;
++  NSMutableArray *templates = [NSMutableArray arrayWithCapacity: [paths count]];
++  NSEnumerator *e = [paths objectEnumerator];
++  NSString *path;
++
++  while ((path = [e nextObject]) != nil)
++    {
++      id attribute = [self _attributeForKeyPath: path inEntity: entityDesc];
++      NSAttributeType type = [attribute attributeType];
++      NSArray *operators = [self _operatorsForAttributeType: type];
++      NSPredicateEditorRowTemplate *template;
++
++      template = [[self alloc]
++            initWithLeftExpressions:
++              [NSArray arrayWithObject: [NSExpression expressionForKeyPath: path]]
++       rightExpressionAttributeType: type
++                           modifier: NSDirectPredicateModifier
++                          operators: operators
++                            options: 0];
++      [templates addObject: template];
++      RELEASE(template);
++    }
++
++  return templates;
+ }
+ 
+ - (id) initWithLeftExpressions: (NSArray *)leftExprs
+@@ -200,9 +240,10 @@ static const double compoundMatch = 0.5;
+         }
+ 
+       _views = [[NSArray alloc] initWithObjects:
+-        [self _popUpButtonWithTitles: titles],
++        [self _popUpButtonWithTitles: titles objects: _compoundTypes],
+         [self _popUpButtonWithTitles:
+-          [NSArray arrayWithObject: _(@"of the following are true")]],
++          [NSArray arrayWithObject: _(@"of the following are true")]
++                             objects: nil],
+         nil];
+     }
+   else if (_leftExpressions != nil)
+@@ -229,8 +270,8 @@ static const double compoundMatch = 0.5;
+         }
+ 
+       _views = [[NSArray alloc] initWithObjects:
+-        [self _popUpButtonWithTitles: leftTitles],
+-        [self _popUpButtonWithTitles: operatorTitles],
++        [self _popUpButtonWithTitles: leftTitles objects: _leftExpressions],
++        [self _popUpButtonWithTitles: operatorTitles objects: _operators],
+         [self _rightView],
+         nil];
+     }
+@@ -333,15 +374,29 @@ static const double compoundMatch = 0.5;
+ 
+       type = [[_compoundTypes objectAtIndex: index] unsignedIntegerValue];
+ 
++      if ([subpred count] == 0)
++        {
++          return [NSPredicate predicateWithValue: YES];
++        }
++
+       switch (type)
+         {
+           case NSNotPredicateType:
+             return [NSCompoundPredicate notPredicateWithSubpredicate:
+-              ([subpred count] > 0 ? [subpred objectAtIndex: 0] : nil)];
++              ([subpred count] == 1 ? [subpred objectAtIndex: 0]
++                : [NSCompoundPredicate orPredicateWithSubpredicates: subpred])];
+           case NSOrPredicateType:
++            if ([subpred count] == 1)
++              {
++                return [subpred objectAtIndex: 0];
++              }
+             return [NSCompoundPredicate orPredicateWithSubpredicates: subpred];
+           case NSAndPredicateType:
+           default:
++            if ([subpred count] == 1)
++              {
++                return [subpred objectAtIndex: 0];
++              }
+             return [NSCompoundPredicate andPredicateWithSubpredicates: subpred];
+         }
+     }
+@@ -423,14 +478,19 @@ static const double compoundMatch = 0.5;
+ {
+   if ([aCoder allowsKeyedCoding])
+     {
+-      [aCoder encodeObject: _leftExpressions forKey: @"NSLeftExpressions"];
+-      [aCoder encodeObject: _rightExpressions forKey: @"NSRightExpressions"];
+-      [aCoder encodeObject: _operators forKey: @"NSOperators"];
+-      [aCoder encodeObject: _compoundTypes forKey: @"NSCompoundTypes"];
++      /* The keys of OS X, which keeps a template as its views. */
++      [aCoder encodeInteger: (_compoundTypes != nil ? 2 : 1)
++                     forKey: @"NSPredicateTemplateType"];
++      [aCoder encodeObject: [self templateViews]
++                    forKey: @"NSPredicateTemplateViews"];
++      [aCoder encodeInteger: _options forKey: @"NSPredicateTemplateOptions"];
++      [aCoder encodeInteger: _modifier forKey: @"NSPredicateTemplateModifier"];
++      [aCoder encodeInteger: 0 forKey: @"NSPredicateTemplateLeftAttributeType"];
+       [aCoder encodeInteger: _rightExpressionAttributeType
+-                     forKey: @"NSRightExpressionAttributeType"];
+-      [aCoder encodeInteger: _modifier forKey: @"NSModifier"];
+-      [aCoder encodeInteger: _options forKey: @"NSOptions"];
++                     forKey: @"NSPredicateTemplateRightAttributeType"];
++      [aCoder encodeBool: NO forKey: @"NSPredicateTemplateLeftIsWildcard"];
++      [aCoder encodeBool: (_compoundTypes == nil && _rightExpressions == nil)
++                  forKey: @"NSPredicateTemplateRightIsWildcard"];
+     }
+   else
+     {
+@@ -455,18 +515,42 @@ static const double compoundMatch = 0.5;
+       return nil;
+     }
+ 
++  _rightExpressionAttributeType = NSUndefinedAttributeType;
++  _modifier = NSDirectPredicateModifier;
++
+   if ([aDecoder allowsKeyedCoding])
+     {
+-      ASSIGN(_leftExpressions,
+-        [aDecoder decodeObjectForKey: @"NSLeftExpressions"]);
+-      ASSIGN(_rightExpressions,
+-        [aDecoder decodeObjectForKey: @"NSRightExpressions"]);
+-      ASSIGN(_operators, [aDecoder decodeObjectForKey: @"NSOperators"]);
+-      ASSIGN(_compoundTypes, [aDecoder decodeObjectForKey: @"NSCompoundTypes"]);
+-      _rightExpressionAttributeType
+-        = [aDecoder decodeIntegerForKey: @"NSRightExpressionAttributeType"];
+-      _modifier = [aDecoder decodeIntegerForKey: @"NSModifier"];
+-      _options = [aDecoder decodeIntegerForKey: @"NSOptions"];
++      if ([aDecoder containsValueForKey: @"NSPredicateTemplateType"])
++        {
++          NSArray *views;
++
++          _options = [aDecoder decodeIntegerForKey: @"NSPredicateTemplateOptions"];
++          _modifier
++            = [aDecoder decodeIntegerForKey: @"NSPredicateTemplateModifier"];
++          views = [aDecoder decodeObjectForKey: @"NSPredicateTemplateViews"];
++          [self _setUpFromViews: (views != nil ? views : [NSArray array])
++                           type: [aDecoder decodeIntegerForKey:
++                                   @"NSPredicateTemplateType"]
++                  attributeType: [aDecoder decodeIntegerForKey:
++                                   @"NSPredicateTemplateRightAttributeType"]
++                rightIsWildcard: [aDecoder decodeBoolForKey:
++                                   @"NSPredicateTemplateRightIsWildcard"]];
++        }
++      else
++        {
++          /* The keys GNUstep wrote before. */
++          ASSIGN(_leftExpressions,
++            [aDecoder decodeObjectForKey: @"NSLeftExpressions"]);
++          ASSIGN(_rightExpressions,
++            [aDecoder decodeObjectForKey: @"NSRightExpressions"]);
++          ASSIGN(_operators, [aDecoder decodeObjectForKey: @"NSOperators"]);
++          ASSIGN(_compoundTypes,
++            [aDecoder decodeObjectForKey: @"NSCompoundTypes"]);
++          _rightExpressionAttributeType
++            = [aDecoder decodeIntegerForKey: @"NSRightExpressionAttributeType"];
++          _modifier = [aDecoder decodeIntegerForKey: @"NSModifier"];
++          _options = [aDecoder decodeIntegerForKey: @"NSOptions"];
++        }
+     }
+   else
+     {
+@@ -504,6 +588,10 @@ static const double compoundMatch = 0.5;
+     {
+       copy->_rightExpressionAttributeType = _rightExpressionAttributeType;
+       ASSIGNCOPY(copy->_compoundTypes, _compoundTypes);
++      if (_views != nil)
++        {
++          [copy _takeTitlesFromViews: _views];
++        }
+     }
+ 
+   return copy;
+@@ -513,14 +601,174 @@ static const double compoundMatch = 0.5;
+ 
+ @implementation NSPredicateEditorRowTemplate (Private)
+ 
+++ (id) _attributeForKeyPath: (NSString *)path inEntity: (id)entity
++{
++  NSArray *keys = [path componentsSeparatedByString: @"."];
++  NSUInteger count = [keys count];
++  NSUInteger i;
++  id current = entity;
++  id attribute;
++
++  for (i = 0; i + 1 < count && current != nil; i++)
++    {
++      id relationship = [[current relationshipsByName]
++        objectForKey: [keys objectAtIndex: i]];
++
++      current = [relationship destinationEntity];
++    }
++
++  attribute = [[current attributesByName] objectForKey: [keys lastObject]];
++  if (attribute == nil)
++    {
++      [NSException raise: NSInvalidArgumentException
++                  format: @"The NSEntityDescription %@ does not contain an"
++        @" attribute for the key %@", [entity name], path];
++    }
++
++  return attribute;
++}
++
++/* The operators OS X offers for each type of attribute, in its order. */
+++ (NSArray *) _operatorsForAttributeType: (NSAttributeType)type
++{
++  NSPredicateOperatorType ordered[] = {
++    NSEqualToPredicateOperatorType,
++    NSNotEqualToPredicateOperatorType,
++    NSLessThanPredicateOperatorType,
++    NSGreaterThanPredicateOperatorType,
++    NSLessThanOrEqualToPredicateOperatorType,
++    NSGreaterThanOrEqualToPredicateOperatorType
++  };
++  NSPredicateOperatorType strings[] = {
++    NSContainsPredicateOperatorType,
++    NSEqualToPredicateOperatorType,
++    NSNotEqualToPredicateOperatorType,
++    NSBeginsWithPredicateOperatorType,
++    NSEndsWithPredicateOperatorType
++  };
++  NSPredicateOperatorType *types;
++  NSUInteger count;
++  NSMutableArray *operators;
++  NSUInteger i;
++
++  switch (type)
++    {
++      case NSInteger16AttributeType:
++      case NSInteger32AttributeType:
++      case NSInteger64AttributeType:
++      case NSDecimalAttributeType:
++      case NSDoubleAttributeType:
++      case NSFloatAttributeType:
++      case NSDateAttributeType:
++        types = ordered;
++        count = 6;
++        break;
++      case NSBooleanAttributeType:
++        types = ordered;
++        count = 2;
++        break;
++      case NSStringAttributeType:
++        types = strings;
++        count = 5;
++        break;
++      default:
++        [NSException raise: NSInvalidArgumentException
++                    format: @"NSPredicateEditorRowTemplate cannot make"
++          @" operators for an attribute of type %lu", (unsigned long)type];
++        return nil;
++    }
++
++  operators = [NSMutableArray arrayWithCapacity: count];
++  for (i = 0; i < count; i++)
++    {
++      [operators addObject: [NSNumber numberWithUnsignedInteger: types[i]]];
++    }
++
++  return operators;
++}
++
++/* The items of the views' pop-ups stand for what the template offers. */
++- (void) _setUpFromViews: (NSArray *)views
++                    type: (NSInteger)type
++           attributeType: (NSAttributeType)attributeType
++         rightIsWildcard: (BOOL)wildcard
++{
++  NSMutableArray *lists = [NSMutableArray array];
++  NSEnumerator *e = [views objectEnumerator];
++  id view;
++
++  while ((view = [e nextObject]) != nil)
++    {
++      NSMutableArray *objects = [NSMutableArray array];
++
++      if ([view isKindOfClass: [NSPopUpButton class]])
++        {
++          NSInteger i;
++
++          for (i = 0; i < [view numberOfItems]; i++)
++            {
++              id object = [[view itemAtIndex: i] representedObject];
++
++              if (object != nil)
++                {
++                  [objects addObject: object];
++                }
++            }
++        }
++      [lists addObject: objects];
++    }
++
++  if (type == 2)
++    {
++      ASSIGNCOPY(_compoundTypes,
++        ([lists count] > 0 ? [lists objectAtIndex: 0] : [NSArray array]));
++      ASSIGN(_views, views);
++      return;
++    }
++
++  ASSIGNCOPY(_leftExpressions,
++    ([lists count] > 0 ? [lists objectAtIndex: 0] : [NSArray array]));
++  ASSIGNCOPY(_operators,
++    ([lists count] > 1 ? [lists objectAtIndex: 1] : [NSArray array]));
++  _rightExpressionAttributeType = attributeType;
++  if (!wildcard && [lists count] > 2 && [[lists objectAtIndex: 2] count] > 0)
++    {
++      ASSIGNCOPY(_rightExpressions, [lists objectAtIndex: 2]);
++    }
++
++  /* A xib leaves out the view a value is typed into. */
++  if ([views count] == 2)
++    {
++      ASSIGN(_views, [views arrayByAddingObject: [self _rightView]]);
++    }
++  else
++    {
++      ASSIGN(_views, views);
++    }
++}
++
+ - (NSPopUpButton *) _popUpButtonWithTitles: (NSArray *)titles
++                                    objects: (NSArray *)objects
+ {
+   NSPopUpButton *button;
++  NSUInteger i;
+ 
+   button = [[NSPopUpButton alloc]
+     initWithFrame: NSMakeRect(0.0, 0.0, viewWidth, viewHeight)
+         pullsDown: NO];
+-  [button addItemsWithTitles: titles];
++  for (i = 0; i < [titles count]; i++)
++    {
++      NSMenuItem *item;
++
++      item = (NSMenuItem *)[[button menu]
++        addItemWithTitle: [titles objectAtIndex: i]
++                  action: NULL
++           keyEquivalent: @""];
++      if (i < [objects count])
++        {
++          [item setRepresentedObject: [objects objectAtIndex: i]];
++        }
++    }
+   if ([titles count] > 0)
+     {
+       [button selectItemAtIndex: 0];
+@@ -529,6 +777,31 @@ static const double compoundMatch = 0.5;
+   return AUTORELEASE(button);
+ }
+ 
++- (void) _takeTitlesFromViews: (NSArray *)views
++{
++  NSArray *mine = [self templateViews];
++  NSUInteger i;
++
++  for (i = 0; i < [mine count] && i < [views count]; i++)
++    {
++      id view = [views objectAtIndex: i];
++      id own = [mine objectAtIndex: i];
++
++      if ([view isKindOfClass: [NSPopUpButton class]]
++        && [own isKindOfClass: [NSPopUpButton class]]
++        && [view numberOfItems] == [own numberOfItems])
++        {
++          NSInteger j;
++
++          for (j = 0; j < [view numberOfItems]; j++)
++            {
++              [[own itemAtIndex: j] setTitle:
++                [[view itemAtIndex: j] title]];
++            }
++        }
++    }
++}
++
+ - (NSPopUpButton *) _popUpButtonAtIndex: (NSUInteger)index
+ {
+   NSArray *views = [self templateViews];
+@@ -619,7 +892,7 @@ static const double compoundMatch = 0.5;
+           [titles addObject: [self _titleForExpression: expression]];
+         }
+ 
+-      return [self _popUpButtonWithTitles: titles];
++      return [self _popUpButtonWithTitles: titles objects: _rightExpressions];
+     }
+ 
+   if (_rightExpressionAttributeType == NSDateAttributeType)
+diff --git a/Source/NSRuleEditor.m b/Source/NSRuleEditor.m
+index e2efdbdaf..580242652 100644
+--- a/Source/NSRuleEditor.m
++++ b/Source/NSRuleEditor.m
+@@ -25,28 +25,37 @@
+    Boston, MA 02110-1301, USA.
+ */
+ 
++
+ #import <Foundation/NSArray.h>
+ #import <Foundation/NSDictionary.h>
+ #import <Foundation/NSEnumerator.h>
+ #import <Foundation/NSException.h>
+ #import <Foundation/NSExpression.h>
+ #import <Foundation/NSIndexSet.h>
++#import <Foundation/NSKeyedArchiver.h>
+ #import <Foundation/NSNotification.h>
+ #import <Foundation/NSPredicate.h>
+ #import <Foundation/NSString.h>
+ #import <Foundation/NSValue.h>
+ 
+ #import "AppKit/NSButton.h"
++#import "AppKit/NSImage.h"
++#import "AppKit/NSMenu.h"
++#import "AppKit/NSMenuItem.h"
++#import "AppKit/NSPopUpButton.h"
+ #import "AppKit/NSRuleEditor.h"
+ #import "AppKit/NSTextField.h"
+ #import "AppKit/NSView.h"
+ #import "GSGuiPrivate.h"
++#import "GSRuleEditorPrivate.h"
+ 
+ static const CGFloat defaultRowHeight = 32.0;
+-static const CGFloat rowInset = 4.0;
+-static const CGFloat viewGap = 4.0;
+-static const CGFloat indentPerLevel = 20.0;
+-static const CGFloat buttonWidth = 24.0;
++static const CGFloat rowInset = 7.0;
++static const CGFloat viewGap = 6.0;
++static const CGFloat indentPerLevel = 30.0;
++static const CGFloat buttonSize = 18.0;
++static const CGFloat buttonGap = 2.0;
++static const CGFloat controlHeight = 22.0;
+ 
+ /* One row of the editor: what it was built from, what it shows, and where it
+  * sits in the tree.
+@@ -58,6 +67,7 @@ static const CGFloat buttonWidth = 24.0;
+   NSMutableArray         *displayValues;
+   NSRuleEditorRowType     rowType;
+   GSRuleEditorRow        *parent;	// not retained
++  id                      info;
+ }
+ @end
+ 
+@@ -77,24 +87,75 @@ static const CGFloat buttonWidth = 24.0;
+ {
+   RELEASE(criteria);
+   RELEASE(displayValues);
++  RELEASE(info);
+   [super dealloc];
+ }
+ 
+ @end
+ 
++/* The strip a row is shown in, which knows the row it shows. */
++@interface GSRuleEditorRowView : NSView
++{
++@public
++  GSRuleEditorRow        *row;	// not retained
++}
++@end
++
++@implementation GSRuleEditorRowView
++
++- (BOOL) isFlipped
++{
++  return YES;
++}
++
++@end
++
+ @interface NSRuleEditor (Private)
++- (void) _setUpDefaults;
+ - (GSRuleEditorRow *) _rowAtIndex: (NSInteger)index;
+-- (GSRuleEditorRow *) _rootRow;
+-- (void) _populateRow: (GSRuleEditorRow *)row;
++- (NSInteger) _indexOfRow: (GSRuleEditorRow *)row;
++- (void) _fillRow: (GSRuleEditorRow *)row fromLevel: (NSUInteger)level;
++- (void) _fillRow: (GSRuleEditorRow *)row
++        fromLevel: (NSUInteger)level
++        keepingTitles: (NSArray *)titles;
++- (void) _showCriteriaOfRow: (GSRuleEditorRow *)row;
+ - (NSPredicate *) _predicateForRow: (GSRuleEditorRow *)row;
+ - (NSDictionary *) _partsForRow: (GSRuleEditorRow *)row;
+ - (NSArray *) _childRowsOf: (GSRuleEditorRow *)row;
++- (NSUInteger) _depthOfRow: (GSRuleEditorRow *)row;
+ - (void) _rowsDidChange;
+ - (void) _reloadRowViews;
++- (NSView *) _viewForLevel: (NSUInteger)level ofRow: (GSRuleEditorRow *)row;
++- (void) _addButtonsToView: (GSRuleEditorRowView *)view;
++- (void) _criterionChosen: (id)sender;
++- (void) _addRowFromButton: (id)sender;
++- (void) _removeRowFromButton: (id)sender;
++- (BOOL) _canRemoveRow: (GSRuleEditorRow *)row;
+ @end
+ 
+ @implementation NSRuleEditor
+ 
++/* Its cell is a plain NSCell, which has no target or action. */
++- (id) target
++{
++  return _target;
++}
++
++- (void) setTarget: (id)target
++{
++  _target = target;
++}
++
++- (SEL) action
++{
++  return _action;
++}
++
++- (void) setAction: (SEL)action
++{
++  _action = action;
++}
++
+ - (id) initWithFrame: (NSRect)frame
+ {
+   self = [super initWithFrame: frame];
+@@ -103,18 +164,7 @@ static const CGFloat buttonWidth = 24.0;
+       return nil;
+     }
+ 
+-  _rows = [[NSMutableArray alloc] init];
+-  _selectedRows = [[NSMutableIndexSet alloc] init];
+-  ASSIGN(_criteriaKeyPath, @"criteria");
+-  ASSIGN(_displayValuesKeyPath, @"displayValues");
+-  ASSIGN(_rowTypeKeyPath, @"rowType");
+-  ASSIGN(_subrowsKeyPath, @"subrows");
+-  _rowClass = [NSMutableDictionary class];
+-  _rowHeight = defaultRowHeight;
+-  _nestingMode = NSRuleEditorNestingModeCompound;
+-  _editable = YES;
+-  _canRemoveAllRows = YES;
+-
++  [self _setUpDefaults];
+   return self;
+ }
+ 
+@@ -131,6 +181,12 @@ static const CGFloat buttonWidth = 24.0;
+   [super dealloc];
+ }
+ 
++/* The rows are laid out from the top down, as on OS X. */
++- (BOOL) isFlipped
++{
++  return YES;
++}
++
+ //
+ // Configuring
+ //
+@@ -176,6 +232,7 @@ static const CGFloat buttonWidth = 24.0;
+ - (void) setEditable: (BOOL)flag
+ {
+   _editable = flag;
++  [self _reloadRowViews];
+ }
+ 
+ - (BOOL) canRemoveAllRows
+@@ -186,6 +243,7 @@ static const CGFloat buttonWidth = 24.0;
+ - (void) setCanRemoveAllRows: (BOOL)flag
+ {
+   _canRemoveAllRows = flag;
++  [self _reloadRowViews];
+ }
+ 
+ - (NSRuleEditorNestingMode) nestingMode
+@@ -317,7 +375,7 @@ static const CGFloat buttonWidth = 24.0;
+       return -1;
+     }
+ 
+-  return (NSInteger)[_rows indexOfObjectIdenticalTo: row->parent];
++  return [self _indexOfRow: row->parent];
+ }
+ 
+ - (NSIndexSet *) subrowIndexesForRow: (NSInteger)index
+@@ -417,7 +475,7 @@ static const CGFloat buttonWidth = 24.0;
+     }
+ 
+   [_rows insertObject: row atIndex: (NSUInteger)index];
+-  [self _populateRow: row];
++  [self _fillRow: row fromLevel: 0];
+   [self _rowsDidChange];
+ }
+ 
+@@ -588,9 +646,7 @@ static const CGFloat buttonWidth = 24.0;
+ 
+   while ((row = [e nextObject]) != nil)
+     {
+-      [row->criteria removeAllObjects];
+-      [row->displayValues removeAllObjects];
+-      [self _populateRow: row];
++      [self _fillRow: row fromLevel: 0];
+     }
+ 
+   [self _rowsDidChange];
+@@ -601,10 +657,246 @@ static const CGFloat buttonWidth = 24.0;
+   [self _rowsDidChange];
+ }
+ 
++//
++// NSCoding protocol
++//
++- (void) encodeWithCoder: (NSCoder *)aCoder
++{
++  [super encodeWithCoder: aCoder];
++
++  if ([aCoder allowsKeyedCoding])
++    {
++      [aCoder encodeInteger: _nestingMode forKey: @"NSRuleEditorNestingMode"];
++      [aCoder encodeDouble: _rowHeight forKey: @"NSRuleEditorSliceHeight"];
++      [aCoder encodeBool: _editable forKey: @"NSRuleEditorEditable"];
++      [aCoder encodeBool: !_canRemoveAllRows
++                  forKey: @"NSRuleEditorDisallowEmpty"];
++      [aCoder encodeObject: _criteriaKeyPath forKey: @"NSRuleEditorItemsKeyPath"];
++      [aCoder encodeObject: _displayValuesKeyPath
++                    forKey: @"NSRuleEditorValuesKeyPath"];
++      [aCoder encodeObject: _rowTypeKeyPath
++                    forKey: @"NSRuleEditorRowTypeKeyPath"];
++      [aCoder encodeObject: _subrowsKeyPath
++                    forKey: @"NSRuleEditorSubrowsArrayKeyPath"];
++      [aCoder encodeConditionalObject: _delegate
++                               forKey: @"NSRuleEditorDelegate"];
++    }
++  else
++    {
++      NSUInteger mode = _nestingMode;
++      double height = _rowHeight;
++
++      [aCoder encodeValueOfObjCType: @encode(NSUInteger) at: &mode];
++      [aCoder encodeValueOfObjCType: @encode(double) at: &height];
++      [aCoder encodeValueOfObjCType: @encode(BOOL) at: &_editable];
++      [aCoder encodeValueOfObjCType: @encode(BOOL) at: &_canRemoveAllRows];
++      [aCoder encodeObject: _criteriaKeyPath];
++      [aCoder encodeObject: _displayValuesKeyPath];
++      [aCoder encodeObject: _rowTypeKeyPath];
++      [aCoder encodeObject: _subrowsKeyPath];
++    }
++}
++
++- (id) initWithCoder: (NSCoder *)aDecoder
++{
++  self = [super initWithCoder: aDecoder];
++  if (self == nil)
++    {
++      return nil;
++    }
++
++  [self _setUpDefaults];
++
++  if ([aDecoder allowsKeyedCoding])
++    {
++      NSString *path;
++      id delegate;
++
++      if ([aDecoder containsValueForKey: @"NSRuleEditorNestingMode"])
++        {
++          _nestingMode
++            = [aDecoder decodeIntegerForKey: @"NSRuleEditorNestingMode"];
++        }
++      if ([aDecoder containsValueForKey: @"NSRuleEditorSliceHeight"])
++        {
++          _rowHeight = [aDecoder decodeDoubleForKey: @"NSRuleEditorSliceHeight"];
++        }
++      if ([aDecoder containsValueForKey: @"NSRuleEditorEditable"])
++        {
++          _editable = [aDecoder decodeBoolForKey: @"NSRuleEditorEditable"];
++        }
++      if ([aDecoder containsValueForKey: @"NSRuleEditorDisallowEmpty"])
++        {
++          _canRemoveAllRows
++            = ![aDecoder decodeBoolForKey: @"NSRuleEditorDisallowEmpty"];
++        }
++      if ((path = [aDecoder decodeObjectForKey: @"NSRuleEditorItemsKeyPath"]))
++        {
++          ASSIGN(_criteriaKeyPath, path);
++        }
++      if ((path = [aDecoder decodeObjectForKey: @"NSRuleEditorValuesKeyPath"]))
++        {
++          ASSIGN(_displayValuesKeyPath, path);
++        }
++      if ((path = [aDecoder decodeObjectForKey: @"NSRuleEditorRowTypeKeyPath"]))
++        {
++          ASSIGN(_rowTypeKeyPath, path);
++        }
++      if ((path = [aDecoder decodeObjectForKey:
++              @"NSRuleEditorSubrowsArrayKeyPath"]))
++        {
++          ASSIGN(_subrowsKeyPath, path);
++        }
++      if ((delegate = [aDecoder decodeObjectForKey: @"NSRuleEditorDelegate"]))
++        {
++          [self setDelegate: delegate];
++        }
++    }
++  else
++    {
++      NSUInteger mode;
++      double height;
++
++      [aDecoder decodeValueOfObjCType: @encode(NSUInteger) at: &mode];
++      [aDecoder decodeValueOfObjCType: @encode(double) at: &height];
++      [aDecoder decodeValueOfObjCType: @encode(BOOL) at: &_editable];
++      [aDecoder decodeValueOfObjCType: @encode(BOOL) at: &_canRemoveAllRows];
++      _nestingMode = mode;
++      _rowHeight = height;
++      ASSIGN(_criteriaKeyPath, [aDecoder decodeObject]);
++      ASSIGN(_displayValuesKeyPath, [aDecoder decodeObject]);
++      ASSIGN(_rowTypeKeyPath, [aDecoder decodeObject]);
++      ASSIGN(_subrowsKeyPath, [aDecoder decodeObject]);
++    }
++
++  /* The rows are not archived, but the views that showed them may be. */
++  [self _reloadRowViews];
++
++  return self;
++}
++
++@end
++
++@implementation NSRuleEditor (GSRuleEditorCriteria)
++
++- (NSInteger) _numberOfChildrenForCriterion: (id)criterion
++                                withRowType: (NSRuleEditorRowType)type
++{
++  if (_delegate == nil)
++    {
++      return 0;
++    }
++
++  return [_delegate ruleEditor: self
++  numberOfChildrenForCriterion: criterion
++                   withRowType: type];
++}
++
++- (id) _child: (NSInteger)index
++ forCriterion: (id)criterion
++  withRowType: (NSRuleEditorRowType)type
++{
++  if (_delegate == nil)
++    {
++      return nil;
++    }
++
++  return [_delegate ruleEditor: self
++                         child: index
++                  forCriterion: criterion
++                   withRowType: type];
++}
++
++- (id) _displayValueForCriterion: (id)criterion inRow: (NSInteger)row
++{
++  if (_delegate == nil)
++    {
++      return nil;
++    }
++
++  return [_delegate ruleEditor: self
++      displayValueForCriterion: criterion
++                         inRow: row];
++}
++
++- (NSDictionary *) _predicatePartsForCriterion: (id)criterion
++                              withDisplayValue: (id)value
++                                         inRow: (NSInteger)row
++{
++  if (_delegate == nil
++    || ![_delegate respondsToSelector:
++          @selector(ruleEditor:predicatePartsForCriterion:withDisplayValue:inRow:)])
++    {
++      return nil;
++    }
++
++  return [_delegate ruleEditor: self
++    predicatePartsForCriterion: criterion
++              withDisplayValue: value
++                         inRow: row];
++}
++
++- (void) _criteriaDidChangeInRow: (NSInteger)row
++{
++}
++
++- (void) _setCriteria: (NSArray *)criteria forRowAtIndex: (NSInteger)index
++{
++  GSRuleEditorRow *row = [self _rowAtIndex: index];
++
++  if (row == nil)
++    {
++      return;
++    }
++
++  criteria = AUTORELEASE([criteria copy]);
++  [row->criteria setArray: criteria];
++  [self _showCriteriaOfRow: row];
++  [self _rowsDidChange];
++}
++
++- (id) _infoForRow: (NSInteger)index
++{
++  GSRuleEditorRow *row = [self _rowAtIndex: index];
++
++  return row != nil ? row->info : nil;
++}
++
++- (void) _setInfo: (id)info forRow: (NSInteger)index
++{
++  GSRuleEditorRow *row = [self _rowAtIndex: index];
++
++  if (row != nil)
++    {
++      ASSIGN(row->info, info);
++    }
++}
++
++- (void) _userDidChangeRows
++{
++  [self _rowsDidChange];
++  [self sendAction: _action to: _target];
++}
++
+ @end
+ 
+ @implementation NSRuleEditor (Private)
+ 
++- (void) _setUpDefaults
++{
++  _rows = [[NSMutableArray alloc] init];
++  _selectedRows = [[NSMutableIndexSet alloc] init];
++  ASSIGN(_criteriaKeyPath, @"criteria");
++  ASSIGN(_displayValuesKeyPath, @"displayValues");
++  ASSIGN(_rowTypeKeyPath, @"rowType");
++  ASSIGN(_subrowsKeyPath, @"subrows");
++  _rowClass = [NSMutableDictionary class];
++  _rowHeight = defaultRowHeight;
++  _nestingMode = NSRuleEditorNestingModeCompound;
++  _editable = YES;
++  _canRemoveAllRows = YES;
++}
++
+ - (GSRuleEditorRow *) _rowAtIndex: (NSInteger)index
+ {
+   if (index < 0 || index >= (NSInteger)[_rows count])
+@@ -615,20 +907,11 @@ static const CGFloat buttonWidth = 24.0;
+   return [_rows objectAtIndex: (NSUInteger)index];
+ }
+ 
+-- (GSRuleEditorRow *) _rootRow
++- (NSInteger) _indexOfRow: (GSRuleEditorRow *)row
+ {
+-  NSEnumerator *e = [_rows objectEnumerator];
+-  GSRuleEditorRow *row;
++  NSUInteger index = [_rows indexOfObjectIdenticalTo: row];
+ 
+-  while ((row = [e nextObject]) != nil)
+-    {
+-      if (row->parent == nil)
+-        {
+-          return row;
+-        }
+-    }
+-
+-  return nil;
++  return index == NSNotFound ? -1 : (NSInteger)index;
+ }
+ 
+ - (NSArray *) _childRowsOf: (GSRuleEditorRow *)row
+@@ -648,79 +931,123 @@ static const CGFloat buttonWidth = 24.0;
+   return result;
+ }
+ 
+-/* Walk the delegate from the root of its criteria, taking the first child at
+- * each step, until it offers no more.  That is the row as it starts out.
+- */
+-- (void) _populateRow: (GSRuleEditorRow *)row
++- (NSUInteger) _depthOfRow: (GSRuleEditorRow *)row
+ {
+-  id criterion = nil;
+-  NSInteger rowIndex;
++  NSUInteger depth = 0;
++  GSRuleEditorRow *ancestor = row->parent;
+ 
+-  if (_delegate == nil)
++  while (ancestor != nil)
+     {
+-      return;
++      depth++;
++      ancestor = ancestor->parent;
+     }
+ 
+-  rowIndex = (NSInteger)[_rows indexOfObjectIdenticalTo: row];
++  return depth;
++}
+ 
++/* Walk on from the level, taking the first child at each step. */
++- (void) _fillRow: (GSRuleEditorRow *)row fromLevel: (NSUInteger)level
++{
++  [self _fillRow: row fromLevel: level keepingTitles: nil];
++}
++
++/* As above, but preferring a child with the title the row had there. */
++- (void) _fillRow: (GSRuleEditorRow *)row
++        fromLevel: (NSUInteger)level
++    keepingTitles: (NSArray *)titles
++{
++  NSInteger rowIndex = [self _indexOfRow: row];
++  id criterion;
++
++  if ([row->criteria count] > level)
++    {
++      [row->criteria removeObjectsInRange:
++        NSMakeRange(level, [row->criteria count] - level)];
++    }
++
++  criterion = (level > 0 ? [row->criteria objectAtIndex: level - 1] : nil);
+   while (YES)
+     {
+-      NSInteger count;
+       id child;
+-      id displayValue;
+ 
+-      count = [_delegate ruleEditor: self
+-       numberOfChildrenForCriterion: criterion
+-                        withRowType: row->rowType];
+-      if (count <= 0)
++      if ([self _numberOfChildrenForCriterion: criterion
++                                  withRowType: row->rowType] <= 0)
+         {
+           break;
+         }
+ 
+-      child = [_delegate ruleEditor: self
+-                             child: 0
+-                      forCriterion: criterion
+-                       withRowType: row->rowType];
++      child = nil;
++      if ([row->criteria count] < [titles count])
++        {
++          id title = [titles objectAtIndex: [row->criteria count]];
++          NSInteger count;
++          NSInteger i;
++
++          count = [self _numberOfChildrenForCriterion: criterion
++                                          withRowType: row->rowType];
++          for (i = 0; i < count && child == nil; i++)
++            {
++              id other = [self _child: i forCriterion: criterion
++                          withRowType: row->rowType];
++              id value = [self _displayValueForCriterion: other inRow: rowIndex];
++
++              if ([value isKindOfClass: [NSString class]]
++                && [value isEqual: title])
++                {
++                  child = other;
++                }
++            }
++        }
++      if (child == nil)
++        {
++          child = [self _child: 0 forCriterion: criterion
++                   withRowType: row->rowType];
++        }
+       if (child == nil)
+         {
+           break;
+         }
+ 
+-      displayValue = [_delegate ruleEditor: self
+-                 displayValueForCriterion: child
+-                                    inRow: rowIndex];
+-
+       [row->criteria addObject: child];
+-      [row->displayValues addObject:
+-        (displayValue != nil ? displayValue : (id)child)];
+-
+       criterion = child;
+     }
++
++  [self _showCriteriaOfRow: row];
++}
++
++- (void) _showCriteriaOfRow: (GSRuleEditorRow *)row
++{
++  NSInteger rowIndex = [self _indexOfRow: row];
++  NSEnumerator *e;
++  id criterion;
++
++  [self _criteriaDidChangeInRow: rowIndex];
++
++  [row->displayValues removeAllObjects];
++  e = [row->criteria objectEnumerator];
++  while ((criterion = [e nextObject]) != nil)
++    {
++      id value = [self _displayValueForCriterion: criterion inRow: rowIndex];
++
++      [row->displayValues addObject: (value != nil ? value : criterion)];
++    }
+ }
+ 
+-/* Gather what the delegate says each criterion of the row contributes. */
++/* Gather what each criterion of the row contributes. */
+ - (NSDictionary *) _partsForRow: (GSRuleEditorRow *)row
+ {
+   NSMutableDictionary *parts = [NSMutableDictionary dictionary];
+   NSUInteger i;
+   NSUInteger count = [row->criteria count];
+-  NSInteger rowIndex = (NSInteger)[_rows indexOfObjectIdenticalTo: row];
+-
+-  if (_delegate == nil
+-    || ![_delegate respondsToSelector:
+-          @selector(ruleEditor:predicatePartsForCriterion:withDisplayValue:inRow:)])
+-    {
+-      return parts;
+-    }
++  NSInteger rowIndex = [self _indexOfRow: row];
+ 
+-  for (i = 0; i < count; i++)
++  for (i = 0; i < count && i < [row->displayValues count]; i++)
+     {
+       NSDictionary *part;
+ 
+-      part = [_delegate ruleEditor: self
+-        predicatePartsForCriterion: [row->criteria objectAtIndex: i]
+-                  withDisplayValue: [row->displayValues objectAtIndex: i]
+-                             inRow: rowIndex];
++      part = [self _predicatePartsForCriterion: [row->criteria objectAtIndex: i]
++                              withDisplayValue: [row->displayValues objectAtIndex: i]
++                                         inRow: rowIndex];
+       if (part != nil)
+         {
+           [parts addEntriesFromDictionary: part];
+@@ -812,17 +1139,17 @@ static const CGFloat buttonWidth = 24.0;
+                           NSRuleEditorPredicateOptions] unsignedIntegerValue]];
+ }
+ 
++/* The editor is as tall as its rows, as on OS X. */
+ - (void) _rowsDidChange
+ {
++  [self setFrameSize: NSMakeSize(NSWidth([self frame]),
++    (CGFloat)[_rows count] * _rowHeight)];
+   [self _reloadRowViews];
+   [[NSNotificationCenter defaultCenter]
+     postNotificationName: NSRuleEditorRowsDidChangeNotification
+                   object: self];
+ }
+ 
+-/* Lay the display values of each row out in a line, indented by how deep the
+- * row sits.
+- */
+ - (void) _reloadRowViews
+ {
+   NSArray *subviews = AUTORELEASE([[self subviews] copy]);
+@@ -830,72 +1157,282 @@ static const CGFloat buttonWidth = 24.0;
+   NSView *view;
+   NSUInteger i;
+   NSUInteger count = [_rows count];
+-  NSRect bounds = [self bounds];
++  CGFloat width = NSWidth([self bounds]);
+ 
++  /* A pop-up may be removed from within its own action. */
+   while ((view = [e nextObject]) != nil)
+     {
++      AUTORELEASE(RETAIN(view));
+       [view removeFromSuperview];
+     }
+ 
+   for (i = 0; i < count; i++)
+     {
+       GSRuleEditorRow *row = [_rows objectAtIndex: i];
+-      GSRuleEditorRow *ancestor = row->parent;
+-      CGFloat x = rowInset;
+-      CGFloat y;
+-      NSEnumerator *values;
+-      id value;
++      GSRuleEditorRowView *rowView;
++      CGFloat x = rowInset + indentPerLevel * [self _depthOfRow: row];
++      NSUInteger level;
++
++      rowView = [[GSRuleEditorRowView alloc] initWithFrame:
++        NSMakeRect(0.0, (CGFloat)i * _rowHeight, width, _rowHeight)];
++      rowView->row = row;
++      [rowView setAutoresizingMask: NSViewWidthSizable];
++      [self addSubview: rowView];
++      RELEASE(rowView);
++
++      for (level = 0; level < [row->displayValues count]; level++)
++        {
++          NSView *part = [self _viewForLevel: level ofRow: row];
++          NSRect frame = [part frame];
++
++          frame.origin.x = x;
++          frame.origin.y = floor((_rowHeight - NSHeight(frame)) / 2.0);
++          [part setFrame: frame];
++          [rowView addSubview: part];
++          x += NSWidth(frame) + viewGap;
++        }
+ 
+-      while (ancestor != nil)
++      if (_editable)
+         {
+-          x += indentPerLevel;
+-          ancestor = ancestor->parent;
++          [self _addButtonsToView: rowView];
+         }
++    }
+ 
+-      y = NSMaxY(bounds) - (CGFloat)(i + 1) * _rowHeight;
++  [self setNeedsDisplay: YES];
++}
++
++/* A view as it is; a criterion with brothers as a pop-up, else a label. */
++- (NSView *) _viewForLevel: (NSUInteger)level ofRow: (GSRuleEditorRow *)row
++{
++  id value = [row->displayValues objectAtIndex: level];
++  id criterion = [row->criteria objectAtIndex: level];
++  id parent = (level > 0 ? [row->criteria objectAtIndex: level - 1] : nil);
++  NSInteger rowIndex = [self _indexOfRow: row];
++  NSInteger count;
++
++  if ([value isKindOfClass: [NSView class]])
++    {
++      return value;
++    }
+ 
+-      values = [row->displayValues objectEnumerator];
+-      while ((value = [values nextObject]) != nil)
++  count = [self _numberOfChildrenForCriterion: parent withRowType: row->rowType];
++  if (count > 1)
++    {
++      NSPopUpButton *popUp;
++      NSMenu *menu;
++      NSInteger selected = -1;
++      NSInteger i;
++
++      popUp = AUTORELEASE([[NSPopUpButton alloc]
++        initWithFrame: NSMakeRect(0.0, 0.0, 100.0, controlHeight)
++            pullsDown: NO]);
++      menu = [popUp menu];
++      for (i = 0; i < count; i++)
+         {
+-          NSView *rowView;
++          id child = [self _child: i forCriterion: parent
++                      withRowType: row->rowType];
++          id title;
+ 
+-          if ([value isKindOfClass: [NSView class]])
++          if (child == criterion)
+             {
+-              rowView = value;
++              title = value;
++              selected = i;
+             }
+           else
+             {
+-              NSTextField *field;
+-
+-              field = AUTORELEASE([[NSTextField alloc] initWithFrame:
+-                NSMakeRect(0.0, 0.0, 80.0, _rowHeight - 2 * rowInset)]);
+-              [field setStringValue: [value description]];
+-              [field setEditable: NO];
+-              [field setBezeled: NO];
+-              [field setDrawsBackground: NO];
+-              rowView = field;
++              title = [self _displayValueForCriterion: child inRow: rowIndex];
++              if (title == nil || [title isKindOfClass: [NSView class]])
++                {
++                  title = child;
++                }
+             }
+ 
+-          [rowView setFrameOrigin: NSMakePoint(x, y + rowInset)];
+-          [self addSubview: rowView];
+-          x += NSWidth([rowView frame]) + viewGap;
++          /* Through the menu, which keeps items with the same title. */
++          [menu addItemWithTitle: [title description]
++                          action: NULL
++                   keyEquivalent: @""];
++        }
++      if (selected < 0)
++        {
++          selected = 0;
+         }
++      [popUp selectItemAtIndex: selected];
++      [popUp setTag: (NSInteger)level];
++      [popUp setTarget: self];
++      [popUp setAction: @selector(_criterionChosen:)];
++      [popUp setEnabled: _editable];
++      [popUp sizeToFit];
++      [popUp setFrameSize: NSMakeSize(NSWidth([popUp frame]), controlHeight)];
++      return popUp;
++    }
++  else
++    {
++      NSTextField *label;
++
++      label = AUTORELEASE([[NSTextField alloc]
++        initWithFrame: NSMakeRect(0.0, 0.0, 100.0, controlHeight)]);
++      [label setStringValue: [value description]];
++      [label setEditable: NO];
++      [label setSelectable: NO];
++      [label setBezeled: NO];
++      [label setBordered: NO];
++      [label setDrawsBackground: NO];
++      [label sizeToFit];
++      return label;
++    }
++}
+ 
+-      if (_editable)
++- (void) _addButtonsToView: (GSRuleEditorRowView *)view
++{
++  CGFloat width = NSWidth([view bounds]);
++  CGFloat y = floor((_rowHeight - buttonSize) / 2.0);
++  NSButton *add;
++  NSButton *remove;
++  NSImage *image;
++
++  add = AUTORELEASE([[NSButton alloc] initWithFrame:
++    NSMakeRect(width - rowInset - buttonSize, y, buttonSize, buttonSize)]);
++  remove = AUTORELEASE([[NSButton alloc] initWithFrame:
++    NSMakeRect(width - rowInset - 2 * buttonSize - buttonGap, y,
++      buttonSize, buttonSize)]);
++
++  if ((image = [NSImage imageNamed: @"NSAddTemplate"]) != nil)
++    {
++      [add setImage: image];
++      [add setImagePosition: NSImageOnly];
++    }
++  else
++    {
++      [add setTitle: @"+"];
++    }
++  if ((image = [NSImage imageNamed: @"NSRemoveTemplate"]) != nil)
++    {
++      [remove setImage: image];
++      [remove setImagePosition: NSImageOnly];
++    }
++  else
++    {
++      [remove setTitle: @"-"];
++    }
++
++  [add setTarget: self];
++  [add setAction: @selector(_addRowFromButton:)];
++  [add setAutoresizingMask: NSViewMinXMargin];
++  [add setEnabled: !(_nestingMode == NSRuleEditorNestingModeSingle)];
++  [remove setTarget: self];
++  [remove setAction: @selector(_removeRowFromButton:)];
++  [remove setAutoresizingMask: NSViewMinXMargin];
++  [remove setEnabled: [self _canRemoveRow: view->row]];
++
++  [view addSubview: remove];
++  [view addSubview: add];
++}
++
++- (void) _criterionChosen: (id)sender
++{
++  GSRuleEditorRow *row = ((GSRuleEditorRowView *)[sender superview])->row;
++  NSUInteger level = (NSUInteger)[sender tag];
++  NSInteger index = [sender indexOfSelectedItem];
++  NSArray *titles;
++  id parent;
++  id child;
++
++  if (row == nil || level >= [row->criteria count] || index < 0)
++    {
++      return;
++    }
++
++  parent = (level > 0 ? [row->criteria objectAtIndex: level - 1] : nil);
++  child = [self _child: index forCriterion: parent withRowType: row->rowType];
++  if (child == nil || child == [row->criteria objectAtIndex: level])
++    {
++      return;
++    }
++
++  /* What comes after the chosen criterion is walked from it afresh. */
++  titles = AUTORELEASE([row->displayValues copy]);
++  [row->criteria removeObjectsInRange:
++    NSMakeRange(level, [row->criteria count] - level)];
++  [row->criteria addObject: child];
++  [self _fillRow: row fromLevel: level + 1 keepingTitles: titles];
++  [self _userDidChangeRows];
++}
++
++/* Beneath a compound row, as its first; after a simple one. */
++- (void) _addRowFromButton: (id)sender
++{
++  GSRuleEditorRow *row = ((GSRuleEditorRowView *)[sender superview])->row;
++  NSInteger index = [self _indexOfRow: row];
++  NSInteger at;
++  NSInteger parent;
++
++  if (index < 0 || _nestingMode == NSRuleEditorNestingModeSingle)
++    {
++      return;
++    }
++
++  if (row->rowType == NSRuleEditorRowTypeCompound)
++    {
++      at = index + 1;
++      parent = index;
++    }
++  else
++    {
++      NSUInteger depth = [self _depthOfRow: row];
++
++      /* Past whatever sits beneath the row. */
++      at = index + 1;
++      while (at < [self numberOfRows]
++        && [self _depthOfRow: [self _rowAtIndex: at]] > depth)
+         {
+-          NSButton *add;
+-
+-          add = AUTORELEASE([[NSButton alloc] initWithFrame:
+-            NSMakeRect(NSMaxX(bounds) - buttonWidth - rowInset, y + rowInset,
+-              buttonWidth, _rowHeight - 2 * rowInset)]);
+-          [add setTitle: @"+"];
+-          [add setTarget: self];
+-          [add setAction: @selector(addRow:)];
+-          [self addSubview: add];
++          at++;
+         }
++      parent = [self parentRowForRow: index];
+     }
+ 
+-  [self setNeedsDisplay: YES];
++  [self insertRowAtIndex: at
++                withType: NSRuleEditorRowTypeSimple
++           asSubrowOfRow: parent
++                 animate: NO];
++  [self sendAction: _action to: _target];
++}
++
++- (void) _removeRowFromButton: (id)sender
++{
++  GSRuleEditorRow *row = ((GSRuleEditorRowView *)[sender superview])->row;
++  NSInteger index = [self _indexOfRow: row];
++
++  if (index < 0 || ![self _canRemoveRow: row])
++    {
++      return;
++    }
++
++  [self removeRowsAtIndexes: [NSIndexSet indexSetWithIndex: (NSUInteger)index]
++             includeSubrows: YES];
++  [self sendAction: _action to: _target];
++}
++
++/* Unless all the rows may go, the last row at the top stays. */
++- (BOOL) _canRemoveRow: (GSRuleEditorRow *)row
++{
++  NSEnumerator *e;
++  GSRuleEditorRow *other;
++
++  if (_canRemoveAllRows || row->parent != nil)
++    {
++      return YES;
++    }
++
++  e = [_rows objectEnumerator];
++  while ((other = [e nextObject]) != nil)
++    {
++      if (other != row && other->parent == nil)
++        {
++          return YES;
++        }
++    }
++
++  return NO;
+ }
+ 
+ @end
+diff --git a/Tests/gui/GSXib5KeyedUnarchiver/PredicateEditor.xib b/Tests/gui/GSXib5KeyedUnarchiver/PredicateEditor.xib
+new file mode 100644
+index 000000000..00a817047
+--- /dev/null
++++ b/Tests/gui/GSXib5KeyedUnarchiver/PredicateEditor.xib
+@@ -0,0 +1,124 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<document type="com.apple.InterfaceBuilder3.Cocoa.XIB" version="3.0" toolsVersion="23504" targetRuntime="MacOSX.Cocoa" propertyAccessControl="none" useAutolayout="NO">
++    <dependencies><plugIn identifier="com.apple.InterfaceBuilder.CocoaPlugin" version="23504"/></dependencies>
++    <objects>
++        <customObject id="-2" userLabel="File's Owner" customClass="NSApplication"/>
++        <customObject id="-1" userLabel="First Responder" customClass="FirstResponder"/>
++        <customObject id="-3" userLabel="Application" customClass="NSObject"/>
++
++        <!-- A fetch request's predicate editor, as Xcode writes it: the
++             templates are kept as the menus of their pop-ups. -->
++                                                <predicateEditor verticalHuggingPriority="750" nestingMode="compound" canRemoveAllRows="YES" rowHeight="32" id="4oz-xW-1DV">
++                                                    <rect key="frame" x="0.0" y="0.0" width="318" height="141"/>
++                                                    <autoresizingMask key="autoresizingMask" widthSizable="YES" flexibleMaxY="YES"/>
++                                                    <rowTemplates>
++                                                        <predicateEditorRowTemplate rowType="compound" id="340-yH-W0f">
++                                                            <popUpMenus>
++                                                                <menu id="MXE-e3-sUQ">
++                                                                    <items>
++                                                                        <menuItem title="Any" state="on" id="wkA-4E-NcQ">
++                                                                            <integer key="representedObject" value="2"/>
++                                                                        </menuItem>
++                                                                        <menuItem title="All" id="h6x-21-biB">
++                                                                            <integer key="representedObject" value="1"/>
++                                                                        </menuItem>
++                                                                    </items>
++                                                                </menu>
++                                                                <menu id="R63-Ud-RkG">
++                                                                    <items>
++                                                                        <menuItem title="of the following are true" state="on" id="61S-W4-pF4"/>
++                                                                    </items>
++                                                                </menu>
++                                                            </popUpMenus>
++                                                        </predicateEditorRowTemplate>
++                                                        <predicateEditorRowTemplate rowType="simple" id="0Nf-gY-k0K">
++                                                            <array key="leftExpressionObject">
++                                                                <expression type="keyPath">
++                                                                    <string key="keyPath">name</string>
++                                                                </expression>
++                                                                <expression type="keyPath">
++                                                                    <string key="keyPath">address</string>
++                                                                </expression>
++                                                                <expression type="keyPath">
++                                                                    <string key="keyPath">sign</string>
++                                                                </expression>
++                                                            </array>
++                                                            <integer key="rightExpressionObject" value="700"/>
++                                                            <popUpMenus>
++                                                                <menu id="EqX-DY-LDN">
++                                                                    <items>
++                                                                        <menuItem title="name" state="on" id="BYe-zS-Q6j">
++                                                                            <expression key="representedObject" type="keyPath">
++                                                                                <string key="keyPath">name</string>
++                                                                            </expression>
++                                                                        </menuItem>
++                                                                        <menuItem title="address" id="1hh-zB-DGq">
++                                                                            <expression key="representedObject" type="keyPath">
++                                                                                <string key="keyPath">address</string>
++                                                                            </expression>
++                                                                        </menuItem>
++                                                                        <menuItem title="sign" id="J7J-s0-hde">
++                                                                            <expression key="representedObject" type="keyPath">
++                                                                                <string key="keyPath">sign</string>
++                                                                            </expression>
++                                                                        </menuItem>
++                                                                    </items>
++                                                                </menu>
++                                                                <menu id="dPx-aR-rn8">
++                                                                    <items>
++                                                                        <menuItem title="contains" state="on" id="Cvh-ay-Ioh">
++                                                                            <integer key="representedObject" value="99"/>
++                                                                        </menuItem>
++                                                                        <menuItem title="begins with" id="eWJ-bi-wWn">
++                                                                            <integer key="representedObject" value="8"/>
++                                                                        </menuItem>
++                                                                        <menuItem title="ends with" id="W7q-Co-YlJ">
++                                                                            <integer key="representedObject" value="9"/>
++                                                                        </menuItem>
++                                                                        <menuItem title="is" id="r9J-YI-TaX">
++                                                                            <integer key="representedObject" value="4"/>
++                                                                        </menuItem>
++                                                                        <menuItem title="is not" id="JD8-9J-GOb">
++                                                                            <integer key="representedObject" value="5"/>
++                                                                        </menuItem>
++                                                                    </items>
++                                                                </menu>
++                                                            </popUpMenus>
++                                                        </predicateEditorRowTemplate>
++                                                    </rowTemplates>
++                                                </predicateEditor>
++
++        <!-- One left at what Xcode leaves out. -->
++        <predicateEditor verticalHuggingPriority="750" nestingMode="list" id="dfl-ed-1">
++            <rect key="frame" x="0.0" y="200" width="318" height="141"/>
++            <rowTemplates>
++                <predicateEditorRowTemplate rowType="simple" id="dfl-tp-1">
++                    <array key="leftExpressionObject">
++                        <expression type="keyPath">
++                            <string key="keyPath">age</string>
++                        </expression>
++                    </array>
++                    <integer key="rightExpressionObject" value="200"/>
++                    <popUpMenus>
++                        <menu id="dfl-mn-1">
++                            <items>
++                                <menuItem title="age" state="on" id="dfl-it-1">
++                                    <expression key="representedObject" type="keyPath">
++                                        <string key="keyPath">age</string>
++                                    </expression>
++                                </menuItem>
++                            </items>
++                        </menu>
++                        <menu id="dfl-mn-2">
++                            <items>
++                                <menuItem title="is less than" state="on" id="dfl-it-2">
++                                    <integer key="representedObject" value="0"/>
++                                </menuItem>
++                            </items>
++                        </menu>
++                    </popUpMenus>
++                </predicateEditorRowTemplate>
++            </rowTemplates>
++        </predicateEditor>
++    </objects>
++</document>
+diff --git a/Tests/gui/GSXib5KeyedUnarchiver/predicateEditor.m b/Tests/gui/GSXib5KeyedUnarchiver/predicateEditor.m
+new file mode 100644
+index 000000000..b4dd0ef8b
+--- /dev/null
++++ b/Tests/gui/GSXib5KeyedUnarchiver/predicateEditor.m
+@@ -0,0 +1,155 @@
++#import "ObjectTesting.h"
++
++#import <Foundation/NSData.h>
++#import <Foundation/NSExpression.h>
++#import <Foundation/NSPredicate.h>
++#import <AppKit/NSApplication.h>
++#import <AppKit/NSPopUpButton.h>
++#import <AppKit/NSPredicateEditor.h>
++#import <AppKit/NSPredicateEditorRowTemplate.h>
++#import <AppKit/NSTextField.h>
++#import <Additions/GNUstepGUI/GSXibKeyedUnarchiver.h>
++
++/* The values checked here are the ones AppKit gives for PredicateEditor.xib
++ * when it is compiled by ibtool and loaded on macOS.
++ */
++static NSPredicateEditor *
++editorAt(NSArray *rootObjects, CGFloat y)
++{
++  NSEnumerator	*enumerator = [rootObjects objectEnumerator];
++  id		element;
++
++  while ((element = [enumerator nextObject]) != nil)
++    {
++      if ([element isKindOfClass: [NSPredicateEditor class]]
++	&& [element frame].origin.y == y)
++	{
++	  return element;
++	}
++    }
++  return nil;
++}
++
++static NSArray *
++keyPaths(NSArray *expressions)
++{
++  NSMutableArray	*paths = [NSMutableArray array];
++  NSEnumerator		*enumerator = [expressions objectEnumerator];
++  NSExpression		*expression;
++
++  while ((expression = [enumerator nextObject]) != nil)
++    {
++      [paths addObject: [expression keyPath]];
++    }
++  return paths;
++}
++
++static NSArray *
++numbers(NSUInteger count, ...)
++{
++  NSMutableArray	*array = [NSMutableArray array];
++  va_list		ap;
++  NSUInteger		i;
++
++  va_start(ap, count);
++  for (i = 0; i < count; i++)
++    {
++      [array addObject: [NSNumber numberWithUnsignedInteger:
++	va_arg(ap, NSUInteger)]];
++    }
++  va_end(ap);
++  return array;
++}
++
++int main()
++{
++  START_SET("GSXib5KeyedUnarchiver NSPredicateEditor tests")
++
++  NS_DURING
++    {
++      [NSApplication sharedApplication];
++    }
++  NS_HANDLER
++    {
++      if ([[localException name]
++	isEqualToString: NSInternalInconsistencyException ])
++	{
++	  SKIP("It looks like GNUstep backend is not yet installed")
++	}
++    }
++  NS_ENDHANDLER
++
++  NSData			*data;
++  GSXibKeyedUnarchiver		*unarchiver;
++  NSArray			*rootObjects;
++  NSPredicateEditor		*editor;
++  NSPredicateEditorRowTemplate	*compound;
++  NSPredicateEditorRowTemplate	*comparison;
++
++  data = [NSData dataWithContentsOfFile: @"PredicateEditor.xib"];
++  unarchiver = [GSXibKeyedUnarchiver unarchiverForReadingWithData: data];
++  rootObjects = [unarchiver decodeObjectForKey: @"IBDocument.RootObjects"];
++
++  editor = editorAt(rootObjects, 0);
++  PASS(editor != nil, "the fetch request's predicate editor was found")
++  PASS([editor nestingMode] == NSRuleEditorNestingModeCompound,
++    "nestingMode compound is compound nesting")
++  PASS([editor rowHeight] == 32.0, "rowHeight is the row height")
++  PASS([editor canRemoveAllRows], "canRemoveAllRows YES lets all rows go")
++  PASS([editor isEditable], "an editor is editable unless it says otherwise")
++  PASS([[editor rowTemplates] count] == 2, "both templates were read")
++
++  compound = [[editor rowTemplates] objectAtIndex: 0];
++  comparison = [[editor rowTemplates] objectAtIndex: 1];
++  PASS_EQUAL([compound compoundTypes], numbers(2, NSOrPredicateType,
++    NSAndPredicateType), "a compound template's types are its items' objects")
++  PASS_EQUAL([[[compound templateViews] objectAtIndex: 0] itemTitles],
++    ([NSArray arrayWithObjects: @"Any", @"All", nil]),
++    "and it shows the titles of its menu")
++  PASS([compound leftExpressions] == nil, "it has no left expressions")
++
++  PASS_EQUAL(keyPaths([comparison leftExpressions]),
++    ([NSArray arrayWithObjects: @"name", @"address", @"sign", nil]),
++    "a comparison template's left expressions are its first menu's objects")
++  PASS_EQUAL([comparison operators], numbers(5,
++    NSContainsPredicateOperatorType, NSBeginsWithPredicateOperatorType,
++    NSEndsWithPredicateOperatorType, NSEqualToPredicateOperatorType,
++    NSNotEqualToPredicateOperatorType),
++    "its operators are its second menu's objects")
++  PASS([comparison rightExpressionAttributeType] == NSStringAttributeType,
++    "the right expression object is the type of what is typed in")
++  PASS([comparison rightExpressions] == nil, "there is nothing to choose from")
++  PASS([[comparison templateViews] count] == 3
++    && [[[comparison templateViews] objectAtIndex: 2]
++	 isKindOfClass: [NSTextField class]],
++    "a field is made to type it in")
++  PASS_EQUAL([[[comparison templateViews] objectAtIndex: 1] itemTitles],
++    ([NSArray arrayWithObjects: @"contains", @"begins with", @"ends with",
++      @"is", @"is not", nil]),
++    "the operators show the titles of their menu")
++
++  [editor setObjectValue:
++    [NSPredicate predicateWithFormat: @"name CONTAINS 'a' OR sign == 'b'"]];
++  PASS([editor numberOfRows] == 3, "the editor shows a predicate")
++  PASS_EQUAL([[editor displayValuesForRow: 0] objectAtIndex: 0], @"Any",
++    "in the titles of the xib")
++  PASS_EQUAL([[editor predicate] predicateFormat],
++    [[NSPredicate predicateWithFormat: @"name CONTAINS 'a' OR sign == 'b'"]
++      predicateFormat],
++    "and reads it back")
++
++  editor = editorAt(rootObjects, 200);
++  PASS(editor != nil, "the other predicate editor was found")
++  PASS([editor nestingMode] == NSRuleEditorNestingModeList,
++    "nestingMode list is list nesting")
++  PASS([editor rowHeight] == 32.0, "no rowHeight is the usual height")
++  PASS(![editor canRemoveAllRows], "no canRemoveAllRows keeps a row")
++  comparison = [[editor rowTemplates] objectAtIndex: 0];
++  PASS([comparison rightExpressionAttributeType] == NSInteger32AttributeType,
++    "an integer right expression object is that type")
++  PASS_EQUAL([comparison operators], numbers(1, NSLessThanPredicateOperatorType),
++    "an operator of value 0 is less than")
++
++  END_SET("GSXib5KeyedUnarchiver NSPredicateEditor tests")
++  return 0;
++}
+diff --git a/Tests/gui/NSPredicateEditor/criteria.m b/Tests/gui/NSPredicateEditor/criteria.m
+new file mode 100644
+index 000000000..13a011874
+--- /dev/null
++++ b/Tests/gui/NSPredicateEditor/criteria.m
+@@ -0,0 +1,357 @@
++#include "Testing.h"
++
++#include <Foundation/NSArray.h>
++#include <Foundation/NSAutoreleasePool.h>
++#include <Foundation/NSExpression.h>
++#include <Foundation/NSNotification.h>
++#include <Foundation/NSPredicate.h>
++#include <Foundation/NSString.h>
++#include <Foundation/NSValue.h>
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSButton.h>
++#include <AppKit/NSPopUpButton.h>
++#include <AppKit/NSPredicateEditor.h>
++#include <AppKit/NSPredicateEditorRowTemplate.h>
++#include <AppKit/NSTextField.h>
++
++/* What is checked here is what OS X 15 does with the same templates and
++ * the same steps.
++ */
++
++@interface Target : NSObject
++{
++@public
++  int fired;
++}
++- (void) changed: (id)sender;
++@end
++
++@implementation Target
++- (void) changed: (id)sender
++{
++  fired++;
++}
++@end
++
++static void
++collect(NSView *view, Class class, NSMutableArray *found)
++{
++  NSEnumerator *e = [[view subviews] objectEnumerator];
++  NSView *sub;
++
++  if ([view isKindOfClass: class])
++    {
++      [found addObject: view];
++    }
++  while ((sub = [e nextObject]) != nil)
++    {
++      collect(sub, class, found);
++    }
++}
++
++/* The pop-up of the row, at the place of the row, that offers the title. */
++static NSPopUpButton *
++popUpOffering(NSPredicateEditor *editor, NSInteger row, NSString *title)
++{
++  NSMutableArray *found = [NSMutableArray array];
++  NSEnumerator *e;
++  NSPopUpButton *popUp;
++
++  collect(editor, [NSPopUpButton class], found);
++  e = [found objectEnumerator];
++  while ((popUp = [e nextObject]) != nil)
++    {
++      NSRect frame = [popUp convertRect: [popUp bounds] toView: editor];
++
++      if ([popUp indexOfItemWithTitle: title] >= 0
++        && NSMinY(frame) >= row * [editor rowHeight]
++        && NSMinY(frame) < (row + 1) * [editor rowHeight])
++        {
++          return popUp;
++        }
++    }
++  return nil;
++}
++
++static NSButton *
++buttonOfRow(NSPredicateEditor *editor, NSInteger row, BOOL add)
++{
++  NSMutableArray *found = [NSMutableArray array];
++  NSEnumerator *e;
++  NSButton *button;
++
++  collect(editor, [NSButton class], found);
++  e = [found objectEnumerator];
++  while ((button = [e nextObject]) != nil)
++    {
++      NSRect frame = [button convertRect: [button bounds] toView: editor];
++
++      if (![button isKindOfClass: [NSPopUpButton class]]
++        && [button action] != NULL
++        && NSMinY(frame) >= row * [editor rowHeight]
++        && NSMinY(frame) < (row + 1) * [editor rowHeight]
++        && ([NSStringFromSelector([button action]) rangeOfString:
++              add ? @"add" : @"remove"].location != NSNotFound))
++        {
++          return button;
++        }
++    }
++  return nil;
++}
++
++static void
++choose(NSPopUpButton *popUp, NSString *title)
++{
++  [popUp selectItemWithTitle: title];
++  [popUp sendAction: [popUp action] to: [popUp target]];
++}
++
++static NSString *
++format(NSString *string)
++{
++  return [[NSPredicate predicateWithFormat: string] predicateFormat];
++}
++
++int
++main(int argc, char **argv)
++{
++  NSAutoreleasePool *pool = [NSAutoreleasePool new];
++  NSPredicateEditor *editor;
++  NSPredicateEditorRowTemplate *strings;
++  NSPredicateEditorRowTemplate *others;
++  NSPredicateEditorRowTemplate *numbers;
++  NSPredicateEditorRowTemplate *compound;
++  NSPopUpButton *popUp;
++  NSTextField *field;
++  Target *target;
++
++  START_SET("NSPredicateEditor criteria")
++
++  NS_DURING
++    {
++      [NSApplication sharedApplication];
++    }
++  NS_HANDLER
++    {
++      if ([[localException name] isEqualToString:
++        NSInternalInconsistencyException])
++        SKIP("It looks like GNUstep backend is not yet installed")
++    }
++  NS_ENDHANDLER
++
++  strings = AUTORELEASE([[NSPredicateEditorRowTemplate alloc]
++    initWithLeftExpressions: ([NSArray arrayWithObjects:
++                               [NSExpression expressionForKeyPath: @"name"],
++                               [NSExpression expressionForKeyPath: @"nick"],
++                               nil])
++rightExpressionAttributeType: NSStringAttributeType
++                   modifier: NSDirectPredicateModifier
++                  operators: ([NSArray arrayWithObjects:
++                               [NSNumber numberWithUnsignedInteger:
++                                 NSEqualToPredicateOperatorType],
++                               [NSNumber numberWithUnsignedInteger:
++                                 NSContainsPredicateOperatorType], nil])
++                    options: NSCaseInsensitivePredicateOption]);
++  numbers = AUTORELEASE([[NSPredicateEditorRowTemplate alloc]
++    initWithLeftExpressions: [NSArray arrayWithObject:
++                               [NSExpression expressionForKeyPath: @"age"]]
++rightExpressionAttributeType: NSInteger32AttributeType
++                   modifier: NSDirectPredicateModifier
++                  operators: ([NSArray arrayWithObjects:
++                               [NSNumber numberWithUnsignedInteger:
++                                 NSLessThanPredicateOperatorType],
++                               [NSNumber numberWithUnsignedInteger:
++                                 NSEqualToPredicateOperatorType], nil])
++                    options: 0]);
++  compound = AUTORELEASE([[NSPredicateEditorRowTemplate alloc]
++    initWithCompoundTypes: ([NSArray arrayWithObjects:
++      [NSNumber numberWithUnsignedInteger: NSAndPredicateType],
++      [NSNumber numberWithUnsignedInteger: NSOrPredicateType],
++      [NSNumber numberWithUnsignedInteger: NSNotPredicateType], nil])]);
++
++  editor = AUTORELEASE([[NSPredicateEditor alloc]
++    initWithFrame: NSMakeRect(0.0, 0.0, 700.0, 400.0)]);
++  [editor setRowTemplates:
++    [NSArray arrayWithObjects: compound, strings, numbers, nil]];
++  target = AUTORELEASE([[Target alloc] init]);
++  [editor setTarget: target];
++  [editor setAction: @selector(changed:)];
++
++  PASS([editor isFlipped], "a predicate editor is flipped");
++  PASS([editor delegate] == nil, "a predicate editor has no delegate");
++
++  [editor setObjectValue:
++    [NSPredicate predicateWithFormat: @"name ==[c] 'Ada' AND age < 3"]];
++  PASS(target->fired == 0, "setting a predicate does not send the action");
++  PASS([editor numberOfRows] == 3, "the predicate takes three rows");
++  PASS(NSHeight([editor frame]) == 3 * [editor rowHeight],
++       "the editor is as tall as its rows");
++  PASS_EQUAL([editor displayValuesForRow: 0],
++             ([NSArray arrayWithObjects: @"All",
++                @"of the following are true", nil]),
++             "a compound row shows the titles of its criteria");
++  PASS_EQUAL([[editor displayValuesForRow: 1] subarrayWithRange:
++               NSMakeRange(0, 2)],
++             ([NSArray arrayWithObjects: @"name", @"is", nil]),
++             "a comparison row shows the titles of its criteria");
++  field = [[editor displayValuesForRow: 1] objectAtIndex: 2];
++  PASS([field isKindOfClass: [NSTextField class]]
++       && [[field stringValue] isEqual: @"Ada"],
++       "and the field its value is typed in");
++  PASS_EQUAL([[editor predicate] predicateFormat],
++             format(@"name ==[c] 'Ada' AND age < 3"),
++             "the predicate is read back");
++
++  popUp = popUpOffering(editor, 1, @"age");
++  PASS(popUp != nil && [[popUp itemTitles] isEqual:
++         ([NSArray arrayWithObjects: @"name", @"nick", @"age", nil])],
++       "the left pop-up offers the left expressions of every template");
++  PASS_EQUAL([popUp titleOfSelectedItem], @"name",
++             "and shows the one of the row");
++  popUp = popUpOffering(editor, 1, @"contains");
++  PASS(popUp != nil && [[popUp itemTitles] isEqual:
++         ([NSArray arrayWithObjects: @"is", @"contains", nil])],
++       "the operator pop-up offers the operators of the row's template");
++  popUp = popUpOffering(editor, 0, @"Any");
++  PASS(popUp != nil && [[popUp itemTitles] isEqual:
++         ([NSArray arrayWithObjects: @"All", @"Any", @"None", nil])],
++       "the compound pop-up offers the compound types");
++
++  /* Choosing a left expression of another template switches the row. */
++  choose(popUpOffering(editor, 1, @"age"), @"age");
++  PASS(target->fired == 1, "choosing a criterion sends the action");
++  PASS_EQUAL([[editor displayValuesForRow: 1] subarrayWithRange:
++               NSMakeRange(0, 2)],
++             ([NSArray arrayWithObjects: @"age", @"is", nil]),
++             "the row keeps the operator the other template has too");
++  PASS_EQUAL([[[editor displayValuesForRow: 1] objectAtIndex: 2] stringValue],
++             @"", "and an empty value");
++  PASS_EQUAL([[editor predicate] predicateFormat],
++             format(@"age == 0 AND age < 3"),
++             "the predicate follows the template the row switched to");
++
++  choose(popUpOffering(editor, 1, @"is less than"), @"is less than");
++  PASS(target->fired == 2, "choosing an operator sends the action");
++  PASS_EQUAL([[editor predicate] predicateFormat],
++             format(@"age < 0 AND age < 3"), "the operator is the one chosen");
++  choose(popUpOffering(editor, 1, @"is less than"), @"is");
++
++  /* Typing in a row. */
++  field = [[editor displayValuesForRow: 1] objectAtIndex: 2];
++  [field setStringValue: @"7"];
++  [[NSNotificationCenter defaultCenter]
++    postNotificationName: NSControlTextDidChangeNotification object: field];
++  PASS(target->fired == 4, "typing in a row sends the action");
++  PASS_EQUAL([[editor predicate] predicateFormat],
++             format(@"age == 7 AND age < 3"), "what is typed is the value");
++
++  choose(popUpOffering(editor, 0, @"Any"), @"Any");
++  PASS(target->fired == 5, "choosing a compound type sends the action");
++  PASS_EQUAL([[editor predicate] predicateFormat],
++             format(@"age == 7 OR age < 3"), "the rows are joined by it");
++  choose(popUpOffering(editor, 0, @"Any"), @"All");
++
++  /* The buttons. */
++  PASS(buttonOfRow(editor, 0, YES) != nil && buttonOfRow(editor, 0, NO) != nil,
++       "a row has a button to add a row and one to remove it");
++  [buttonOfRow(editor, 0, YES) performClick: nil];
++  PASS(target->fired == 7, "adding a row sends the action");
++  PASS([editor numberOfRows] == 4
++       && [editor parentRowForRow: 1] == 0,
++       "the plus of a compound row adds a row beneath it");
++  PASS_EQUAL([[editor predicate] predicateFormat],
++             ([[NSPredicate predicateWithFormat: @"name ==[c] %@ AND age == 7 AND age < 3", @""] predicateFormat]),
++             "as its first, made of the first criteria");
++
++  [buttonOfRow(editor, 2, YES) performClick: nil];
++  PASS([editor numberOfRows] == 5 && [editor parentRowForRow: 3] == 0,
++       "the plus of a simple row adds one after it");
++  PASS_EQUAL([[editor predicate] predicateFormat],
++             ([[NSPredicate predicateWithFormat:
++               @"name ==[c] %@ AND age == 7 AND name ==[c] %@ AND age < 3",
++               @"", @""] predicateFormat]),
++             "alongside it");
++
++  [buttonOfRow(editor, 3, NO) performClick: nil];
++  [buttonOfRow(editor, 1, NO) performClick: nil];
++  PASS([editor numberOfRows] == 3, "the minus removes its row");
++  PASS_EQUAL([[editor predicate] predicateFormat],
++             format(@"age == 7 AND age < 3"),
++             "and the rest stays as it was");
++  PASS(NSHeight([editor frame]) == 3 * [editor rowHeight],
++       "the editor is as tall as its rows again");
++
++  [buttonOfRow(editor, 0, NO) performClick: nil];
++  PASS([editor numberOfRows] == 0 && [editor predicate] == nil,
++       "the minus of the compound row removes it with its rows");
++  PASS(NSHeight([editor frame]) == 0.0, "an empty editor has no height");
++
++  [editor setObjectValue: [NSPredicate predicateWithFormat: @"name == 'x'"]];
++  [editor setCanRemoveAllRows: NO];
++  PASS(![buttonOfRow(editor, 0, NO) isEnabled],
++       "the last row cannot be removed when all rows may not be");
++  [editor setCanRemoveAllRows: YES];
++  PASS([buttonOfRow(editor, 0, NO) isEnabled],
++       "and can when they may");
++
++  /* Templates with the same left expression share it. */
++  others = AUTORELEASE([[NSPredicateEditorRowTemplate alloc]
++    initWithLeftExpressions: [NSArray arrayWithObject:
++                               [NSExpression expressionForKeyPath: @"name"]]
++rightExpressionAttributeType: NSStringAttributeType
++                   modifier: NSDirectPredicateModifier
++                  operators: ([NSArray arrayWithObjects:
++                               [NSNumber numberWithUnsignedInteger:
++                                 NSBeginsWithPredicateOperatorType],
++                               [NSNumber numberWithUnsignedInteger:
++                                 NSEqualToPredicateOperatorType], nil])
++                    options: 0]);
++  [editor setRowTemplates:
++    [NSArray arrayWithObjects: compound, strings, others, nil]];
++  PASS([editor numberOfRows] == 1, "new templates keep the rows");
++  PASS_EQUAL([[editor predicate] predicateFormat], format(@"name ==[c] 'x'"),
++             "that they can show, as the template shows them");
++  [editor setObjectValue: [NSPredicate predicateWithFormat:
++    @"name ==[c] 'Ada' AND name BEGINSWITH 'B'"]];
++  popUp = popUpOffering(editor, 1, @"begins with");
++  PASS(popUp != nil && [[popUp itemTitles] isEqual:
++         ([NSArray arrayWithObjects: @"is", @"contains", @"begins with", nil])],
++       "the operators of templates sharing a left expression are offered together");
++  choose(popUp, @"begins with");
++  PASS_EQUAL([[editor predicate] predicateFormat],
++             ([[NSPredicate predicateWithFormat:
++               @"name BEGINSWITH %@ AND name BEGINSWITH 'B'", @""] predicateFormat]),
++             "an operator of the other template switches the row to it");
++
++  /* What no template can show. */
++  PASS_EXCEPTION([editor setObjectValue:
++                   [NSPredicate predicateWithFormat: @"weight > 3"]],
++                 NSInvalidArgumentException,
++                 "a predicate no template can show is refused");
++  PASS([editor numberOfRows] == 3, "and the rows stay as they were");
++
++  [editor setObjectValue: [NSPredicate predicateWithFormat: @"nick == 'x'"]];
++  PASS([editor numberOfRows] == 1
++       && [editor rowTypeForRow: 0] == NSRuleEditorRowTypeSimple,
++       "a comparison alone takes one simple row");
++
++  [editor setObjectValue: [NSPredicate predicateWithFormat:
++    @"NOT (name == 'a' OR nick CONTAINS[c] 'x')"]];
++  PASS([editor numberOfRows] == 4, "a not of an or takes four rows");
++  PASS_EQUAL([[editor displayValuesForRow: 0] objectAtIndex: 0], @"None",
++             "the not is shown as none");
++  PASS_EQUAL([[editor predicate] predicateFormat],
++             format(@"NOT (name == 'a' OR nick CONTAINS[c] 'x')"),
++             "and it is read back");
++
++  [editor setObjectValue: nil];
++  [editor addRow: nil];
++  PASS([editor numberOfRows] == 2, "adding to an empty editor adds two rows");
++  PASS_EQUAL([[editor predicate] predicateFormat], ([[NSPredicate predicateWithFormat: @"name ==[c] %@", @""] predicateFormat]),
++             "a compound row with one row is that row");
++
++  END_SET("NSPredicateEditor criteria")
++
++  [pool release];
++  return 0;
++}
+diff --git a/Tests/gui/NSPredicateEditorRowTemplate/keyPaths.m b/Tests/gui/NSPredicateEditorRowTemplate/keyPaths.m
+new file mode 100644
+index 000000000..d7540562d
+--- /dev/null
++++ b/Tests/gui/NSPredicateEditorRowTemplate/keyPaths.m
+@@ -0,0 +1,309 @@
++#include "Testing.h"
++
++#include <Foundation/NSArray.h>
++#include <Foundation/NSAutoreleasePool.h>
++#include <Foundation/NSDictionary.h>
++#include <Foundation/NSExpression.h>
++#include <Foundation/NSKeyedArchiver.h>
++#include <Foundation/NSPredicate.h>
++#include <Foundation/NSString.h>
++#include <Foundation/NSValue.h>
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSDatePicker.h>
++#include <AppKit/NSMenuItem.h>
++#include <AppKit/NSPopUpButton.h>
++#include <AppKit/NSPredicateEditorRowTemplate.h>
++#include <AppKit/NSTextField.h>
++
++/* What is checked here is what OS X 15 does: CoreData's entity and
++ * attribute descriptions are stood in for by objects that answer the same
++ * messages, since GNUstep has no CoreData of its own.
++ */
++
++@interface Attribute : NSObject
++{
++  NSAttributeType type;
++}
+++ (id) attributeOfType: (NSAttributeType)aType;
++- (NSAttributeType) attributeType;
++@end
++
++@implementation Attribute
+++ (id) attributeOfType: (NSAttributeType)aType
++{
++  Attribute *a = AUTORELEASE([[self alloc] init]);
++
++  a->type = aType;
++  return a;
++}
++- (NSAttributeType) attributeType
++{
++  return type;
++}
++@end
++
++@interface Entity : NSObject
++{
++@public
++  NSDictionary *attributes;
++  NSDictionary *relationships;
++}
++- (NSDictionary *) attributesByName;
++- (NSDictionary *) relationshipsByName;
++- (NSString *) name;
++@end
++
++@implementation Entity
++- (NSDictionary *) attributesByName
++{
++  return attributes;
++}
++- (NSDictionary *) relationshipsByName
++{
++  return relationships;
++}
++- (NSString *) name
++{
++  return @"Person";
++}
++@end
++
++@interface Relationship : NSObject
++{
++@public
++  Entity *destination;
++}
++- (id) destinationEntity;
++@end
++
++@implementation Relationship
++- (id) destinationEntity
++{
++  return destination;
++}
++@end
++
++static NSArray *
++operators(NSPredicateOperatorType *types, NSUInteger count)
++{
++  NSMutableArray *a = [NSMutableArray array];
++  NSUInteger i;
++
++  for (i = 0; i < count; i++)
++    {
++      [a addObject: [NSNumber numberWithUnsignedInteger: types[i]]];
++    }
++  return a;
++}
++
++static NSArray *
++representedObjects(NSPopUpButton *popUp)
++{
++  NSMutableArray *a = [NSMutableArray array];
++  NSInteger i;
++
++  for (i = 0; i < [popUp numberOfItems]; i++)
++    {
++      id o = [[popUp itemAtIndex: i] representedObject];
++
++      if (o != nil)
++        {
++          [a addObject: o];
++        }
++    }
++  return a;
++}
++
++int
++main(int argc, char **argv)
++{
++  NSAutoreleasePool *pool = [NSAutoreleasePool new];
++  NSPredicateOperatorType ordered[] = {
++    NSEqualToPredicateOperatorType, NSNotEqualToPredicateOperatorType,
++    NSLessThanPredicateOperatorType, NSGreaterThanPredicateOperatorType,
++    NSLessThanOrEqualToPredicateOperatorType,
++    NSGreaterThanOrEqualToPredicateOperatorType };
++  NSPredicateOperatorType strings[] = {
++    NSContainsPredicateOperatorType, NSEqualToPredicateOperatorType,
++    NSNotEqualToPredicateOperatorType, NSBeginsWithPredicateOperatorType,
++    NSEndsWithPredicateOperatorType };
++  Entity *person;
++  Entity *place;
++  Relationship *home;
++  NSArray *templates;
++  NSPredicateEditorRowTemplate *template;
++  NSPredicateEditorRowTemplate *compound;
++  NSPredicate *a;
++  NSPredicate *b;
++
++  START_SET("NSPredicateEditorRowTemplate key paths")
++
++  NS_DURING
++    {
++      [NSApplication sharedApplication];
++    }
++  NS_HANDLER
++    {
++      if ([[localException name] isEqualToString:
++        NSInternalInconsistencyException])
++        SKIP("It looks like GNUstep backend is not yet installed")
++    }
++  NS_ENDHANDLER
++
++  place = AUTORELEASE([[Entity alloc] init]);
++  place->attributes = [[NSDictionary alloc] initWithObjectsAndKeys:
++    [Attribute attributeOfType: NSStringAttributeType], @"city", nil];
++  home = AUTORELEASE([[Relationship alloc] init]);
++  home->destination = place;
++  person = AUTORELEASE([[Entity alloc] init]);
++  person->attributes = [[NSDictionary alloc] initWithObjectsAndKeys:
++    [Attribute attributeOfType: NSStringAttributeType], @"name",
++    [Attribute attributeOfType: NSInteger16AttributeType], @"age",
++    [Attribute attributeOfType: NSDoubleAttributeType], @"weight",
++    [Attribute attributeOfType: NSBooleanAttributeType], @"flag",
++    [Attribute attributeOfType: NSDateAttributeType], @"born",
++    [Attribute attributeOfType: NSBinaryDataAttributeType], @"blob", nil];
++  person->relationships = [[NSDictionary alloc] initWithObjectsAndKeys:
++    home, @"home", nil];
++
++  templates = [NSPredicateEditorRowTemplate
++    templatesWithAttributeKeyPaths: ([NSArray arrayWithObjects: @"name",
++      @"age", @"weight", @"flag", @"born", @"home.city", nil])
++               inEntityDescription: (NSEntityDescription *)person];
++  PASS([templates count] == 6, "there is a template for each key path");
++
++  template = [templates objectAtIndex: 0];
++  PASS_EQUAL([template leftExpressions],
++             [NSArray arrayWithObject: [NSExpression expressionForKeyPath: @"name"]],
++             "a template's left expression is its key path");
++  PASS_EQUAL([template operators], operators(strings, 5),
++             "a string is offered contains, is, is not, begins and ends with");
++  PASS([template rightExpressionAttributeType] == NSStringAttributeType
++       && [template options] == 0
++       && [template modifier] == NSDirectPredicateModifier,
++       "with the type of the attribute, no options, and no modifier");
++  PASS([[[template templateViews] objectAtIndex: 2]
++         isKindOfClass: [NSTextField class]],
++       "and a field to type the value in");
++
++  PASS_EQUAL([[templates objectAtIndex: 1] operators], operators(ordered, 6),
++             "an integer is offered the six orderings");
++  PASS_EQUAL([[templates objectAtIndex: 2] operators], operators(ordered, 6),
++             "so is a double");
++  PASS_EQUAL([[templates objectAtIndex: 3] operators], operators(ordered, 2),
++             "a boolean is offered is and is not");
++  PASS([[[[templates objectAtIndex: 3] templateViews] objectAtIndex: 2]
++         isKindOfClass: [NSTextField class]],
++       "with a field to type it in");
++  PASS_EQUAL([[templates objectAtIndex: 4] operators], operators(ordered, 6),
++             "a date is offered the six orderings");
++  PASS([[[[templates objectAtIndex: 4] templateViews] objectAtIndex: 2]
++         isKindOfClass: [NSDatePicker class]],
++       "with a date picker");
++  PASS([[templates objectAtIndex: 5] rightExpressionAttributeType]
++         == NSStringAttributeType,
++       "a key path through a relationship ends at its attribute");
++
++  PASS_EXCEPTION([NSPredicateEditorRowTemplate
++                   templatesWithAttributeKeyPaths: [NSArray arrayWithObject: @"blob"]
++                              inEntityDescription: (NSEntityDescription *)person],
++                 NSInvalidArgumentException,
++                 "there are no operators for binary data");
++  PASS_EXCEPTION([NSPredicateEditorRowTemplate
++                   templatesWithAttributeKeyPaths: [NSArray arrayWithObject: @"missing"]
++                              inEntityDescription: (NSEntityDescription *)person],
++                 NSInvalidArgumentException,
++                 "a key the entity has no attribute for is refused");
++
++  /* The items of the pop-ups stand for what they offer. */
++  template = [templates objectAtIndex: 0];
++  PASS_EQUAL(representedObjects([[template templateViews] objectAtIndex: 0]),
++             [template leftExpressions],
++             "the items of the left pop-up stand for the left expressions");
++  PASS_EQUAL(representedObjects([[template templateViews] objectAtIndex: 1]),
++             [template operators],
++             "those of the operator pop-up for the operators");
++
++  /* Compound rows. */
++  compound = AUTORELEASE([[NSPredicateEditorRowTemplate alloc]
++    initWithCompoundTypes: ([NSArray arrayWithObjects:
++      [NSNumber numberWithUnsignedInteger: NSAndPredicateType],
++      [NSNumber numberWithUnsignedInteger: NSOrPredicateType],
++      [NSNumber numberWithUnsignedInteger: NSNotPredicateType], nil])]);
++  PASS_EQUAL(representedObjects([[compound templateViews] objectAtIndex: 0]),
++             [compound compoundTypes],
++             "the items of the compound pop-up stand for the compound types");
++  a = [NSPredicate predicateWithFormat: @"a == 1"];
++  b = [NSPredicate predicateWithFormat: @"b == 2"];
++  PASS_EQUAL([[compound predicateWithSubpredicates: [NSArray arrayWithObject: a]]
++               predicateFormat], [a predicateFormat],
++             "all of one row is that row");
++  PASS_EQUAL([[compound predicateWithSubpredicates: [NSArray array]]
++               predicateFormat], @"TRUEPREDICATE",
++             "all of no rows holds for anything");
++  [compound setPredicate: [NSCompoundPredicate notPredicateWithSubpredicate: a]];
++  PASS_EQUAL([[compound predicateWithSubpredicates: [NSArray arrayWithObject: a]]
++               predicateFormat],
++             [[NSPredicate predicateWithFormat: @"NOT a == 1"] predicateFormat],
++             "none of one row is not that row");
++  PASS_EQUAL([[compound predicateWithSubpredicates:
++                 ([NSArray arrayWithObjects: a, b, nil])] predicateFormat],
++             [[NSPredicate predicateWithFormat: @"NOT (a == 1 OR b == 2)"]
++               predicateFormat],
++             "none of several rows is not any of them");
++
++  /* Keyed archives keep a template as its views, as OS X does. */
++  {
++    NSPredicateEditorRowTemplate *choices;
++    NSPredicateEditorRowTemplate *back;
++    NSData *data;
++
++    template = AUTORELEASE([[NSPredicateEditorRowTemplate alloc]
++      initWithLeftExpressions: ([NSArray arrayWithObjects:
++                                 [NSExpression expressionForKeyPath: @"name"],
++                                 [NSExpression expressionForKeyPath: @"nick"],
++                                 nil])
++  rightExpressionAttributeType: NSStringAttributeType
++                     modifier: NSAnyPredicateModifier
++                    operators: operators(strings, 2)
++                      options: NSCaseInsensitivePredicateOption]);
++    data = [NSKeyedArchiver archivedDataWithRootObject: template];
++    back = [NSKeyedUnarchiver unarchiveObjectWithData: data];
++    PASS_EQUAL([back leftExpressions], [template leftExpressions],
++               "an archived template keeps its left expressions");
++    PASS_EQUAL([back operators], [template operators],
++               "its operators");
++    PASS([back rightExpressionAttributeType] == NSStringAttributeType
++         && [back rightExpressions] == nil,
++         "the type of what is typed in");
++    PASS([back options] == NSCaseInsensitivePredicateOption
++         && [back modifier] == NSAnyPredicateModifier,
++         "its options and its modifier");
++    PASS([[back templateViews] count] == 3, "and its views");
++
++    choices = AUTORELEASE([[NSPredicateEditorRowTemplate alloc]
++      initWithLeftExpressions: [NSArray arrayWithObject:
++                                 [NSExpression expressionForKeyPath: @"kind"]]
++             rightExpressions: ([NSArray arrayWithObjects:
++                                 [NSExpression expressionForConstantValue: @"a"],
++                                 [NSExpression expressionForConstantValue: @"b"],
++                                 nil])
++                     modifier: NSDirectPredicateModifier
++                    operators: operators(ordered, 1)
++                      options: 0]);
++    back = [NSKeyedUnarchiver unarchiveObjectWithData:
++      [NSKeyedArchiver archivedDataWithRootObject: choices]];
++    PASS_EQUAL([back rightExpressions], [choices rightExpressions],
++               "an archived template keeps the expressions to choose from");
++
++    back = [NSKeyedUnarchiver unarchiveObjectWithData:
++      [NSKeyedArchiver archivedDataWithRootObject: compound]];
++    PASS_EQUAL([back compoundTypes], [compound compoundTypes],
++               "an archived compound template keeps its compound types");
++  }
++
++  END_SET("NSPredicateEditorRowTemplate key paths")
++
++  [pool release];
++  return 0;
++}
+diff --git a/Tests/gui/NSRuleEditor/rows.m b/Tests/gui/NSRuleEditor/rows.m
+new file mode 100644
+index 000000000..91eb2f007
+--- /dev/null
++++ b/Tests/gui/NSRuleEditor/rows.m
+@@ -0,0 +1,320 @@
++#include "Testing.h"
++
++#include <Foundation/NSArray.h>
++#include <Foundation/NSAutoreleasePool.h>
++#include <Foundation/NSDictionary.h>
++#include <Foundation/NSKeyedArchiver.h>
++#include <Foundation/NSString.h>
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSButton.h>
++#include <AppKit/NSPopUpButton.h>
++#include <AppKit/NSRuleEditor.h>
++#include <AppKit/NSTextField.h>
++
++/* A rule editor shows each criterion of a row as OS X does: a pop-up of the
++ * criterion and its brothers when it has any, a label when it has none, and
++ * the view the delegate gives, as it is.
++ */
++
++@interface Tree : NSObject
++{
++@public
++  NSDictionary *children;
++  int fired;
++}
++@end
++
++@implementation Tree
++
++- (id) init
++{
++  if ((self = [super init]) != nil)
++    {
++      children = [[NSDictionary alloc] initWithObjectsAndKeys:
++        [NSArray arrayWithObjects: @"name", @"age", nil], @"",
++        [NSArray arrayWithObjects: @"is", @"contains", nil], @"name",
++        [NSArray arrayWithObjects: @"is", nil], @"age",
++        [NSArray arrayWithObjects: @"value", nil], @"is",
++        [NSArray arrayWithObjects: @"value", nil], @"contains",
++        [NSArray arrayWithObjects: @"All", @"Any", nil], @"compound",
++        [NSArray arrayWithObjects: @"of these", nil], @"All",
++        [NSArray arrayWithObjects: @"of these", nil], @"Any",
++        nil];
++    }
++  return self;
++}
++
++- (void) dealloc
++{
++  RELEASE(children);
++  [super dealloc];
++}
++
++- (NSArray *) childrenOf: (id)criterion type: (NSRuleEditorRowType)type
++{
++  if (criterion == nil)
++    {
++      criterion = (type == NSRuleEditorRowTypeCompound ? @"compound" : @"");
++    }
++  return [children objectForKey: criterion];
++}
++
++- (NSInteger) ruleEditor: (NSRuleEditor *)editor
++numberOfChildrenForCriterion: (id)criterion
++             withRowType: (NSRuleEditorRowType)type
++{
++  return [[self childrenOf: criterion type: type] count];
++}
++
++- (id) ruleEditor: (NSRuleEditor *)editor
++            child: (NSInteger)index
++     forCriterion: (id)criterion
++      withRowType: (NSRuleEditorRowType)type
++{
++  return [[self childrenOf: criterion type: type] objectAtIndex: index];
++}
++
++- (id) ruleEditor: (NSRuleEditor *)editor
++displayValueForCriterion: (id)criterion
++            inRow: (NSInteger)row
++{
++  if ([criterion isEqual: @"value"])
++    {
++      return AUTORELEASE([[NSTextField alloc]
++        initWithFrame: NSMakeRect(0.0, 0.0, 80.0, 22.0)]);
++    }
++  return criterion;
++}
++
++- (void) changed: (id)sender
++{
++  fired++;
++}
++
++@end
++
++static void
++collect(NSView *view, Class class, NSMutableArray *found)
++{
++  NSEnumerator *e = [[view subviews] objectEnumerator];
++  NSView *sub;
++
++  if ([view isKindOfClass: class])
++    {
++      [found addObject: view];
++    }
++  while ((sub = [e nextObject]) != nil)
++    {
++      collect(sub, class, found);
++    }
++}
++
++/* The views of the row, as they are laid out from the left. */
++static NSArray *
++viewsOfRow(NSRuleEditor *editor, NSInteger row, Class class)
++{
++  NSMutableArray *found = [NSMutableArray array];
++  NSMutableArray *inRow = [NSMutableArray array];
++  NSEnumerator *e;
++  NSView *view;
++
++  collect(editor, class, found);
++  e = [found objectEnumerator];
++  while ((view = [e nextObject]) != nil)
++    {
++      NSRect frame = [view convertRect: [view bounds] toView: editor];
++
++      if (NSMinY(frame) >= row * [editor rowHeight]
++        && NSMinY(frame) < (row + 1) * [editor rowHeight])
++        {
++          NSUInteger i = 0;
++
++          while (i < [inRow count]
++            && NSMinX([[inRow objectAtIndex: i] frame]) < NSMinX([view frame]))
++            {
++              i++;
++            }
++          [inRow insertObject: view atIndex: i];
++        }
++    }
++  return inRow;
++}
++
++static NSButton *
++button(NSRuleEditor *editor, NSInteger row, NSString *name)
++{
++  NSEnumerator *e = [viewsOfRow(editor, row, [NSButton class]) objectEnumerator];
++  NSButton *b;
++
++  while ((b = [e nextObject]) != nil)
++    {
++      if (![b isKindOfClass: [NSPopUpButton class]]
++        && [NSStringFromSelector([b action]) rangeOfString: name].location
++          != NSNotFound)
++        {
++          return b;
++        }
++    }
++  return nil;
++}
++
++int
++main(int argc, char **argv)
++{
++  NSAutoreleasePool *pool = [NSAutoreleasePool new];
++  NSRuleEditor *editor;
++  NSArray *views;
++  NSPopUpButton *popUp;
++  Tree *tree;
++
++  START_SET("NSRuleEditor rows")
++
++  NS_DURING
++    {
++      [NSApplication sharedApplication];
++    }
++  NS_HANDLER
++    {
++      if ([[localException name] isEqualToString:
++        NSInternalInconsistencyException])
++        SKIP("It looks like GNUstep backend is not yet installed")
++    }
++  NS_ENDHANDLER
++
++  tree = AUTORELEASE([[Tree alloc] init]);
++  editor = AUTORELEASE([[NSRuleEditor alloc]
++    initWithFrame: NSMakeRect(0.0, 0.0, 500.0, 300.0)]);
++  [editor setDelegate: tree];
++  [editor setTarget: tree];
++  [editor setAction: @selector(changed:)];
++
++  PASS([editor isFlipped], "a rule editor is flipped");
++
++  [editor addRow: nil];
++  PASS(tree->fired == 0, "adding a row from code does not send the action");
++  PASS(NSHeight([editor frame]) == 2 * [editor rowHeight],
++       "the editor is as tall as its rows");
++
++  views = viewsOfRow(editor, 0, [NSView class]);
++  popUp = nil;
++  {
++    NSEnumerator *e = [views objectEnumerator];
++    id v;
++
++    while ((v = [e nextObject]) != nil)
++      {
++        if ([v isKindOfClass: [NSPopUpButton class]])
++          {
++            popUp = v;
++            break;
++          }
++      }
++  }
++  PASS(popUp != nil && [[popUp itemTitles] isEqual:
++         ([NSArray arrayWithObjects: @"All", @"Any", nil])],
++       "a criterion with brothers is shown in a pop-up of them all");
++  {
++    NSArray *labels = viewsOfRow(editor, 0, [NSTextField class]);
++
++    PASS([labels count] == 1
++         && [[[labels objectAtIndex: 0] stringValue] isEqual: @"of these"]
++         && ![[labels objectAtIndex: 0] isEditable],
++         "a criterion with no brothers is shown as a label");
++  }
++
++  views = viewsOfRow(editor, 1, [NSPopUpButton class]);
++  PASS([views count] == 2
++       && [[[views objectAtIndex: 0] itemTitles] isEqual:
++         ([NSArray arrayWithObjects: @"name", @"age", nil])]
++       && [[[views objectAtIndex: 1] itemTitles] isEqual:
++         ([NSArray arrayWithObjects: @"is", @"contains", nil])],
++       "each level of a row has a pop-up of its own");
++  PASS([[[editor displayValuesForRow: 1] objectAtIndex: 2]
++         isKindOfClass: [NSTextField class]]
++       && [viewsOfRow(editor, 1, [NSTextField class]) containsObject:
++         [[editor displayValuesForRow: 1] objectAtIndex: 2]],
++       "a view the delegate gives is shown as it is");
++  PASS([viewsOfRow(editor, 1, [NSView class]) count] > 0
++       && NSMinX([[views objectAtIndex: 0] convertRect:
++         [[views objectAtIndex: 0] bounds] toView: editor])
++       > NSMinX([popUp convertRect: [popUp bounds] toView: editor]),
++       "a subrow is indented below the row it belongs to");
++
++  /* Choosing walks the row on from what was chosen. */
++  popUp = [viewsOfRow(editor, 1, [NSPopUpButton class]) objectAtIndex: 1];
++  [popUp selectItemWithTitle: @"contains"];
++  [popUp sendAction: [popUp action] to: [popUp target]];
++  PASS(tree->fired == 1, "choosing a criterion sends the action");
++  PASS_EQUAL([editor criteriaForRow: 1],
++             ([NSArray arrayWithObjects: @"name", @"contains", @"value", nil]),
++             "and gives the row what follows from it");
++
++  popUp = [viewsOfRow(editor, 1, [NSPopUpButton class]) objectAtIndex: 0];
++  [popUp selectItemWithTitle: @"age"];
++  [popUp sendAction: [popUp action] to: [popUp target]];
++  PASS_EQUAL([editor criteriaForRow: 1],
++             ([NSArray arrayWithObjects: @"age", @"is", @"value", nil]),
++             "a row takes the first of what it cannot keep");
++  views = viewsOfRow(editor, 1, [NSTextField class]);
++  PASS([views count] == 2,
++       "a lone criterion after a choice is shown as a label");
++
++  popUp = [viewsOfRow(editor, 1, [NSPopUpButton class]) objectAtIndex: 0];
++  [popUp selectItemWithTitle: @"name"];
++  [popUp sendAction: [popUp action] to: [popUp target]];
++  PASS_EQUAL([editor criteriaForRow: 1],
++             ([NSArray arrayWithObjects: @"name", @"is", @"value", nil]),
++             "and keeps what it can");
++
++  /* The buttons. */
++  [button(editor, 1, @"add") performClick: nil];
++  PASS([editor numberOfRows] == 3 && [editor parentRowForRow: 2] == 0,
++       "the plus of a simple row adds a row alongside it");
++  PASS(tree->fired == 4, "and sends the action");
++  [button(editor, 0, @"add") performClick: nil];
++  PASS([editor numberOfRows] == 4 && [editor parentRowForRow: 1] == 0
++       && [editor rowTypeForRow: 1] == NSRuleEditorRowTypeSimple,
++       "the plus of a compound row adds the first row beneath it");
++  [button(editor, 1, @"remove") performClick: nil];
++  PASS([editor numberOfRows] == 3, "the minus removes its row");
++  PASS(tree->fired == 6, "and sends the action");
++
++  [editor setCanRemoveAllRows: NO];
++  PASS(![button(editor, 0, @"remove") isEnabled],
++       "the last row at the top stays when all rows may not go");
++  PASS([button(editor, 1, @"remove") isEnabled],
++       "rows beneath it may still go");
++  [button(editor, 0, @"remove") performClick: nil];
++  PASS([editor numberOfRows] == 3, "a minus that is off removes nothing");
++  [editor setCanRemoveAllRows: YES];
++
++  [editor setEditable: NO];
++  PASS(button(editor, 0, @"add") == nil && button(editor, 0, @"remove") == nil,
++       "an editor that is not editable has no buttons");
++  PASS(![[viewsOfRow(editor, 1, [NSPopUpButton class]) objectAtIndex: 0]
++          isEnabled],
++       "and its pop-ups are off");
++  [editor setEditable: YES];
++
++  /* A keyed archive keeps the settings, as on OS X. */
++  {
++    NSRuleEditor *back;
++
++    [editor setNestingMode: NSRuleEditorNestingModeList];
++    [editor setRowHeight: 27.0];
++    [editor setCanRemoveAllRows: NO];
++    [editor setEditable: NO];
++    back = [NSKeyedUnarchiver unarchiveObjectWithData:
++      [NSKeyedArchiver archivedDataWithRootObject: editor]];
++    PASS([back nestingMode] == NSRuleEditorNestingModeList,
++         "an archived editor keeps its nesting mode");
++    PASS([back rowHeight] == 27.0, "its row height");
++    PASS(![back canRemoveAllRows] && ![back isEditable],
++         "and whether rows can go and it can be edited");
++  }
++
++  END_SET("NSRuleEditor rows")
++
++  [pool release];
++  return 0;
++}
+diff --git a/Tests/gui/NSRuleEditor/targetAction.m b/Tests/gui/NSRuleEditor/targetAction.m
+new file mode 100644
+index 000000000..6c9d9cf86
+--- /dev/null
++++ b/Tests/gui/NSRuleEditor/targetAction.m
+@@ -0,0 +1,102 @@
++/* A rule editor (and so a predicate editor) has a target and an action of
++   its own, as on macOS: setting them keeps them rather than handing them
++   to its cell, which raised; a xib connecting the editor's action to an
++   object could not be loaded.  Giving it a predicate does not send it. */
++#include "Testing.h"
++
++#include <Foundation/NSArray.h>
++#include <Foundation/NSAutoreleasePool.h>
++#include <Foundation/NSExpression.h>
++#include <Foundation/NSPredicate.h>
++#include <Foundation/NSValue.h>
++
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSPredicateEditor.h>
++#include <AppKit/NSPredicateEditorRowTemplate.h>
++#include <AppKit/NSRuleEditor.h>
++
++@interface Target : NSObject
++{
++@public
++  int fired;
++}
++- (void) changed: (id)sender;
++@end
++
++@implementation Target
++- (void) changed: (id)sender
++{
++  fired++;
++}
++@end
++
++int
++main(int argc, const char **argv)
++{
++  START_SET("NSRuleEditor target and action")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  NS_DURING
++    {
++      Target *target = AUTORELEASE([[Target alloc] init]);
++      NSRuleEditor *rules = AUTORELEASE([[NSRuleEditor alloc]
++        initWithFrame: NSMakeRect(0, 0, 400, 100)]);
++      NSPredicateEditor *editor = AUTORELEASE([[NSPredicateEditor alloc]
++        initWithFrame: NSMakeRect(0, 0, 400, 100)]);
++      NSPredicateEditorRowTemplate *template;
++      BOOL raised = NO;
++
++      NS_DURING
++        {
++          [rules setTarget: target];
++          [rules setAction: @selector(changed:)];
++        }
++      NS_HANDLER
++        raised = YES;
++      NS_ENDHANDLER
++      PASS(raised == NO, "a rule editor takes a target and an action");
++      PASS([rules target] == target, "and keeps its target");
++      PASS(sel_isEqual([rules action], @selector(changed:)), "and its action");
++
++      template = AUTORELEASE([[NSPredicateEditorRowTemplate alloc]
++        initWithLeftExpressions: [NSArray arrayWithObject:
++          [NSExpression expressionForKeyPath: @"name"]]
++        rightExpressionAttributeType: NSStringAttributeType
++                            modifier: NSDirectPredicateModifier
++                           operators: [NSArray arrayWithObject:
++          [NSNumber numberWithUnsignedInteger: NSEqualToPredicateOperatorType]]
++                             options: 0]);
++      [editor setRowTemplates: [NSArray arrayWithObject: template]];
++      raised = NO;
++      NS_DURING
++        {
++          [editor setTarget: target];
++          [editor setAction: @selector(changed:)];
++        }
++      NS_HANDLER
++        raised = YES;
++      NS_ENDHANDLER
++      PASS(raised == NO && [editor target] == target
++        && sel_isEqual([editor action], @selector(changed:)),
++        "so does a predicate editor");
++      [editor setObjectValue: [NSPredicate predicateWithFormat: @"name == 'Ada'"]];
++      PASS(target->fired == 0, "giving it a predicate does not send its action");
++      PASS([editor sendAction: [editor action] to: [editor target]]
++        && target->fired == 1, "its action is sent to its target");
++    }
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException]
++      || [[localException name] isEqualToString: @"NSWindowServerCommunicationException"])
++      SKIP("No display available")
++  NS_ENDHANDLER
++
++  END_SET("NSRuleEditor target and action")
++
++  return 0;
++}
+-- 
+2.43.0
+

@@ -1,0 +1,164 @@
+From cc84012858c27c69bc3ac8249f72117a9476e127 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Thu, 5 Nov 2026 14:57:35 +0000
+Subject: [PATCH] NSPredicate: a string constant's format is always a quoted
+ literal
+
+A constant expression wrote its string the way a property list writes
+one, quoting it only when a property list would need quotes: a single
+word came out bare, so name == 'Ada' described itself as name = Ada,
+whose Ada reads back as a key path, and a predicate passed around as its
+format (an archived fetch request, a predicate editor's text) no longer
+meant what it did.  A string with a space or a quote was quoted, so only
+some strings were affected.
+
+On macOS 15 a string constant is always written in double quotes, with
+its double quotes and backslashes escaped: name == "Ada",
+name == "say \"hi\"", name == "a\\b", name == "".
+
+So -description of a string constant writes it in double quotes, escaping
+double quotes, backslashes, newlines, returns and tabs.  The equality
+operator is still written =, which reads back the same.
+
+Tests/base/NSPredicate/stringConstantFormat.m checks the formats and that
+they read back as constants; it passes with the change, and without it 5
+of its 9 checks fail.  functionAndFetch.m expected the bare string, with
+a comment that OS X quotes it; it now expects the quotes.  The rest of
+the NSPredicate tests and of the base suite pass as before.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/NSPredicate.m                          | 25 +++++++-
+ Tests/base/NSPredicate/functionAndFetch.m     |  6 +-
+ Tests/base/NSPredicate/stringConstantFormat.m | 63 +++++++++++++++++++
+ 3 files changed, 87 insertions(+), 7 deletions(-)
+ create mode 100644 Tests/base/NSPredicate/stringConstantFormat.m
+
+diff --git a/Source/NSPredicate.m b/Source/NSPredicate.m
+index 5dbb60b..c61f72b 100644
+--- a/Source/NSPredicate.m
++++ b/Source/NSPredicate.m
+@@ -2462,11 +2462,30 @@ GSICUStringMatchesRegex(NSString *string, NSString *regex, NSStringCompareOption
+     }
+   if ([_obj isKindOfClass: [NSString class]])
+     {
+-      NSMutableString	*result = nil;
++      NSString		*string = (NSString *)_obj;
++      NSUInteger	length = [string length];
++      NSMutableString	*result;
++      NSUInteger	i;
+ 
+-      /* Quote the result string as necessary.
++      /* Always a quoted literal: a bare word would read back as a key path.
+        */
+-      GSPropertyListMake(_obj, nil, NO, YES, 2, &result);
++      result = [NSMutableString stringWithCapacity: length + 2];
++      [result appendString: @"\""];
++      for (i = 0; i < length; i++)
++	{
++	  unichar	c = [string characterAtIndex: i];
++
++	  switch (c)
++	    {
++	      case '"':  [result appendString: @"\\\""]; break;
++	      case '\\': [result appendString: @"\\\\"]; break;
++	      case '\n': [result appendString: @"\\n"]; break;
++	      case '\r': [result appendString: @"\\r"]; break;
++	      case '\t': [result appendString: @"\\t"]; break;
++	      default:   [result appendFormat: @"%C", c]; break;
++	    }
++	}
++      [result appendString: @"\""];
+       return result;
+     }
+   else if ([_obj isKindOfClass: [NSDate class]])
+diff --git a/Tests/base/NSPredicate/functionAndFetch.m b/Tests/base/NSPredicate/functionAndFetch.m
+index e38a611..0cc9bc1 100644
+--- a/Tests/base/NSPredicate/functionAndFetch.m
++++ b/Tests/base/NSPredicate/functionAndFetch.m
+@@ -113,11 +113,9 @@ int main(void)
+                              selectorName: @"shout:"
+                                 arguments: [NSArray arrayWithObject:
+                                   [NSExpression expressionForConstantValue: @"ada"]]];
+-  /* OS X writes a space before that comma, and prints a string constant in
+-   * quotes where this library prints it bare - the quoting is what every
+-   * constant here does, not this expression's doing.
++  /* OS X writes a space before that comma, and a string constant in quotes.
+    */
+-  PASS_EQUAL([e description], @"FUNCTION($stub, \"shout:\" , ada)",
++  PASS_EQUAL([e description], @"FUNCTION($stub, \"shout:\" , \"ada\")",
+     "it prints as OS X prints it");
+   e = [NSExpression expressionWithFormat: @"FUNCTION($stub, 'shout:', 'ada')"];
+   PASS([e expressionType] == NSFunctionExpressionType,
+diff --git a/Tests/base/NSPredicate/stringConstantFormat.m b/Tests/base/NSPredicate/stringConstantFormat.m
+new file mode 100644
+index 0000000..251e477
+--- /dev/null
++++ b/Tests/base/NSPredicate/stringConstantFormat.m
+@@ -0,0 +1,63 @@
++/* A string constant in a predicate's format is always a quoted literal, as
++   on macOS ("name == \"Ada\""): the format of a predicate has to read back
++   as the same predicate, and a bare word reads back as a key path.
++*/
++#import <Foundation/NSAutoreleasePool.h>
++#import <Foundation/NSComparisonPredicate.h>
++#import <Foundation/NSDictionary.h>
++#import <Foundation/NSExpression.h>
++#import <Foundation/NSPredicate.h>
++#import <Foundation/NSString.h>
++#import "ObjectTesting.h"
++
++static NSPredicate *
++equalTo(NSString *constant)
++{
++  return [NSComparisonPredicate
++    predicateWithLeftExpression: [NSExpression expressionForKeyPath: @"name"]
++                rightExpression: [NSExpression expressionForConstantValue: constant]
++                       modifier: NSDirectPredicateModifier
++                           type: NSEqualToPredicateOperatorType
++                        options: 0];
++}
++
++static BOOL
++readsBack(NSPredicate *p, NSString *name)
++{
++  NSPredicate *q = [NSPredicate predicateWithFormat: [p predicateFormat]];
++  NSDictionary *object = [NSDictionary dictionaryWithObject: name forKey: @"name"];
++
++  return [q evaluateWithObject: object] == [p evaluateWithObject: object]
++    && [q evaluateWithObject: object];
++}
++
++int
++main(int argc, char **argv)
++{
++  NSAutoreleasePool *arp = [NSAutoreleasePool new];
++  NSComparisonPredicate *q;
++
++  PASS_EQUAL([equalTo(@"Ada") predicateFormat], @"name = \"Ada\"",
++             "a one-word string constant is quoted");
++  PASS_EQUAL([[NSPredicate predicateWithFormat: @"name == 'Ada'"] predicateFormat],
++             @"name = \"Ada\"", "and so is one read from a format");
++  q = (NSComparisonPredicate *)[NSPredicate predicateWithFormat:
++    [equalTo(@"Ada") predicateFormat]];
++  PASS([q isKindOfClass: [NSComparisonPredicate class]]
++    && [[q rightExpression] expressionType] == NSConstantValueExpressionType,
++       "the format reads back with the string a constant, not a key path");
++  PASS(readsBack(equalTo(@"Ada"), @"Ada"), "a word survives its format");
++  PASS(readsBack(equalTo(@"Ada Lovelace"), @"Ada Lovelace"),
++       "a string with a space survives its format");
++  PASS_EQUAL([equalTo(@"say \"hi\"") predicateFormat], @"name = \"say \\\"hi\\\"\"",
++             "a quote in a string constant is escaped");
++  PASS_EQUAL([equalTo(@"a\\b") predicateFormat], @"name = \"a\\\\b\"",
++             "and so is a backslash");
++  PASS(readsBack(equalTo(@"SELF"), @"SELF"),
++       "a string that is a reserved word survives its format");
++  PASS_EQUAL([equalTo(@"") predicateFormat], @"name = \"\"",
++             "an empty string constant is a pair of quotes");
++
++  [arp release];
++  return 0;
++}
+-- 
+2.43.0
+
