@@ -1115,6 +1115,62 @@ unarchiver sets it from allowsUndo="NO"), and NSControl answers
 (1 of 3) pass with it; the whole gui suite passes 4942, and with every
 libs-gui patch here 5581, but for `formatters.m` as above.
 
+Added on 2026-11-05 for FreeCoreData's ModelBuilder, a Core Data model
+editor that is to become a UDCode extension, which worked around five
+GNUstep faults; two of them were not faults (a new NSButton is titled
+"Button" on macOS 15 too, and an outline view asks its data source on
+-setDataSource: there too), and these are the other three, with one more
+found on the way.  All four were checked against macOS 15 first.
+`splitview-adjust-last-subview` (libs-gui).  -adjustSubviews never asked
+the delegate's -splitView:shouldAdjustSizeOfSubview: about the last
+subview, and gave every subview a share of a change in size whatever the
+delegate said.  Now each is asked: the ones that do not adjust keep their
+size, the others share what is left in proportion, and the last of them
+takes the remainder; if none adjusts, or the fixed ones do not fit, all
+do.  `NSSplitView/adjustSubviewsDelegate.m` (6 of 16 fail on master
+1dd8b76c6) passes with it, and so do the other NSSplitView tests (35).
+`menu-update-delegate-once` (libs-gui).  A delegate's -menuNeedsUpdate:
+that sent -update to its menu was asked to update it again, three times
+for one update; on macOS 15 -update never sends -menuNeedsUpdate:.  The
+update now does not ask a delegate already updating that menu.
+`NSMenu/delegateUpdate.m` (3 of 4 fail on master) passes with it, and the
+NSMenu and NSMenuItem tests pass as before.
+`predicate-editor-criteria` (libs-gui), which builds on #855, #856 and
+#857 (NSPredicateEditorRowTemplate, NSRuleEditor, NSPredicateEditor),
+merged upstream in August and September.  A xib connecting a predicate
+editor's action could not be loaded (NSRuleEditor had no -setTarget: of
+its own, and its NSCell's raises), and what such a xib said about the
+editor and its templates was lost.  Each row showed one template's own
+views, so a row offered that template's left expressions only and could
+never become a row of another; templates for an entity's key paths were
+nil; there was no minus button; nothing a user did sent the action.  On
+macOS 15 a predicate editor lays its templates' pop-ups over one another,
+so a row's left pop-up offers every template's left expressions and
+choosing one of another template switches the row to it, and the rule
+editor shows each criterion as a pop-up of its brothers or a label.  The
+patch does the same (NSPredicateEditor is its own delegate, over a tree
+of its templates), with macOS's key-path templates, plus and minus,
+actions, flipped rows the editor's height follows, keyed coding in
+macOS's keys (a template as its views, NSRepObject for a menu item's
+object) and the xib's attributes, <expression> elements included.
+`NSPredicateEditor/criteria.m`, `NSPredicateEditorRowTemplate/keyPaths.m`,
+`NSRuleEditor/rows.m`, `NSRuleEditor/targetAction.m` and
+`GSXib5KeyedUnarchiver/predicateEditor.m` (with ModelBuilder's fetch
+request editor as its xib): 83 of their checks fail on master and
+`rows.m` aborts; with the patch all pass, as do the existing tests of the
+three classes.  The whole gui suite passes 5056.
+`predicate-string-constant-format` (libs-base), for the predicate editor's
+round trip: a string constant's -predicateFormat was a property list
+string, unquoted when it needed no quotes (`name == Ada`, which reads
+back as a key path); on macOS 15 it is always a double-quoted literal.
+`NSPredicate/stringConstantFormat.m` (5 of 9 fail on master a40c1af)
+passes with it, and `NSPredicate/functionAndFetch.m` now expects the
+quoted form macOS gives; the NSPredicate tests pass (360), and the base
+suite as before but for `encoded-word-stack.m`, which aborts without the
+patch too.
+With every patch here the libs-gui suite passes 5753 and the libs-base
+suite 15328 (`encoded-word-stack.m` as above).
+
 Added on 2026-10-31 for LogBook on Windows, whose sync check took five
 minutes on a laptop and lost a receipt's photo on CI: `urlsession-windows-write`
 and `bplist-collections-by-identity` (libs-base). On Windows NSURLSession
@@ -1550,6 +1606,10 @@ among it, passes with this gui and fails without it.
 | `gpbs-auto-stop` | libs-back | test | not sent yet | (none: RDLKit's designer tests use it from here) |
 | `workspace-open-url-quietly` | libs-gui | test | not sent yet | (none: every app uses it from here) |
 | `tableview-click-below-rows` | libs-gui | test | not sent yet | (none: UDQuakeTools uses it from here) |
+| `splitview-adjust-last-subview` | libs-gui | test | not sent yet | (none: FreeCoreData's ModelBuilder uses it from here) |
+| `menu-update-delegate-once` | libs-gui | test | not sent yet | (none: FreeCoreData's ModelBuilder uses it from here) |
+| `predicate-editor-criteria` | libs-gui | test | not sent yet | (none: FreeCoreData's ModelBuilder uses it from here) |
+| `predicate-string-constant-format` | libs-base | test | not sent yet | (none: FreeCoreData's ModelBuilder uses it from here) |
 
 Re-run that check before sending anything: `Scripts/apply-patches.sh` on a
 fresh checkout is the quickest form of it.
