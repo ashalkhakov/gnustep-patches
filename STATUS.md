@@ -1191,6 +1191,17 @@ passes with it, as do the other NSPredicate tests.  With every patch here
 the libs-gui suite passes 5765 and the libs-base suite 15335
 (`encoded-word-stack.m` as above).
 
+Added on 2026-11-06 for FreeCoreData's ModelBuilder, whose inspector's
+pop-ups showed a check mark beside the item they had selected:
+`popup-button-state-image` (libs-gui).  A pop-up button draws its item
+with the menu item cell's code, which draws an on item's state image;
+the selected item is always on, so an item with an on-state image (one
+decoded from a nib has one) was drawn checked inside the closed button.
+On macOS 15 the button never draws it (-drawStateImageWithFrame:inView:
+is called zero times; here three).  `NSPopUpButtonCell/stateImage.m`
+fails without it and passes with it.  With every patch here the libs-gui
+suite passes 5767.
+
 Added on 2026-10-31 for LogBook on Windows, whose sync check took five
 minutes on a laptop and lost a receipt's photo on CI: `urlsession-windows-write`
 and `bplist-collections-by-identity` (libs-base). On Windows NSURLSession
@@ -1631,6 +1642,7 @@ among it, passes with this gui and fails without it.
 | `predicate-editor-criteria` | libs-gui | test | not sent yet | (none: FreeCoreData's ModelBuilder uses it from here) |
 | `predicate-string-constant-format` | libs-base | test | not sent yet | (none: FreeCoreData's ModelBuilder uses it from here) |
 | `compound-predicate-empty-format` | libs-base | test | not sent yet | (none: FreeCoreData's ModelBuilder and ODataKit's Workbench use it from here) |
+| `popup-button-state-image` | libs-gui | test | not sent yet | (none: every app with a pop-up from a nib uses it from here) |
 
 Re-run that check before sending anything: `Scripts/apply-patches.sh` on a
 fresh checkout is the quickest form of it.
