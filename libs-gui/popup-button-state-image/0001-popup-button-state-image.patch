@@ -1,0 +1,132 @@
+From feec57896dcede1e3b11db115d3f7ff1247a1c15 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Fri, 6 Nov 2026 07:06:31 +0000
+Subject: [PATCH] NSPopUpButtonCell: the button draws its item without the
+ item's state image
+
+A pop-up button draws its selected item with the menu item cell's code,
+and that code draws the item's state image when the item has one and is
+on.  The selected item of a pop-up is always on, so a pop-up whose items
+carry an on-state image (items decoded from a nib do) shows a check mark
+inside the closed button.  OS X never does: there the check mark marks
+the selected item in the open menu only.  Measured on macOS 15, a
+pop-up button drawing an on item with an on-state image calls
+-drawStateImageWithFrame:inView: zero times; here it was called three.
+
+The cell now leaves the state image out when it draws the button: after
+-calcSize it takes the state image's width to be nothing, so the menu
+item cell's drawing skips it and places the title where it would be
+without one.  The items' cells in the open menu are not this cell and
+still draw their check marks.
+
+Tests/gui/NSPopUpButtonCell/stateImage.m counts the state image's draws
+while a pop-up with an on item is displayed.
+---
+ Source/NSPopUpButtonCell.m               |  2 +
+ Tests/gui/NSPopUpButtonCell/stateImage.m | 81 ++++++++++++++++++++++++
+ 2 files changed, 83 insertions(+)
+ create mode 100644 Tests/gui/NSPopUpButtonCell/stateImage.m
+
+diff --git a/Source/NSPopUpButtonCell.m b/Source/NSPopUpButtonCell.m
+index 63d3cafb2..dafac5397 100644
+--- a/Source/NSPopUpButtonCell.m
++++ b/Source/NSPopUpButtonCell.m
+@@ -1126,6 +1126,8 @@ static NSImage *_pbc_image[5];
+ 
+   /* We need to calc our size to get images placed correctly */
+   [self calcSize];
++  /* The button shows the item, not its state: the check mark is the menu's. */
++  _stateImageWidth = 0.0;
+   [[GSTheme theme] drawPopUpButtonCellInteriorWithFrame: cellFrame
+ 		   withCell: self
+ 		   inView: controlView];
+diff --git a/Tests/gui/NSPopUpButtonCell/stateImage.m b/Tests/gui/NSPopUpButtonCell/stateImage.m
+new file mode 100644
+index 000000000..c7cfbfebd
+--- /dev/null
++++ b/Tests/gui/NSPopUpButtonCell/stateImage.m
+@@ -0,0 +1,81 @@
++/* A pop-up button shows its selected item without the item's state image,
++   as OS X does: the check mark belongs to the menu, not to the button. */
++#include "Testing.h"
++
++#include <Foundation/NSArray.h>
++#include <Foundation/NSAutoreleasePool.h>
++
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSImage.h>
++#include <AppKit/NSMenu.h>
++#include <AppKit/NSMenuItem.h>
++#include <AppKit/NSPopUpButton.h>
++#include <AppKit/NSPopUpButtonCell.h>
++#include <AppKit/NSWindow.h>
++
++static int stateImageDraws = 0;
++
++@interface CountingPopUpButtonCell : NSPopUpButtonCell
++@end
++
++@implementation CountingPopUpButtonCell
++- (void) drawStateImageWithFrame: (NSRect)cellFrame inView: (NSView *)controlView
++{
++  stateImageDraws++;
++  [super drawStateImageWithFrame: cellFrame inView: controlView];
++}
++@end
++
++int
++main(int argc, char **argv)
++{
++  START_SET("NSPopUpButtonCell state image")
++
++  NS_DURING
++  {
++    [NSApplication sharedApplication];
++  }
++  NS_HANDLER
++  {
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  }
++  NS_ENDHANDLER
++
++  {
++    NSWindow *window = AUTORELEASE([[NSWindow alloc]
++      initWithContentRect: NSMakeRect(100, 100, 200, 60)
++                styleMask: NSTitledWindowMask
++                  backing: NSBackingStoreBuffered
++                    defer: NO]);
++    NSPopUpButton *button = AUTORELEASE([[NSPopUpButton alloc]
++      initWithFrame: NSMakeRect(10, 10, 160, 26) pullsDown: NO]);
++    NSImage *check = AUTORELEASE([[NSImage alloc] initWithSize: NSMakeSize(10, 10)]);
++    NSArray *titles = [NSArray arrayWithObjects: @"Objects", @"Object IDs", @"Dictionaries", nil];
++    NSUInteger i;
++
++    [button setCell: AUTORELEASE([[CountingPopUpButtonCell alloc]
++      initTextCell: @"" pullsDown: NO])];
++    for (i = 0; i < [titles count]; i++)
++      {
++        NSMenuItem *item = AUTORELEASE([[NSMenuItem alloc]
++          initWithTitle: [titles objectAtIndex: i] action: NULL keyEquivalent: @""]);
++
++        [item setOnStateImage: check];
++        [[button menu] addItem: item];
++      }
++    [button selectItemAtIndex: 1];
++    [[window contentView] addSubview: button];
++    [window orderFront: nil];
++    [button display];
++
++    PASS([[button selectedItem] state] == NSOnState,
++      "the selected item is on");
++    PASS(stateImageDraws == 0,
++      "the button does not draw the selected item's state image");
++    [window orderOut: nil];
++  }
++
++  END_SET("NSPopUpButtonCell state image")
++  return 0;
++}
+-- 
+2.43.0
+
