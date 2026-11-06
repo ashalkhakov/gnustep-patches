@@ -1202,6 +1202,18 @@ is called zero times; here three).  `NSPopUpButtonCell/stateImage.m`
 fails without it and passes with it.  With every patch here the libs-gui
 suite passes 5767.
 
+Added on 2026-11-06 for UDCode, whose window sends menu commands to the
+front tab's editor wherever the focus is: `supplemental-target` (libs-gui).
+`-supplementalTargetForAction:sender:` was declared and never asked, so an
+item only a responder's supplement could take stayed dimmed.  On macOS 15,
+once every responder of a window's chain (and its delegate) was asked whether
+it responds, each responder is asked to supply a target, the first's wins, the
+sender is passed on, and a target that does not respond raises; the
+application's chain goes the same way after its own, and
+`-tryToPerform:with:` does not ask.  `NSResponder/supplementalTarget.m`
+passes all 17 against AppKit, fails 9 without the fix and passes with it.
+With every patch here the libs-gui suite passes 5784.
+
 Added on 2026-10-31 for LogBook on Windows, whose sync check took five
 minutes on a laptop and lost a receipt's photo on CI: `urlsession-windows-write`
 and `bplist-collections-by-identity` (libs-base). On Windows NSURLSession
@@ -1643,6 +1655,7 @@ among it, passes with this gui and fails without it.
 | `predicate-string-constant-format` | libs-base | test | not sent yet | (none: FreeCoreData's ModelBuilder uses it from here) |
 | `compound-predicate-empty-format` | libs-base | test | not sent yet | (none: FreeCoreData's ModelBuilder and ODataKit's Workbench use it from here) |
 | `popup-button-state-image` | libs-gui | test | not sent yet | (none: every app with a pop-up from a nib uses it from here) |
+| `supplemental-target` | libs-gui | test | not sent yet | (none: UDCode uses it from here) |
 
 Re-run that check before sending anything: `Scripts/apply-patches.sh` on a
 fresh checkout is the quickest form of it.

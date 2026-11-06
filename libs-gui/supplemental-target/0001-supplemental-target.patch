@@ -1,0 +1,404 @@
+From 56756ce8fb42af0937b428b340737dbf24cb2339 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Fri, 6 Nov 2026 15:11:34 +0000
+Subject: [PATCH] NSApplication: an action no responder takes goes to what the
+ chain supplies
+
+-supplementalTargetForAction:sender: was declared and never asked.  As on
+macOS 15: once every responder of a window's chain (and its delegate and
+document) was asked whether it responds, each responder of the chain, in
+order, is asked to supply a target, and the application's chain the same
+way after its own.  The sender is passed on, and a target that does not
+respond raises.
+---
+ Source/NSApplication.m                     |  96 +++++++---
+ Tests/gui/NSResponder/supplementalTarget.m | 211 +++++++++++++++++++++
+ 2 files changed, 282 insertions(+), 25 deletions(-)
+ create mode 100644 Tests/gui/NSResponder/supplementalTarget.m
+
+diff --git a/Source/NSApplication.m b/Source/NSApplication.m
+index 6006342fc..35b8fbf14 100644
+--- a/Source/NSApplication.m
++++ b/Source/NSApplication.m
+@@ -376,9 +376,11 @@ struct _NSModalSession {
+ - (NSDockTile *) _dockTileIfExists;
+ - (NSDictionary*) _notificationUserInfo;
+ - (void) _openDocument: (NSString*)name;
++- (id) _targetForAction: (SEL)aSelector sender: (id)sender;
+ - (id) _targetForAction: (SEL)aSelector
+ 	      keyWindow: (NSWindow *)keyWindow
+-	     mainWindow: (NSWindow *)mainWindow;
++	     mainWindow: (NSWindow *)mainWindow
++		 sender: (id)sender;
+ - (void) _windowDidBecomeKey: (NSNotification*) notification;
+ - (void) _windowDidBecomeMain: (NSNotification*) notification;
+ - (void) _windowDidResignKey: (NSNotification*) notification;
+@@ -2367,11 +2369,12 @@ IF_NO_GC(NSAssert([event retainCount] > 0, NSInternalInconsistencyException));
+         keyWindow = nil;
+       return [self _targetForAction: theAction
+ 			  keyWindow: keyWindow
+-			 mainWindow: toolbarWindow];
++			 mainWindow: toolbarWindow
++			     sender: sender];
+     }
+   else
+     {
+-      return [self targetForAction: theAction];
++      return [self _targetForAction: theAction sender: sender];
+     }
+ }
+ 
+@@ -2386,23 +2389,7 @@ IF_NO_GC(NSAssert([event retainCount] > 0, NSInternalInconsistencyException));
+  */
+ - (id) targetForAction: (SEL)aSelector
+ {
+-  if (!aSelector)
+-    {
+-      return nil;
+-    }
+-  
+-  /* During a modal session actions must not be sent to the main window of
+-   * the application, but rather to the dialog window of the modal session.
+-   * Note that the modal session window is not necessarily the key window,
+-   * as a panel with worksWhenModal = YES, e.g., the font panel, can still
+-   * become key window during a modal session.
+-   */
+-  NSWindow *mainWindow = [self mainWindow];
+-  if (_session != 0)
+-    mainWindow = _session->window;
+-  return [self _targetForAction: aSelector
+-		      keyWindow: [self keyWindow]
+-		     mainWindow: mainWindow];
++  return [self _targetForAction: aSelector sender: nil];
+ }
+ 
+ 
+@@ -4140,7 +4127,34 @@ struct _DelegateWrapper
+   [_listener application: self openFile: filePath];
+ }
+ 
+-- (id) _targetForAction: (SEL)aSelector window: (NSWindow *)window
++/* What the responders from resp on supply when none of them responds, as
++   AppKit: the first's, which has to respond. */
++- (id) _supplementalTargetForAction: (SEL)aSelector
++			       from: (id)resp
++			     sender: (id)sender
++{
++  for (; resp != nil; resp = [resp nextResponder])
++    {
++      id target = [resp supplementalTargetForAction: aSelector sender: sender];
++
++      if (target != nil)
++	{
++	  if (![target respondsToSelector: aSelector])
++	    {
++	      [NSException raise: NSInternalInconsistencyException
++			  format: @"Supplemental target %@ does not respond"
++				  @" to selector %@", target,
++				  NSStringFromSelector(aSelector)];
++	    }
++	  return target;
++	}
++    }
++  return nil;
++}
++
++- (id) _targetForAction: (SEL)aSelector
++		 window: (NSWindow *)window
++		 sender: (id)sender
+ {
+   id resp, delegate;
+   NSDocumentController *sdc;
+@@ -4181,13 +4195,38 @@ struct _DelegateWrapper
+ 	}
+     }
+ 
+-  /* nothing found */
+-  return nil;
++  /* nothing responds: what its responders supply */
++  return [self _supplementalTargetForAction: aSelector
++				       from: [window firstResponder]
++				     sender: sender];
++}
++
++- (id) _targetForAction: (SEL)aSelector sender: (id)sender
++{
++  if (!aSelector)
++    {
++      return nil;
++    }
++
++  /* During a modal session actions must not be sent to the main window of
++   * the application, but rather to the dialog window of the modal session.
++   * Note that the modal session window is not necessarily the key window,
++   * as a panel with worksWhenModal = YES, e.g., the font panel, can still
++   * become key window during a modal session.
++   */
++  NSWindow *mainWindow = [self mainWindow];
++  if (_session != 0)
++    mainWindow = _session->window;
++  return [self _targetForAction: aSelector
++		      keyWindow: [self keyWindow]
++		     mainWindow: mainWindow
++			 sender: sender];
+ }
+ 
+ - (id) _targetForAction: (SEL)aSelector
+ 	      keyWindow: (NSWindow *)keyWindow
+ 	     mainWindow: (NSWindow *)mainWindow
++		 sender: (id)sender
+ {
+   NSDocumentController *sdc;
+   id resp;
+@@ -4196,7 +4235,7 @@ struct _DelegateWrapper
+     return nil;
+ 
+   /* start looking in the key window's responder chain */
+-  resp = [self _targetForAction: aSelector window: keyWindow];
++  resp = [self _targetForAction: aSelector window: keyWindow sender: sender];
+   if (resp != nil)
+     {
+       return resp;
+@@ -4206,7 +4245,7 @@ struct _DelegateWrapper
+    * the key window) */
+   if (mainWindow != keyWindow)
+     {
+-      resp = [self _targetForAction: aSelector window: mainWindow];
++      resp = [self _targetForAction: aSelector window: mainWindow sender: sender];
+       if (resp != nil)
+ 	{
+ 	  return resp;
+@@ -4236,6 +4275,13 @@ struct _DelegateWrapper
+ 	}
+       resp = [resp nextResponder];
+     }
++  resp = [self _supplementalTargetForAction: aSelector
++				       from: self
++				     sender: sender];
++  if (resp != nil)
++    {
++      return resp;
++    }
+ 
+   /* as last resort in a document based app, try the document controller */
+   sdc = [NSDocumentController sharedDocumentController];
+diff --git a/Tests/gui/NSResponder/supplementalTarget.m b/Tests/gui/NSResponder/supplementalTarget.m
+new file mode 100644
+index 000000000..2e24d5d9b
+--- /dev/null
++++ b/Tests/gui/NSResponder/supplementalTarget.m
+@@ -0,0 +1,211 @@
++/* The target of an action no responder responds to is what a responder of
++   the chain supplies, after every one of the chain was asked whether it
++   responds; as macOS 15 does. */
++#include "Testing.h"
++
++#include <Foundation/NSAutoreleasePool.h>
++#include <Foundation/NSDate.h>
++#include <Foundation/NSException.h>
++#include <Foundation/NSString.h>
++
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSEvent.h>
++#include <AppKit/NSResponder.h>
++#include <AppKit/NSWindow.h>
++
++@interface Target : NSObject
++- (void) suppliedAction: (id)sender;
++@end
++
++@implementation Target
++- (void) suppliedAction: (id)sender
++{
++}
++@end
++
++@interface Responding : NSResponder
++- (void) suppliedAction: (id)sender;
++@end
++
++@implementation Responding
++- (void) suppliedAction: (id)sender
++{
++}
++@end
++
++@interface Supplier : NSResponder
++{
++@public
++  id supplied;
++  id lastSender;
++  int asked;
++}
++@end
++
++@implementation Supplier
++- (id) supplementalTargetForAction: (SEL)action sender: (id)sender
++{
++  asked++;
++  lastSender = sender;
++  return supplied;
++}
++@end
++
++@interface KeyWindow : NSWindow
++@end
++
++@implementation KeyWindow
++- (BOOL) canBecomeKeyWindow
++{
++  return YES;
++}
++- (BOOL) canBecomeMainWindow
++{
++  return YES;
++}
++@end
++
++int
++main(int argc, char **argv)
++{
++  NSAutoreleasePool *pool = [NSAutoreleasePool new];
++  SEL action = @selector(suppliedAction:);
++  Target *target = [Target new];
++  Target *other = [Target new];
++  Supplier *supplier = [Supplier new];
++  Supplier *first = [Supplier new];
++  Responding *responding = [Responding new];
++  KeyWindow *window;
++  id sender = [NSObject new];
++  id oldNext;
++  BOOL raised = NO;
++  int i;
++
++  START_SET("NSResponder supplemental target")
++
++  NS_DURING
++    {
++      [NSApplication sharedApplication];
++    }
++  NS_HANDLER
++    {
++      if ([[localException name] isEqual: NSInternalInconsistencyException])
++	SKIP("It looks like GNUstep backend is not yet installed")
++    }
++  NS_ENDHANDLER
++
++  PASS([supplier isKindOfClass: [NSResponder class]]
++    && [[NSResponder new] supplementalTargetForAction: action sender: nil] == nil,
++    "a responder supplies nothing by default");
++
++  [NSApp finishLaunching];
++  [NSApp activateIgnoringOtherApps: YES];
++  window = [[KeyWindow alloc] initWithContentRect: NSMakeRect(200, 200, 20, 20)
++					styleMask: NSBorderlessWindowMask
++					  backing: NSBackingStoreBuffered
++					    defer: NO];
++  [window makeKeyAndOrderFront: nil];
++  for (i = 0; i < 50 && [NSApp keyWindow] != window; i++)
++    {
++      NSEvent *e = [NSApp nextEventMatchingMask: NSAnyEventMask
++				      untilDate: [NSDate dateWithTimeIntervalSinceNow: 0.1]
++					 inMode: NSDefaultRunLoopMode
++					dequeue: YES];
++      if (e != nil)
++	[NSApp sendEvent: e];
++      [window makeKeyWindow];
++    }
++  if ([NSApp keyWindow] != window)
++    SKIP("no key window here")
++
++  oldNext = [window nextResponder];
++
++  /* nothing supplied, nothing responding */
++  [window setNextResponder: supplier];
++  PASS([NSApp targetForAction: action] == nil,
++    "a chain with nothing to supply: no target");
++  PASS(supplier->asked == 1, "the responder is asked");
++
++  /* supplied */
++  supplier->supplied = target;
++  PASS([NSApp targetForAction: action] == target,
++    "-targetForAction: finds what the chain supplies");
++  PASS(supplier->lastSender == nil, "-targetForAction: has no sender to pass");
++  PASS([NSApp targetForAction: action to: nil from: sender] == target,
++    "-targetForAction:to:from: finds it");
++  PASS(supplier->lastSender == sender, "the sender is passed on");
++  PASS([NSApp sendAction: action to: nil from: sender] == YES,
++    "-sendAction:to:from: sends to it");
++
++  /* -tryToPerform:with: is the chain's own */
++  PASS([window tryToPerform: action with: nil] == NO,
++    "-tryToPerform:with: does not ask");
++
++  /* a responder wins, wherever it is in the chain */
++  [responding setNextResponder: supplier];
++  [window setNextResponder: responding];
++  PASS([NSApp targetForAction: action] == responding,
++    "a responder before the supplier takes it");
++  [responding setNextResponder: nil];
++  [supplier setNextResponder: responding];
++  [window setNextResponder: supplier];
++  supplier->asked = 0;
++  PASS([NSApp targetForAction: action] == responding,
++    "a responder after the supplier takes it");
++  PASS(supplier->asked == 0, "and the supplier is not asked");
++  [supplier setNextResponder: nil];
++
++  /* the first supplier's */
++  first->supplied = other;
++  [first setNextResponder: supplier];
++  [window setNextResponder: first];
++  PASS([NSApp targetForAction: action] == other, "the first supplier's");
++  [first setNextResponder: nil];
++
++  /* the window delegate is not in the chain: it is not asked */
++  {
++    Supplier *delegate = [Supplier new];
++
++    delegate->supplied = target;
++    [window setNextResponder: nil];
++    [window setDelegate: (id)delegate];
++    PASS([NSApp targetForAction: action] == nil && delegate->asked == 0,
++      "the window's delegate is not asked");
++    [window setDelegate: nil];
++  }
++
++  /* a window's supplier comes before the application's responders */
++  [window setNextResponder: supplier];
++  [NSApp setNextResponder: responding];
++  PASS([NSApp targetForAction: action] == target,
++    "the window's supplier before the application's next responder");
++  [NSApp setNextResponder: nil];
++
++  /* the application's chain supplies too */
++  [window setNextResponder: nil];
++  [NSApp setNextResponder: supplier];
++  PASS([NSApp targetForAction: action] == target,
++    "the application's next responder supplies");
++  [NSApp setNextResponder: nil];
++
++  /* what is supplied has to respond */
++  [window setNextResponder: supplier];
++  supplier->supplied = [NSObject new];
++  NS_DURING
++    {
++      [NSApp targetForAction: action];
++    }
++  NS_HANDLER
++    {
++      raised = [[localException name] isEqual: NSInternalInconsistencyException];
++    }
++  NS_ENDHANDLER
++  PASS(raised, "a target that does not respond raises");
++
++  [window setNextResponder: oldNext];
++  [window orderOut: nil];
++
++  END_SET("NSResponder supplemental target")
++  [pool release];
++  return 0;
++}
+-- 
+2.43.0
+
