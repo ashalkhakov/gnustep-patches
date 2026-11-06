@@ -1,4 +1,4 @@
-From 34d90daefdf0cbb047130f3db616b67b468512d6 Mon Sep 17 00:00:00 2001
+From fd3cdddce99cbc4ca30e01e0c72e7de5c1e1a39d Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Thu, 5 Nov 2026 15:39:11 +0000
 Subject: [PATCH] NSPredicateEditor: one set of pop-ups over all its templates,
@@ -31,14 +31,18 @@ What OS X 15 does with the same templates and steps:
   templates' pop-ups, where items with the same title at the same place
   are one criterion.  Its display values are titles, and the views of the
   row's own copy of its template.  Choosing a criterion of another template
-  switches the row to it.  Typing in a row sends the action.  A predicate
-  no template can show raises NSInvalidArgumentException; new templates
-  keep the rows they can show.
-- A compound template gives the row itself for one subpredicate and
-  TRUEPREDICATE for none; NOT of several is NOT of their OR.
-- Templates for key paths: one per key path, with OS X's operators for the
-  attribute's type, through relationships; a binary attribute or a key
-  with no attribute raises.  The entity is only sent messages, since
+  switches the row to it.  Typing in a row sends the action.  Setting a
+  predicate leaves out the parts no template can show, at any depth, a
+  compound that loses them all keeping its row; a predicate no template
+  can show at all, or a NOT whose part cannot be shown, raises
+  NSInvalidArgumentException.  New templates keep the rows they can show.
+- A compound template gives a compound of the rows, of one or of none
+  too (an AND of none holds, an OR of none does not), and a compound row
+  with no rows beneath it is such a predicate; NOT of several is NOT of
+  their OR.
+- Templates for key paths: key paths of the same type, one after
+  another, share a template, with OS X's operators for that type, through
+  relationships; a binary attribute or a key with no attribute raises.  The entity is only sent messages, since
   GNUstep has no CoreData of its own.
 - A keyed archive keeps a rule editor's nesting mode, row height,
   editability and whether all rows can go (NSRuleEditor... keys), and a
@@ -49,12 +53,12 @@ What OS X 15 does with the same templates and steps:
   popUpMenus, with <expression> elements, which the xib parser makes
   objects of NSExpression, a cluster that cannot read a xib.
 
-The tests, checked against OS X: NSPredicateEditor/criteria.m (48),
-NSPredicateEditorRowTemplate/keyPaths.m (28), NSRuleEditor/rows.m (26),
+The tests, checked against OS X: NSPredicateEditor/criteria.m (56),
+NSPredicateEditorRowTemplate/keyPaths.m (32), NSRuleEditor/rows.m (26),
 NSRuleEditor/targetAction.m (6) and GSXib5KeyedUnarchiver/predicateEditor.m
 with PredicateEditor.xib, a fetch request's editor from a Core Data model
-editor (24).  Without the change 83 of their checks fail and rows.m
-aborts.  The existing NSRuleEditor, NSPredicateEditor and
+editor (24).  Without the change criteria.m and rows.m abort, and 44
+of the other three's 62 checks fail.  The existing NSRuleEditor, NSPredicateEditor and
 NSPredicateEditorRowTemplate tests pass as before, and so does the rest of
 the gui suite (5056 passed).
 
@@ -64,16 +68,16 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  Source/GSRuleEditorPrivate.h                  |  57 ++
  Source/GSXib5KeyedUnarchiver.m                | 137 +++-
  Source/NSMenuItem.m                           |   6 +
- Source/NSPredicateEditor.m                    | 560 +++++++++++--
- Source/NSPredicateEditorRowTemplate.m         | 327 +++++++-
+ Source/NSPredicateEditor.m                    | 567 +++++++++++--
+ Source/NSPredicateEditorRowTemplate.m         | 329 +++++++-
  Source/NSRuleEditor.m                         | 769 +++++++++++++++---
  .../GSXib5KeyedUnarchiver/PredicateEditor.xib | 124 +++
  .../GSXib5KeyedUnarchiver/predicateEditor.m   | 155 ++++
- Tests/gui/NSPredicateEditor/criteria.m        | 357 ++++++++
- .../NSPredicateEditorRowTemplate/keyPaths.m   | 309 +++++++
+ Tests/gui/NSPredicateEditor/criteria.m        | 402 +++++++++
+ .../NSPredicateEditorRowTemplate/keyPaths.m   | 335 ++++++++
  Tests/gui/NSRuleEditor/rows.m                 | 320 ++++++++
  Tests/gui/NSRuleEditor/targetAction.m         | 102 +++
- 13 files changed, 3006 insertions(+), 219 deletions(-)
+ 13 files changed, 3081 insertions(+), 224 deletions(-)
  create mode 100644 Source/GSRuleEditorPrivate.h
  create mode 100644 Tests/gui/GSXib5KeyedUnarchiver/PredicateEditor.xib
  create mode 100644 Tests/gui/GSXib5KeyedUnarchiver/predicateEditor.m
@@ -373,7 +377,7 @@ index bd184f605..a8646541b 100644
          {
            NSImage *mixedImage = [aDecoder decodeObjectForKey: @"NSMixedImage"];
 diff --git a/Source/NSPredicateEditor.m b/Source/NSPredicateEditor.m
-index 10c3449cc..fac423edf 100644
+index 10c3449cc..0bcec5384 100644
 --- a/Source/NSPredicateEditor.m
 +++ b/Source/NSPredicateEditor.m
 @@ -29,22 +29,116 @@
@@ -552,11 +556,11 @@ index 10c3449cc..fac423edf 100644
 +    {
 +      predicate = [self predicate];
 +    }
- 
--  [self _fillRow: index withTemplate: [self _templateForRowType: type]];
++
 +  ASSIGN(_rowTemplates, templates);
 +  [self _rebuildCriteria];
-+
+ 
+-  [self _fillRow: index withTemplate: [self _templateForRowType: type]];
 +  if ([self numberOfRows] > 0)
 +    {
 +      [self removeRowsAtIndexes: [NSIndexSet indexSetWithIndexesInRange:
@@ -582,23 +586,22 @@ index 10c3449cc..fac423edf 100644
      {
        return nil;
      }
-@@ -132,12 +235,13 @@
+@@ -132,12 +235,8 @@
        subrow = [subrows indexGreaterThanIndex: subrow];
      }
  
 -  if ([template compoundTypes] != nil && [subpredicates count] == 0)
-+  if ([state->copy compoundTypes] != nil && [subpredicates count] == 0)
-     {
-       return nil;
-     }
- 
+-    {
+-      return nil;
+-    }
+-
 -  return [template predicateWithSubpredicates: subpredicates];
 +  [self _syncState: state withCriteria: [self criteriaForRow: index]];
 +  return [state->copy predicateWithSubpredicates: subpredicates];
  }
  
  - (NSPredicate *) predicate
-@@ -185,6 +289,13 @@
+@@ -185,6 +284,13 @@
        return;
      }
  
@@ -612,7 +615,7 @@ index 10c3449cc..fac423edf 100644
    all = [NSIndexSet indexSetWithIndexesInRange:
      NSMakeRange(0, (NSUInteger)[self numberOfRows])];
    [self removeRowsAtIndexes: all includeSubrows: YES];
-@@ -195,6 +306,19 @@
+@@ -195,6 +301,19 @@
      }
  }
  
@@ -632,7 +635,7 @@ index 10c3449cc..fac423edf 100644
  //
  // NSCoding protocol
  //
-@@ -204,7 +328,7 @@
+@@ -204,7 +323,7 @@
  
    if ([aCoder allowsKeyedCoding])
      {
@@ -641,7 +644,7 @@ index 10c3449cc..fac423edf 100644
      }
    else
      {
-@@ -214,49 +338,335 @@
+@@ -214,49 +333,335 @@
  
  - (id) initWithCoder: (NSCoder*)aDecoder
  {
@@ -798,8 +801,7 @@ index 10c3449cc..fac423edf 100644
 +                   to: (NSMutableArray *)siblings
 +{
 +  id view;
- 
--      if (isCompound == wantCompound)
++
 +  if (level >= [views count])
 +    {
 +      return;
@@ -809,7 +811,8 @@ index 10c3449cc..fac423edf 100644
 +  if ([view isKindOfClass: [NSPopUpButton class]])
 +    {
 +      NSInteger i;
-+
+ 
+-      if (isCompound == wantCompound)
 +      for (i = 0; i < [view numberOfItems]; i++)
          {
 -          return template;
@@ -989,7 +992,7 @@ index 10c3449cc..fac423edf 100644
  }
  
  - (NSPredicateEditorRowTemplate *) _templateForPredicate: (NSPredicate *)predicate
-@@ -285,50 +695,37 @@
+@@ -285,50 +690,36 @@
    return best;
  }
  
@@ -1010,6 +1013,7 @@ index 10c3449cc..fac423edf 100644
 - */
 -- (void) _fillRow: (NSInteger)index
 -     withTemplate: (NSPredicateEditorRowTemplate *)template
++/* As on OS X, a part no template shows is left out; a NOT needs its part. */
 +- (BOOL) _canShowPredicate: (NSPredicate *)predicate
  {
 -  NSPredicateEditorRowTemplate *copy;
@@ -1017,8 +1021,7 @@ index 10c3449cc..fac423edf 100644
 -  NSMutableArray *criteria;
 -  NSUInteger i;
 +  NSPredicateEditorRowTemplate *template;
-+  NSEnumerator *e;
-+  NSPredicate *sub;
++  NSArray *subpredicates;
  
 +  template = [self _templateForPredicate: predicate];
    if (template == nil)
@@ -1031,15 +1034,14 @@ index 10c3449cc..fac423edf 100644
 -  views = [copy templateViews];
 -  criteria = [NSMutableArray arrayWithCapacity: [views count]];
 -  for (i = 0; i < [views count]; i++)
-+  e = [[template displayableSubpredicatesOfPredicate: predicate]
-+    objectEnumerator];
-+  while ((sub = [e nextObject]) != nil)
++  subpredicates = [template displayableSubpredicatesOfPredicate: predicate];
++  if ([predicate isKindOfClass: [NSCompoundPredicate class]]
++    && [(NSCompoundPredicate *)predicate compoundPredicateType]
++      == NSNotPredicateType)
      {
 -      [criteria addObject: copy];
-+      if (![self _canShowPredicate: sub])
-+        {
-+          return NO;
-+        }
++      return [subpredicates count] == 1
++        && [self _canShowPredicate: [subpredicates objectAtIndex: 0]];
      }
  
 -  [self setCriteria: criteria andDisplayValues: views forRowAtIndex: index];
@@ -1056,7 +1058,7 @@ index 10c3449cc..fac423edf 100644
    NSInteger index;
    NSArray *subpredicates;
  
-@@ -340,16 +737,24 @@
+@@ -340,16 +731,24 @@
        return;
      }
  
@@ -1090,7 +1092,16 @@ index 10c3449cc..fac423edf 100644
  
    subpredicates = [template displayableSubpredicatesOfPredicate: predicate];
    if (subpredicates != nil)
-@@ -364,4 +769,9 @@
+@@ -359,9 +758,17 @@
+ 
+       while ((sub = [e nextObject]) != nil)
+         {
+-          [self _addRowsForPredicate: sub asSubrowOfRow: index];
++          if ([self _canShowPredicate: sub])
++            {
++              [self _addRowsForPredicate: sub asSubrowOfRow: index];
++            }
+         }
      }
  }
  
@@ -1101,7 +1112,7 @@ index 10c3449cc..fac423edf 100644
 +
  @end
 diff --git a/Source/NSPredicateEditorRowTemplate.m b/Source/NSPredicateEditorRowTemplate.m
-index 6aa47f4fa..904fe26a8 100644
+index 6aa47f4fa..95fcbfc97 100644
 --- a/Source/NSPredicateEditorRowTemplate.m
 +++ b/Source/NSPredicateEditorRowTemplate.m
 @@ -37,6 +37,8 @@
@@ -1140,26 +1151,40 @@ index 6aa47f4fa..904fe26a8 100644
  - (NSPopUpButton *) _popUpButtonAtIndex: (NSUInteger)index;
  - (NSString *) _titleForExpression: (NSExpression *)expression;
  - (NSString *) _titleForOperator: (NSPredicateOperatorType)type;
-@@ -71,8 +90,29 @@ static const double compoundMatch = 0.5;
+@@ -71,8 +90,43 @@ static const double compoundMatch = 0.5;
  + (NSArray *) templatesWithAttributeKeyPaths: (NSArray *)paths
                           inEntityDescription: (NSEntityDescription *)entityDesc
  {
 -  /* Entity descriptions belong to CoreData, which GNUstep does not have. */
 -  return nil;
 +  NSMutableArray *templates = [NSMutableArray arrayWithCapacity: [paths count]];
-+  NSEnumerator *e = [paths objectEnumerator];
-+  NSString *path;
++  NSUInteger count = [paths count];
++  NSUInteger i = 0;
 +
-+  while ((path = [e nextObject]) != nil)
++  /* Key paths of the same type, one after another, share a template. */
++  while (i < count)
 +    {
-+      id attribute = [self _attributeForKeyPath: path inEntity: entityDesc];
-+      NSAttributeType type = [attribute attributeType];
++      NSString *path = [paths objectAtIndex: i];
++      NSAttributeType type = [[self _attributeForKeyPath: path
++                                                inEntity: entityDesc] attributeType];
 +      NSArray *operators = [self _operatorsForAttributeType: type];
++      NSMutableArray *left = [NSMutableArray array];
 +      NSPredicateEditorRowTemplate *template;
 +
++      while (i < count)
++        {
++          path = [paths objectAtIndex: i];
++          if ([[self _attributeForKeyPath: path inEntity: entityDesc]
++                attributeType] != type)
++            {
++              break;
++            }
++          [left addObject: [NSExpression expressionForKeyPath: path]];
++          i++;
++        }
++
 +      template = [[self alloc]
-+            initWithLeftExpressions:
-+              [NSArray arrayWithObject: [NSExpression expressionForKeyPath: path]]
++            initWithLeftExpressions: left
 +       rightExpressionAttributeType: type
 +                           modifier: NSDirectPredicateModifier
 +                          operators: operators
@@ -1172,7 +1197,7 @@ index 6aa47f4fa..904fe26a8 100644
  }
  
  - (id) initWithLeftExpressions: (NSArray *)leftExprs
-@@ -200,9 +240,10 @@ static const double compoundMatch = 0.5;
+@@ -200,9 +254,10 @@ static const double compoundMatch = 0.5;
          }
  
        _views = [[NSArray alloc] initWithObjects:
@@ -1185,7 +1210,7 @@ index 6aa47f4fa..904fe26a8 100644
          nil];
      }
    else if (_leftExpressions != nil)
-@@ -229,8 +270,8 @@ static const double compoundMatch = 0.5;
+@@ -229,8 +284,8 @@ static const double compoundMatch = 0.5;
          }
  
        _views = [[NSArray alloc] initWithObjects:
@@ -1196,15 +1221,11 @@ index 6aa47f4fa..904fe26a8 100644
          [self _rightView],
          nil];
      }
-@@ -333,15 +374,29 @@ static const double compoundMatch = 0.5;
+@@ -333,11 +388,13 @@ static const double compoundMatch = 0.5;
  
        type = [[_compoundTypes objectAtIndex: index] unsignedIntegerValue];
  
-+      if ([subpred count] == 0)
-+        {
-+          return [NSPredicate predicateWithValue: YES];
-+        }
-+
++      /* As on OS X: a compound of one row, or of none, too. */
        switch (type)
          {
            case NSNotPredicateType:
@@ -1213,21 +1234,9 @@ index 6aa47f4fa..904fe26a8 100644
 +              ([subpred count] == 1 ? [subpred objectAtIndex: 0]
 +                : [NSCompoundPredicate orPredicateWithSubpredicates: subpred])];
            case NSOrPredicateType:
-+            if ([subpred count] == 1)
-+              {
-+                return [subpred objectAtIndex: 0];
-+              }
              return [NSCompoundPredicate orPredicateWithSubpredicates: subpred];
            case NSAndPredicateType:
-           default:
-+            if ([subpred count] == 1)
-+              {
-+                return [subpred objectAtIndex: 0];
-+              }
-             return [NSCompoundPredicate andPredicateWithSubpredicates: subpred];
-         }
-     }
-@@ -423,14 +478,19 @@ static const double compoundMatch = 0.5;
+@@ -423,14 +480,19 @@ static const double compoundMatch = 0.5;
  {
    if ([aCoder allowsKeyedCoding])
      {
@@ -1254,7 +1263,7 @@ index 6aa47f4fa..904fe26a8 100644
      }
    else
      {
-@@ -455,18 +515,42 @@ static const double compoundMatch = 0.5;
+@@ -455,18 +517,42 @@ static const double compoundMatch = 0.5;
        return nil;
      }
  
@@ -1307,7 +1316,7 @@ index 6aa47f4fa..904fe26a8 100644
      }
    else
      {
-@@ -504,6 +588,10 @@ static const double compoundMatch = 0.5;
+@@ -504,6 +590,10 @@ static const double compoundMatch = 0.5;
      {
        copy->_rightExpressionAttributeType = _rightExpressionAttributeType;
        ASSIGNCOPY(copy->_compoundTypes, _compoundTypes);
@@ -1318,7 +1327,7 @@ index 6aa47f4fa..904fe26a8 100644
      }
  
    return copy;
-@@ -513,14 +601,174 @@ static const double compoundMatch = 0.5;
+@@ -513,14 +603,174 @@ static const double compoundMatch = 0.5;
  
  @implementation NSPredicateEditorRowTemplate (Private)
  
@@ -1494,7 +1503,7 @@ index 6aa47f4fa..904fe26a8 100644
    if ([titles count] > 0)
      {
        [button selectItemAtIndex: 0];
-@@ -529,6 +777,31 @@ static const double compoundMatch = 0.5;
+@@ -529,6 +779,31 @@ static const double compoundMatch = 0.5;
    return AUTORELEASE(button);
  }
  
@@ -1526,7 +1535,7 @@ index 6aa47f4fa..904fe26a8 100644
  - (NSPopUpButton *) _popUpButtonAtIndex: (NSUInteger)index
  {
    NSArray *views = [self templateViews];
-@@ -619,7 +892,7 @@ static const double compoundMatch = 0.5;
+@@ -619,7 +894,7 @@ static const double compoundMatch = 0.5;
            [titles addObject: [self _titleForExpression: expression]];
          }
  
@@ -2815,10 +2824,10 @@ index 000000000..b4dd0ef8b
 +}
 diff --git a/Tests/gui/NSPredicateEditor/criteria.m b/Tests/gui/NSPredicateEditor/criteria.m
 new file mode 100644
-index 000000000..13a011874
+index 000000000..964694b9c
 --- /dev/null
 +++ b/Tests/gui/NSPredicateEditor/criteria.m
-@@ -0,0 +1,357 @@
+@@ -0,0 +1,402 @@
 +#include "Testing.h"
 +
 +#include <Foundation/NSArray.h>
@@ -3151,6 +3160,51 @@ index 000000000..13a011874
 +                 "a predicate no template can show is refused");
 +  PASS([editor numberOfRows] == 3, "and the rows stay as they were");
 +
++  /* Parts no template can show are left out. */
++  {
++    NSPredicateEditor *parts;
++    NSPredicate *p;
++
++    parts = AUTORELEASE([[NSPredicateEditor alloc]
++      initWithFrame: NSMakeRect(0.0, 0.0, 700.0, 400.0)]);
++    [parts setRowTemplates: [NSArray arrayWithObjects: compound, numbers, nil]];
++
++    [parts setObjectValue:
++      [NSPredicate predicateWithFormat: @"age < 3 AND weight > 1"]];
++    PASS([parts numberOfRows] == 2, "a part no template can show is left out");
++    PASS_EQUAL([[parts predicate] predicateFormat], format(@"age < 3"),
++               "and the rest is shown");
++
++    [parts setObjectValue:
++      [NSPredicate predicateWithFormat: @"weight > 1 AND height > 2"]];
++    PASS([parts numberOfRows] == 1
++         && [[parts predicate] evaluateWithObject: nil],
++         "with none of its parts shown, an All has no rows, and holds");
++
++    [parts setObjectValue:
++      [NSPredicate predicateWithFormat: @"age < 3 AND (weight > 1 OR height > 2)"]];
++    PASS([parts numberOfRows] == 3, "an Any with none of its parts keeps its row");
++    p = [[(NSCompoundPredicate *)[parts predicate] subpredicates] lastObject];
++    PASS([p isKindOfClass: [NSCompoundPredicate class]]
++         && [[(NSCompoundPredicate *)p subpredicates] count] == 0
++         && ![p evaluateWithObject: nil],
++         "and holds for nothing");
++
++    [parts setObjectValue:
++      [NSPredicate predicateWithFormat: @"age < 3 AND (age == 1 OR weight > 2)"]];
++    PASS([parts numberOfRows] == 4 && [parts parentRowForRow: 3] == 2,
++         "a part within a part is left out too");
++    p = [[(NSCompoundPredicate *)[parts predicate] subpredicates] lastObject];
++    PASS([p isKindOfClass: [NSCompoundPredicate class]]
++         && [[(NSCompoundPredicate *)p subpredicates] count] == 1,
++         "an Any of one row is a compound of one");
++
++    PASS_EXCEPTION([parts setObjectValue:
++                     [NSPredicate predicateWithFormat: @"NOT weight > 1"]],
++                   NSInvalidArgumentException,
++                   "a NOT is not shown without its part");
++  }
++
 +  [editor setObjectValue: [NSPredicate predicateWithFormat: @"nick == 'x'"]];
 +  PASS([editor numberOfRows] == 1
 +       && [editor rowTypeForRow: 0] == NSRuleEditorRowTypeSimple,
@@ -3178,10 +3232,10 @@ index 000000000..13a011874
 +}
 diff --git a/Tests/gui/NSPredicateEditorRowTemplate/keyPaths.m b/Tests/gui/NSPredicateEditorRowTemplate/keyPaths.m
 new file mode 100644
-index 000000000..d7540562d
+index 000000000..28a54ca80
 --- /dev/null
 +++ b/Tests/gui/NSPredicateEditorRowTemplate/keyPaths.m
-@@ -0,0 +1,309 @@
+@@ -0,0 +1,335 @@
 +#include "Testing.h"
 +
 +#include <Foundation/NSArray.h>
@@ -3388,6 +3442,20 @@ index 000000000..d7540562d
 +         == NSStringAttributeType,
 +       "a key path through a relationship ends at its attribute");
 +
++  templates = [NSPredicateEditorRowTemplate
++    templatesWithAttributeKeyPaths: ([NSArray arrayWithObjects: @"name",
++      @"home.city", @"age", @"name", @"name", nil])
++               inEntityDescription: (NSEntityDescription *)person];
++  PASS([templates count] == 3,
++       "key paths of the same type, one after another, share a template");
++  PASS_EQUAL([[templates objectAtIndex: 0] leftExpressions],
++             ([NSArray arrayWithObjects:
++                [NSExpression expressionForKeyPath: @"name"],
++                [NSExpression expressionForKeyPath: @"home.city"], nil]),
++             "in their order");
++  PASS([[[templates objectAtIndex: 2] leftExpressions] count] == 2,
++       "a key path given twice is there twice");
++
 +  PASS_EXCEPTION([NSPredicateEditorRowTemplate
 +                   templatesWithAttributeKeyPaths: [NSArray arrayWithObject: @"blob"]
 +                              inEntityDescription: (NSEntityDescription *)person],
@@ -3419,12 +3487,24 @@ index 000000000..d7540562d
 +             "the items of the compound pop-up stand for the compound types");
 +  a = [NSPredicate predicateWithFormat: @"a == 1"];
 +  b = [NSPredicate predicateWithFormat: @"b == 2"];
-+  PASS_EQUAL([[compound predicateWithSubpredicates: [NSArray arrayWithObject: a]]
-+               predicateFormat], [a predicateFormat],
-+             "all of one row is that row");
-+  PASS_EQUAL([[compound predicateWithSubpredicates: [NSArray array]]
-+               predicateFormat], @"TRUEPREDICATE",
-+             "all of no rows holds for anything");
++  {
++    NSPredicate *p = [compound predicateWithSubpredicates:
++      [NSArray arrayWithObject: a]];
++
++    PASS([p isKindOfClass: [NSCompoundPredicate class]]
++         && [(NSCompoundPredicate *)p compoundPredicateType] == NSAndPredicateType
++         && [[(NSCompoundPredicate *)p subpredicates] isEqual:
++           [NSArray arrayWithObject: a]],
++         "all of one row is an AND of that row");
++    PASS([[compound predicateWithSubpredicates: [NSArray array]]
++           evaluateWithObject: nil],
++         "all of no rows holds for anything");
++    [compound setPredicate: [NSCompoundPredicate orPredicateWithSubpredicates:
++      [NSArray arrayWithObject: a]]];
++    PASS(![[compound predicateWithSubpredicates: [NSArray array]]
++            evaluateWithObject: nil],
++         "any of no rows holds for nothing");
++  }
 +  [compound setPredicate: [NSCompoundPredicate notPredicateWithSubpredicate: a]];
 +  PASS_EQUAL([[compound predicateWithSubpredicates: [NSArray arrayWithObject: a]]
 +               predicateFormat],

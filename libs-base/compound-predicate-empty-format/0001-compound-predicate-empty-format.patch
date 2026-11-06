@@ -1,0 +1,106 @@
+From d84708c5e4bb1671ac4e58fa8cd5362d76d29502 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Thu, 5 Nov 2026 19:21:14 +0000
+Subject: [PATCH] NSCompoundPredicate: an AND or an OR of nothing is written
+ TRUEPREDICATE or FALSEPREDICATE
+
+A compound predicate with no subpredicates wrote an empty format, which
+does not read back as a predicate, and within an AND wrote "()".  It
+evaluates all the same: an AND of nothing holds, an OR of nothing does
+not.
+
+On macOS 15 an AND of nothing is written TRUEPREDICATE and an OR of
+nothing FALSEPREDICATE, and an OR of nothing within an AND is in
+parentheses, as any OR there is: "b < 3 AND (FALSEPREDICATE)".  A
+predicate editor's compound row with no rows beneath it is such a
+predicate.
+
+Tests/base/NSPredicate/emptyCompoundFormat.m: 5 of its 7 checks fail
+without the change; with it all pass, as do the rest of the NSPredicate
+tests.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/NSPredicate.m                         |  8 ++++
+ Tests/base/NSPredicate/emptyCompoundFormat.m | 43 ++++++++++++++++++++
+ 2 files changed, 51 insertions(+)
+ create mode 100644 Tests/base/NSPredicate/emptyCompoundFormat.m
+
+diff --git a/Source/NSPredicate.m b/Source/NSPredicate.m
+index 5dbb60b..36ea604 100644
+--- a/Source/NSPredicate.m
++++ b/Source/NSPredicate.m
+@@ -873,6 +873,10 @@ argumentsFromFormat(NSString *format, va_list args)
+   NSPredicate	*sub;
+   unsigned	cnt = 0;
+ 
++  if ([_subs count] == 0)
++    {
++      return @"TRUEPREDICATE";
++    }
+   while ((sub = [e nextObject]) != nil)
+     {
+       // when to add ()? -> if sub is compound and of type "or"
+@@ -935,6 +939,10 @@ argumentsFromFormat(NSString *format, va_list args)
+   NSEnumerator	*e = [_subs objectEnumerator];
+   NSPredicate	*sub;
+ 
++  if ([_subs count] == 0)
++    {
++      return @"FALSEPREDICATE";
++    }
+   while ((sub = [e nextObject]) != nil)
+     {
+       if ([fmt length] > 0)
+diff --git a/Tests/base/NSPredicate/emptyCompoundFormat.m b/Tests/base/NSPredicate/emptyCompoundFormat.m
+new file mode 100644
+index 0000000..c54b377
+--- /dev/null
++++ b/Tests/base/NSPredicate/emptyCompoundFormat.m
+@@ -0,0 +1,43 @@
++#import "Testing.h"
++#import <Foundation/NSArray.h>
++#import <Foundation/NSAutoreleasePool.h>
++#import <Foundation/NSCompoundPredicate.h>
++#import <Foundation/NSPredicate.h>
++#import <Foundation/NSString.h>
++
++/* What macOS 15 writes for a compound predicate with no parts: what holds
++ * for anything, an AND of nothing, and what holds for nothing, an OR.
++ */
++int main()
++{
++  NSAutoreleasePool	*arp = [NSAutoreleasePool new];
++  NSPredicate		*none;
++  NSPredicate		*all;
++  NSPredicate		*b;
++
++  START_SET("NSCompoundPredicate with no parts")
++
++  all = [NSCompoundPredicate andPredicateWithSubpredicates: [NSArray array]];
++  none = [NSCompoundPredicate orPredicateWithSubpredicates: [NSArray array]];
++  b = [NSPredicate predicateWithFormat: @"b < 3"];
++
++  PASS_EQUAL([all predicateFormat], @"TRUEPREDICATE",
++    "an AND of nothing is written TRUEPREDICATE")
++  PASS_EQUAL([none predicateFormat], @"FALSEPREDICATE",
++    "an OR of nothing is written FALSEPREDICATE")
++  PASS([all evaluateWithObject: nil], "an AND of nothing holds")
++  PASS(![none evaluateWithObject: nil], "an OR of nothing does not")
++  PASS([[NSPredicate predicateWithFormat: [all predicateFormat]]
++    evaluateWithObject: nil], "what is written for it reads back")
++  PASS(![[NSPredicate predicateWithFormat: [none predicateFormat]]
++    evaluateWithObject: nil], "and so does the OR's")
++  PASS_EQUAL([[NSCompoundPredicate andPredicateWithSubpredicates:
++    ([NSArray arrayWithObjects: b, none, nil])] predicateFormat],
++    @"b < 3 AND (FALSEPREDICATE)",
++    "an OR of nothing within an AND is written in parentheses")
++
++  END_SET("NSCompoundPredicate with no parts")
++
++  [arp release];
++  return 0;
++}
+-- 
+2.43.0
+

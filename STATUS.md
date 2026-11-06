@@ -1170,6 +1170,26 @@ suite as before but for `encoded-word-stack.m`, which aborts without the
 patch too.
 With every patch here the libs-gui suite passes 5753 and the libs-base
 suite 15328 (`encoded-word-stack.m` as above).
+Revised on 2026-11-06, after ODataKit's Workbench took the predicate
+editor up and macOS 15 was asked the same of it:
+`predicate-editor-criteria` now leaves out the parts of a predicate no
+template can show, at any depth, a compound that loses them all keeping
+its row (it raised for the whole predicate; it still raises when the
+predicate itself, or a NOT's part, cannot be shown); a compound template
+gives a compound of its rows, of one or none too, and a compound row with
+no rows beneath it is such a predicate (it gave the one row itself, and
+nil); and key paths of the same type, one after another, share a
+template (each had its own).  `NSPredicateEditor/criteria.m` (56) and
+`NSPredicateEditorRowTemplate/keyPaths.m` (32) check it; against the
+patch as it was, criteria.m aborts and 5 of keyPaths.m's checks fail.
+With it, `compound-predicate-empty-format` (libs-base): an AND of no
+subpredicates was written as nothing, and an OR too, which reads back as
+no predicate; on macOS 15 they are TRUEPREDICATE and FALSEPREDICATE, and
+an OR of nothing within an AND is in parentheses.
+`NSPredicate/emptyCompoundFormat.m` (5 of 7 fail on master a40c1af)
+passes with it, as do the other NSPredicate tests.  With every patch here
+the libs-gui suite passes 5765 and the libs-base suite 15335
+(`encoded-word-stack.m` as above).
 
 Added on 2026-10-31 for LogBook on Windows, whose sync check took five
 minutes on a laptop and lost a receipt's photo on CI: `urlsession-windows-write`
@@ -1610,6 +1630,7 @@ among it, passes with this gui and fails without it.
 | `menu-update-delegate-once` | libs-gui | test | not sent yet | (none: FreeCoreData's ModelBuilder uses it from here) |
 | `predicate-editor-criteria` | libs-gui | test | not sent yet | (none: FreeCoreData's ModelBuilder uses it from here) |
 | `predicate-string-constant-format` | libs-base | test | not sent yet | (none: FreeCoreData's ModelBuilder uses it from here) |
+| `compound-predicate-empty-format` | libs-base | test | not sent yet | (none: FreeCoreData's ModelBuilder and ODataKit's Workbench use it from here) |
 
 Re-run that check before sending anything: `Scripts/apply-patches.sh` on a
 fresh checkout is the quickest form of it.
