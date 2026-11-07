@@ -1202,6 +1202,20 @@ is called zero times; here three).  `NSPopUpButtonCell/stateImage.m`
 fails without it and passes with it.  With every patch here the libs-gui
 suite passes 5767.
 
+Added on 2026-11-07 for UDCode's project systems, whose documents are at
+URLs of an extension's scheme (`quarry:/material/textures/foo`, as VS Code's
+virtual file systems' are): `url-path-without-authority` (libs-base).  A URL
+with a scheme and an absolute path but no `//` was taken as opaque: `-path`,
+`-lastPathComponent`, `-pathExtension` and `-pathComponents` were nil,
+`-resourceSpecifier` lost the path's slash, and
+`-URLByAppendingPathComponent:` raised.  On macOS 15 such a URL is
+hierarchical (RFC 3986's path-absolute) and has all of them; built from its
+parts it keeps having no authority (`quarry:/material/b/d`).
+`NSURL/path-without-authority.m` passes all 23 against Foundation, fails 10
+without the fix (then aborts on the exception) and passes with it.  On
+master with the fix the libs-base suite passes 14253, failing only as master
+does (`GSMime/encoded-word-stack.m` aborts; `NSAutoreleasePool/dispatch.m`).
+
 Added on 2026-11-07 for Quarry, whose stage blend pop-up (a XIB's, bound by
 selectedValue, with no action) changed nothing when an item was chosen on
 Linux and Windows: `popup-menu-items` (libs-gui).  A menu given to a pop-up,
@@ -1669,6 +1683,7 @@ among it, passes with this gui and fails without it.
 | `popup-button-state-image` | libs-gui | test | not sent yet | (none: every app with a pop-up from a nib uses it from here) |
 | `supplemental-target` | libs-gui | test | not sent yet | (none: UDCode uses it from here) |
 | `popup-menu-items` | libs-gui | test | not sent yet | (none: every app with a bound pop-up from a nib uses it from here) |
+| `url-path-without-authority` | libs-base | test | not sent yet | (none: UDCode's project systems use it from here) |
 
 Re-run that check before sending anything: `Scripts/apply-patches.sh` on a
 fresh checkout is the quickest form of it.
