@@ -1202,6 +1202,18 @@ is called zero times; here three).  `NSPopUpButtonCell/stateImage.m`
 fails without it and passes with it.  With every patch here the libs-gui
 suite passes 5767.
 
+Added on 2026-11-07 for Quarry, whose stage blend pop-up (a XIB's, bound by
+selectedValue, with no action) changed nothing when an item was chosen on
+Linux and Windows: `popup-menu-items` (libs-gui).  A menu given to a pop-up,
+as a nib's always is, kept its items as they were, so one without an action
+sent nothing, the pop-up never sent its action, and its bindings never heard.
+On macOS 15 `-setMenu:` gives such an item the item action and the cell as
+target, whatever target it had, as it does one added to the menu later; an
+item with an action keeps both; a replaced menu's items keep the action and
+lose the target.  `NSPopUpButton/menuItemsAction.m` passes all 21 against
+AppKit, fails 10 without the fix and passes with it.  With every patch here
+the libs-gui suite passes 5805.
+
 Added on 2026-11-06 for UDCode, whose window sends menu commands to the
 front tab's editor wherever the focus is: `supplemental-target` (libs-gui).
 `-supplementalTargetForAction:sender:` was declared and never asked, so an
@@ -1656,6 +1668,7 @@ among it, passes with this gui and fails without it.
 | `compound-predicate-empty-format` | libs-base | test | not sent yet | (none: FreeCoreData's ModelBuilder and ODataKit's Workbench use it from here) |
 | `popup-button-state-image` | libs-gui | test | not sent yet | (none: every app with a pop-up from a nib uses it from here) |
 | `supplemental-target` | libs-gui | test | not sent yet | (none: UDCode uses it from here) |
+| `popup-menu-items` | libs-gui | test | not sent yet | (none: every app with a bound pop-up from a nib uses it from here) |
 
 Re-run that check before sending anything: `Scripts/apply-patches.sh` on a
 fresh checkout is the quickest form of it.
