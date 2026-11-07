@@ -1,0 +1,240 @@
+From 3e6ec24f6fe25ea061b6dda3001ad4a4f94822a4 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Sat, 7 Nov 2026 05:47:59 +0000
+Subject: [PATCH] NSPopUpButtonCell: the items of a menu it is given choose in
+ the pop-up
+
+A menu given to a pop-up, as one from a nib always is, kept its items as they
+were, so one without an action sent nothing when chosen: the pop-up never
+sent its action and its selection bindings never heard.  On macOS 15, -setMenu:
+gives an item without an action the item action and the cell as target,
+whatever target it had, as it does an item added to the menu later; an item
+with an action keeps it and its target.  A replaced menu's items keep the
+action and lose the target, and get it back with the menu.
+
+Tests/gui/NSPopUpButton/menuItemsAction.m passes all 21 checks on macOS 15; 10
+fail without the change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/NSPopUpButtonCell.m                |  43 +++++++
+ Tests/gui/NSPopUpButton/menuItemsAction.m | 132 ++++++++++++++++++++++
+ 2 files changed, 175 insertions(+)
+ create mode 100644 Tests/gui/NSPopUpButton/menuItemsAction.m
+
+diff --git a/Source/NSPopUpButtonCell.m b/Source/NSPopUpButtonCell.m
+index 63d3cafb2..5f5e84d43 100644
+--- a/Source/NSPopUpButtonCell.m
++++ b/Source/NSPopUpButtonCell.m
+@@ -55,6 +55,7 @@ static NSImage *_pbc_image[5];
+ 
+ @interface NSPopUpButtonCell (CocoaExtensions)
+ - (void) _popUpItemAction: (id)sender;
++- (void) _adoptMenuItems: (NSNotification *)notification;
+ @end
+ 
+ @implementation NSPopUpButtonCell
+@@ -173,6 +174,18 @@ static NSImage *_pbc_image[5];
+ 
+   if (_menu != nil)
+     {
++      NSEnumerator *e = [[_menu itemArray] objectEnumerator];
++      id<NSMenuItem> item;
++
++      /* As on macOS, its items keep the action and lose the target. */
++      while ((item = [e nextObject]) != nil)
++        {
++          if ([item target] == self
++            && sel_isEqual([item action], @selector(_popUpItemAction:)))
++            {
++              [item setTarget: nil];
++            }
++        }
+       [_menu _setOwnedByPopUp: nil];
+       [nc removeObserver: self
+                     name: nil
+@@ -192,6 +205,11 @@ static NSImage *_pbc_image[5];
+        * popupbutton code in super class NSMenuItemCell
+        */
+       [self setMenuView: [_menu menuRepresentation]];
++      [self _adoptMenuItems: nil];
++      [nc addObserver: self
++             selector: @selector(_adoptMenuItems:)
++                 name: NSMenuDidAddItemNotification
++               object: _menu];
+       [nc addObserver: self
+              selector: @selector(synchronizeTitleAndSelectedItem)
+                  name: NSMenuDidAddItemNotification
+@@ -1404,6 +1422,31 @@ static NSImage *_pbc_image[5];
+ /*
+  * The selector for this method gets used by menu items in Apple NIB files.
+  */
++/* As on macOS, an item of the menu without an action of its own chooses in
++ * the pop-up, whatever its target was: added here or to the menu, or the menu
++ * given whole, as a nib gives it.  */
++- (void) _adoptMenuItems: (NSNotification *)notification
++{
++  NSEnumerator *e = [[_menu itemArray] objectEnumerator];
++  id<NSMenuItem> item;
++
++  while ((item = [e nextObject]) != nil)
++    {
++      SEL action = [item action];
++
++      if (action == NULL)
++        {
++          [item setAction: @selector(_popUpItemAction:)];
++          [item setTarget: self];
++        }
++      else if (sel_isEqual(action, @selector(_popUpItemAction:))
++        && [item target] != self)
++        {
++          [item setTarget: self];
++        }
++    }
++}
++
+ - (void) _popUpItemAction: (id)sender
+ {
+   // first, if sender is one of our items, set it as our selected item
+diff --git a/Tests/gui/NSPopUpButton/menuItemsAction.m b/Tests/gui/NSPopUpButton/menuItemsAction.m
+new file mode 100644
+index 000000000..752d56ba9
+--- /dev/null
++++ b/Tests/gui/NSPopUpButton/menuItemsAction.m
+@@ -0,0 +1,132 @@
++/* The items of a menu given to a pop-up choose in the pop-up, as AppKit has
++   them: one without an action takes the pop-up's item action and its cell as
++   target, added later too, so that the selection bindings hear of it; one
++   with an action of its own keeps it; a menu replaced lets go of its items.
++   A menu from a nib is given this way.  Checked against AppKit on macOS.
++*/
++#include "Testing.h"
++
++#include <Foundation/NSAutoreleasePool.h>
++#include <Foundation/NSObject.h>
++#include <Foundation/NSString.h>
++
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSKeyValueBinding.h>
++#include <AppKit/NSMenu.h>
++#include <AppKit/NSMenuItem.h>
++#include <AppKit/NSPopUpButton.h>
++
++@interface Model : NSObject
++{
++@public
++  NSString *value;
++  int hits;
++}
++- (NSString *) value;
++- (void) setValue: (NSString *)aValue;
++- (void) own: (id)sender;
++@end
++
++@implementation Model
++- (NSString *) value
++{
++  return value;
++}
++- (void) setValue: (NSString *)aValue
++{
++  ASSIGN(value, aValue);
++}
++- (void) own: (id)sender
++{
++  hits++;
++}
++@end
++
++static NSMenuItem *
++newItem(NSString *title, SEL action, id target)
++{
++  NSMenuItem *item = AUTORELEASE([[NSMenuItem alloc] initWithTitle: title
++                                                            action: action
++                                                     keyEquivalent: @""]);
++
++  [item setTarget: target];
++  return item;
++}
++
++int
++main(int argc, char **argv)
++{
++  START_SET("NSPopUpButton a menu's items")
++
++  NS_DURING
++    {
++      [NSApplication sharedApplication];
++    }
++  NS_HANDLER
++    {
++      if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++        SKIP("It looks like GNUstep backend is not yet installed")
++    }
++  NS_ENDHANDLER
++
++  {
++    NSPopUpButton *p = AUTORELEASE([[NSPopUpButton alloc]
++      initWithFrame: NSMakeRect(0, 0, 100, 25) pullsDown: NO]);
++    NSMenu *m = AUTORELEASE([[NSMenu alloc] initWithTitle: @""]);
++    Model *o = [[Model alloc] init];  /* outlives the menu whose item it is the target of */
++    SEL itemAction = NSSelectorFromString(@"_popUpItemAction:");
++    NSMenuItem *plain = newItem(@"plain", NULL, nil);
++    NSMenuItem *targeted = newItem(@"targeted", NULL, o);
++    NSMenuItem *own = newItem(@"own", @selector(own:), o);
++    NSMenuItem *untargeted = newItem(@"untargeted", @selector(own:), nil);
++    NSMenuItem *later = newItem(@"later", NULL, nil);
++
++    [m addItem: plain];
++    [m addItem: targeted];
++    [m addItem: own];
++    [m addItem: untargeted];
++    [p setMenu: m];
++
++    PASS(sel_isEqual([plain action], itemAction), "an item without an action takes the pop-up's")
++    PASS([plain target] == [p cell], "and the cell as its target")
++    PASS(sel_isEqual([targeted action], itemAction), "one with only a target takes the action")
++    PASS([targeted target] == [p cell], "and the cell in place of its target")
++    PASS(sel_isEqual([own action], @selector(own:)), "one with an action keeps it")
++    PASS([own target] == o, "and its target")
++    PASS(sel_isEqual([untargeted action], @selector(own:)) && [untargeted target] == nil,
++      "an action with no target stays so")
++
++    [m addItem: later];
++    PASS(sel_isEqual([later action], itemAction), "an item added later takes the action")
++    PASS([later target] == [p cell], "and the cell as its target")
++
++    [o setValue: @"plain"];
++    [p bind: NSSelectedValueBinding toObject: o withKeyPath: @"value" options: nil];
++    PASS_EQUAL([p titleOfSelectedItem], @"plain", "the pop-up shows the model's")
++
++    [m performActionForItemAtIndex: [m indexOfItem: targeted]];
++    PASS_EQUAL([o value], @"targeted", "an item chosen reaches the binding")
++    PASS_EQUAL([p titleOfSelectedItem], @"targeted", "and is selected")
++    [m performActionForItemAtIndex: [m indexOfItem: later]];
++    PASS_EQUAL([o value], @"later", "one added later too")
++
++    [o setValue: @"plain"];
++    PASS_EQUAL([p titleOfSelectedItem], @"plain", "the model's change reaches the pop-up")
++
++    [m performActionForItemAtIndex: [m indexOfItem: own]];
++    PASS(o->hits == 1, "an item's own action is sent")
++    PASS_EQUAL([o value], @"plain", "and the binding does not hear of it")
++    PASS_EQUAL([p titleOfSelectedItem], @"own", "though it is selected")
++
++    [p unbind: NSSelectedValueBinding];
++    [p setMenu: AUTORELEASE([[NSMenu alloc] initWithTitle: @""])];
++    PASS(sel_isEqual([plain action], itemAction), "a replaced menu's item keeps the action")
++    PASS([plain target] == nil, "and has no target")
++    PASS([own target] == o, "an item's own target stays")
++    [p setMenu: m];
++    PASS([plain target] == [p cell], "given back, it has the cell again")
++  }
++
++  END_SET("NSPopUpButton a menu's items")
++  return 0;
++}
+-- 
+2.43.0
+
