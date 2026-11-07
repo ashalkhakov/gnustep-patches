@@ -1,0 +1,193 @@
+From 54db0058e04b417ebc1c7c4ad3d2d87db8944126 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Sat, 7 Nov 2026 10:04:01 +0000
+Subject: [PATCH] NSURL: a <scheme>:/<path> URL has its path, as on macOS
+
+A URL with a scheme and an absolute path but no authority
+("quarry:/material/b", "untitled:/Untitled-1", VS Code's URIs of its
+virtual file systems) is hierarchical (RFC 3986 section 3: hier-part =
+path-absolute), and macOS gives it its path, last path component,
+extension and path components, and a resource specifier starting with
+the path's slash. GNUstep took it as an opaque URL unless it had "//":
+-path and the rest were nil, -resourceSpecifier lost the slash, and
+-URLByAppendingPathComponent: and the other path-setting methods raised
+(_URLBySettingPath: was given a nil path).
+
+Such a URL is now generic, with a new noAuthority flag so that building
+its string (buildURL(), and _URLBySettingPath:, which built it from its
+parts through "scheme://") writes no "//": appending a component to
+quarry:/material/b gives quarry:/material/b/d, as on macOS. A relative
+URL resolved against one takes the flag from its base. file: URLs are
+left as they were, and an opaque URL (mailto:a@b.c, quarry:material/b)
+still has no path.
+
+Tests/base/NSURL/path-without-authority.m checks each of these; its 23
+checks pass on macOS 15, and 10 of them fail without the fix (the set then
+aborts on the exception).
+---
+ Source/NSURL.m                            | 40 +++++++++++++-
+ Tests/base/NSURL/path-without-authority.m | 63 +++++++++++++++++++++++
+ 2 files changed, 102 insertions(+), 1 deletion(-)
+ create mode 100644 Tests/base/NSURL/path-without-authority.m
+
+diff --git a/Source/NSURL.m b/Source/NSURL.m
+index ee46add..255b48d 100644
+--- a/Source/NSURL.m
++++ b/Source/NSURL.m
+@@ -107,6 +107,7 @@ extern int WSAAPI inet_pton(int , const char *, void *);
+ 
+ @interface	NSURL (GSPrivate)
+ - (NSURL*) _URLBySettingPath: (NSString*)newPath; 
++- (BOOL) _hasNoAuthority;
+ @end
+ 
+ @implementation	NSURL (GSPrivate)
+@@ -133,6 +134,31 @@ extern int WSAAPI inet_pton(int , const char *, void *);
+ 	{
+ 	  params = [self parameterString];
+ 	}
++      if (YES == [self _hasNoAuthority])
++	{
++	  NSMutableString	*s;
++
++	  s = [NSMutableString stringWithFormat: @"%@:", [self scheme]];
++	  if ([newPath hasPrefix: @"/"] == NO)
++	    {
++	      [s appendString: @"/"];
++	    }
++	  [s appendString: [newPath stringByAddingPercentEncodingWithAllowedCharacters:
++	    [NSCharacterSet URLPathAllowedCharacterSet]]];
++	  if ([params length] > 0)
++	    {
++	      [s appendFormat: @";%@", params];
++	    }
++	  if ([self query] != nil)
++	    {
++	      [s appendFormat: @"?%@", [self query]];
++	    }
++	  if ([self fragment] != nil)
++	    {
++	      [s appendFormat: @"#%@", [self fragment]];
++	    }
++	  return [NSURL URLWithString: s];
++	}
+ 
+       u = [[NSURL alloc] initWithScheme: [self scheme]
+ 				   user: [self user]
+@@ -207,6 +233,7 @@ typedef struct {
+   BOOL	emptyPath;
+   BOOL	hasNoPath;
+   BOOL	isGeneric;
++  BOOL	noAuthority;	// <scheme>:/<path>
+   BOOL	isFile;
+ } parsedURL;
+ 
+@@ -301,7 +328,7 @@ static char *buildURL(parsedURL *base, parsedURL *rel, BOOL standardize)
+       ptr += l;
+       *ptr++ = ':';
+     }
+-  if (rel->isGeneric == YES
++  if ((rel->isGeneric == YES && rel->noAuthority == NO)
+     || rel->user != 0 || rel->password != 0 || rel->host != 0 || rel->port != 0)
+     {
+       *ptr++ = '/';
+@@ -1274,9 +1301,15 @@ static NSUInteger	urlAlign;
+ 	      if (base != 0)
+ 		{
+ 		  buf->isGeneric = base->isGeneric;
++		  buf->noAuthority = base->noAuthority;
+ 		}
+ 	      if (*start == '/')
+ 		{
++		  if (base == 0 && buf->scheme != 0 && buf->isFile == NO)
++		    {
++		      buf->isGeneric = YES;
++		      buf->noAuthority = YES;
++		    }
+ 		  buf->pathIsAbsolute = YES;
+ 		  start++;
+ 		}
+@@ -2025,6 +2058,11 @@ static NSUInteger	urlAlign;
+   return [self _pathWithEscapes: NO];
+ }
+ 
++- (BOOL) _hasNoAuthority
++{
++  return myData->noAuthority;
++}
++
+ - (NSArray*) pathComponents 
+ {
+   return [[self path] pathComponents];
+diff --git a/Tests/base/NSURL/path-without-authority.m b/Tests/base/NSURL/path-without-authority.m
+new file mode 100644
+index 0000000..a170e8b
+--- /dev/null
++++ b/Tests/base/NSURL/path-without-authority.m
+@@ -0,0 +1,63 @@
++#import "ObjectTesting.h"
++#import <Foundation/NSArray.h>
++#import <Foundation/NSString.h>
++#import <Foundation/NSURL.h>
++
++int main()
++{
++  START_SET("NSURL <scheme>:/<path>, a path with no authority")
++
++  NSURL	*url = [NSURL URLWithString: @"quarry:/material/b.mtr?x=1#top"];
++  NSURL	*root = [NSURL URLWithString: @"quarry:/"];
++  NSURL	*dir = [NSURL URLWithString: @"quarry:/a/b/"];
++  NSURL	*opaque = [NSURL URLWithString: @"quarry:material/b"];
++  NSURL	*u;
++
++  PASS_EQUAL([url absoluteString], @"quarry:/material/b.mtr?x=1#top",
++    "the string is kept as it is")
++  PASS_EQUAL([url scheme], @"quarry", "it has its scheme")
++  PASS([url host] == nil, "it has no host")
++  PASS_EQUAL([url path], @"/material/b.mtr", "it has its path")
++  PASS_EQUAL([url relativePath], @"/material/b.mtr", "its relative path is its path")
++  PASS_EQUAL([url lastPathComponent], @"b.mtr", "its last path component")
++  PASS_EQUAL([url pathExtension], @"mtr", "its path extension")
++  PASS_EQUAL([url pathComponents],
++    ([NSArray arrayWithObjects: @"/", @"material", @"b.mtr", nil]),
++    "its path components")
++  PASS_EQUAL([url query], @"x=1", "its query")
++  PASS_EQUAL([url fragment], @"top", "its fragment")
++  PASS_EQUAL([url resourceSpecifier], @"/material/b.mtr?x=1#top",
++    "its resource specifier starts with the path's slash")
++  PASS([url isEqual: [NSURL URLWithString: @"quarry:/material/b.mtr?x=1#top"]],
++    "it is equal to another of the same string")
++
++  PASS_EQUAL([root path], @"/", "the root's path is /")
++  PASS_EQUAL([root resourceSpecifier], @"/", "the root's resource specifier is /")
++  PASS_EQUAL([dir path], @"/a/b", "a trailing slash is not in the path")
++  PASS_EQUAL([dir lastPathComponent], @"b", "nor in the last path component")
++
++  u = [[NSURL URLWithString: @"quarry:/material/b"]
++    URLByAppendingPathComponent: @"d"];
++  PASS_EQUAL([u absoluteString], @"quarry:/material/b/d",
++    "a path component appended, still with no authority")
++  u = [[NSURL URLWithString: @"quarry:/material/b"]
++    URLByAppendingPathExtension: @"mtr"];
++  PASS_EQUAL([u absoluteString], @"quarry:/material/b.mtr",
++    "a path extension appended, still with no authority")
++  u = [[NSURL URLWithString: @"quarry:/material/b"]
++    URLByDeletingLastPathComponent];
++  PASS_EQUAL([u path], @"/material", "the last path component deleted")
++
++  u = [NSURL URLWithString: @"c" relativeToURL:
++    [NSURL URLWithString: @"quarry:/material/b"]];
++  PASS_EQUAL([u path], @"/material/c", "a relative path resolved against it")
++
++  PASS([opaque path] == nil, "an opaque URL (no slash) has no path")
++  PASS_EQUAL([opaque resourceSpecifier], @"material/b",
++    "an opaque URL's resource specifier is all after the scheme")
++  PASS([[NSURL URLWithString: @"mailto:a@b.c"] path] == nil,
++    "mailto: has no path")
++
++  END_SET("NSURL <scheme>:/<path>, a path with no authority")
++  return 0;
++}
+-- 
+2.43.0
+
