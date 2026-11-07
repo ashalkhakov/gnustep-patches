@@ -52,6 +52,8 @@ libxcursor-dev
 # (software) GL to test with.
 libgl-dev
 libgl1-mesa-dri
+# FreeCoreData's SQLite store.
+libsqlite3-dev
 libsndfile1-dev
 libao-dev
 xvfb

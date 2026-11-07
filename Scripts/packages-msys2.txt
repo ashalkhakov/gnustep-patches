@@ -34,5 +34,7 @@ libtiff
 libpng
 giflib
 lcms2
+# FreeCoreData's SQLite store.
+sqlite3
 libsndfile
 libao
