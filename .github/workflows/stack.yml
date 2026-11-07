@@ -45,7 +45,7 @@ jobs:
       LIBRARY_COMBO: ng-gnu-gnu
       RUNTIME_VERSION: gnustep-2.0
       LD_LIBRARY_PATH: /opt/gnustep/lib
-      COMPONENTS: libobjc2 libdispatch tools-make libs-base libs-gui libs-back libs-corebase libs-opal eau tools-xctest gsupdater
+      COMPONENTS: libobjc2 libdispatch tools-make libs-base libs-gui libs-back libs-corebase libs-opal eau tools-xctest freecoredata gsupdater
     steps:
       - uses: actions/checkout@v4
 
@@ -108,6 +108,13 @@ jobs:
             'include $(GNUSTEP_MAKEFILES)/tool.make' > GNUmakefile
           make -s
           [ "$(./obj/hello)" = "hello 7 8 10" ]
+          # Core Data (FreeCoreData), the stack's: a program that links it
+          mkdir -p "$RUNNER_TEMP/coredata" && cd "$RUNNER_TEMP/coredata"
+          cp "$GITHUB_WORKSPACE/Scripts/coredata-check.m" .
+          printf '%s\n' 'include $(GNUSTEP_MAKEFILES)/common.make' 'TOOL_NAME = coredata' 'coredata_OBJC_FILES = coredata-check.m' \
+            'coredata_TOOL_LIBS = -lCoreData' 'include $(GNUSTEP_MAKEFILES)/tool.make' > GNUmakefile
+          make -s
+          [ "$(./obj/coredata)" = "hello 1" ]
 
       - name: Archive
         run: |
@@ -142,7 +149,7 @@ jobs:
       RUNTIME_VERSION: gnustep-2.0
       # Eau is built on X11; Windows applications use WinUXTheme, the native
       # look, instead.
-      COMPONENTS: cairo libobjc2 libdispatch tools-make libs-base libs-gui libs-back libs-corebase libs-opal winuxtheme tools-xctest gsupdater
+      COMPONENTS: cairo libobjc2 libdispatch tools-make libs-base libs-gui libs-back libs-corebase libs-opal winuxtheme tools-xctest freecoredata gsupdater
     steps:
       # The patches are applied byte for byte: no CRLF.
       - name: Line endings
@@ -203,6 +210,13 @@ jobs:
           # base reads its GNUstep.conf from beside its DLL, all Windows paths.
           cat stderr.txt
           ! grep -q "is not an absolute path" stderr.txt
+          # Core Data (FreeCoreData), the stack's: a program that links it
+          mkdir -p "$(cygpath -u "$RUNNER_TEMP")/coredata" && cd "$(cygpath -u "$RUNNER_TEMP")/coredata"
+          cp "$(cygpath -u "$GITHUB_WORKSPACE")/Scripts/coredata-check.m" .
+          printf '%s\n' 'include $(GNUSTEP_MAKEFILES)/common.make' 'TOOL_NAME = coredata' 'coredata_OBJC_FILES = coredata-check.m' \
+            'coredata_TOOL_LIBS = -lCoreData' 'include $(GNUSTEP_MAKEFILES)/tool.make' > GNUmakefile
+          make -s
+          [ "$(./obj/coredata | tr -d '\r')" = "hello 1" ]
 
       - name: Archive
         run: |

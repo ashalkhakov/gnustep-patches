@@ -22,7 +22,7 @@
 #   SOURCES          where the checkouts live (also accepted: DEPS_PATH)
 #   COMPONENTS       build these, in this order (default: the full stack;
 #                    on Windows, cairo first, and winuxtheme in place of eau;
-#                    gsupdater, the stack's own, last)
+#                    freecoredata, then gsupdater, the stack's own, last)
 #   PATCHES          "all" (default), "none", or a list of <project>/<topic>
 #   CC, CXX          default clang / clang++
 #   LIBRARY_COMBO    default ng-gnu-gnu
@@ -36,10 +36,13 @@
 #                    change on dev cannot stop a build; moved on purpose
 #   CAIRO_REF        default 1.18.6, the release MSYS2 packages: the same
 #                    cairo as theirs, with the patches here
+#   FREECOREDATA_REF default a FreeCoreData release (v0.12.0): Core Data,
+#                    moved on purpose
 set -eu
 
 EAU_REF=${EAU_REF:-01be00b5216b0ad508f30d66fa0d6734f44052c2}
 CAIRO_REF=${CAIRO_REF:-1.18.6}
+FREECOREDATA_REF=${FREECOREDATA_REF:-v0.12.0}
 
 PATCHES_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 
@@ -53,7 +56,7 @@ case "$(uname -s)" in
     MINGW*|MSYS*) theme=winuxtheme; cairo=cairo ;;
     *)            theme=eau; cairo= ;;
 esac
-COMPONENTS=${COMPONENTS:-"$cairo libobjc2 libdispatch tools-make libs-base libs-gui libs-back $theme tools-xctest gsupdater"}
+COMPONENTS=${COMPONENTS:-"$cairo libobjc2 libdispatch tools-make libs-base libs-gui libs-back $theme tools-xctest freecoredata gsupdater"}
 PATCHES=${PATCHES:-all}
 CC=${CC:-clang}
 CXX=${CXX:-clang++}
@@ -424,6 +427,18 @@ build_tools_xctest() {
     (cd "$SOURCES/tools-xctest" && make -j"$JOBS" && make install)
 }
 
+# Core Data, which on a Mac is the system's: FreeCoreData's framework and its
+# model compiler (momc, with the coredata-model.make applications include),
+# at a release. In the stack, so that an application and the plug-ins it
+# loads (UDCode and its extensions) link one copy: two would each register
+# the same classes. Its other parts (Model Builder, the SQL servers' stores,
+# the examples) are its own releases'.
+build_freecoredata() {
+    fetch freecoredata https://github.com/ashalkhakov/FreeCoreData.git
+    gnustep_sh
+    (cd "$SOURCES/freecoredata" && make -j"$JOBS" CD_PARTS=Tools/momc && make CD_PARTS=Tools/momc install)
+}
+
 # An application's updates, the same class everywhere: WinSparkle on
 # Windows, none on Linux (Components/GSUpdater). The stack's own, so not
 # fetched; its tests run before it is called built.
@@ -531,6 +546,16 @@ verify() {
     done
 
     case " $COMPONENTS " in
+        *" freecoredata "*)
+            if ! find "$PREFIX" -maxdepth 9 -path '*CoreData.framework*' -name 'CoreData.h' | grep -q . \
+                || ! find "$PREFIX" -maxdepth 6 -name 'coredata-model.make' | grep -q .; then
+                echo "verify: no FreeCoreData (CoreData.h, coredata-model.make) in $PREFIX" >&2
+                failed=1
+            fi
+            ;;
+    esac
+
+    case " $COMPONENTS " in
         *" gsupdater "*)
             if ! find "$PREFIX" -maxdepth 6 -name 'GSUpdater.h' | grep -q .; then
                 echo "verify: no GSUpdater in $PREFIX" >&2
@@ -581,6 +606,7 @@ for component in $COMPONENTS; do
         eau)            build_eau ;;
         winuxtheme)     build_winuxtheme ;;
         tools-xctest)   build_tools_xctest ;;
+        freecoredata)   build_freecoredata ;;
         gsupdater)      build_gsupdater ;;
         *) echo "build-gnustep: unknown component $component" >&2; exit 2 ;;
     esac
