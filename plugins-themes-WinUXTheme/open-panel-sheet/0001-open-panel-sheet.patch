@@ -1,0 +1,81 @@
+From e1c04c9b96e80dff37ed24daba59cb84bbe2b90f Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Sun, 8 Nov 2026 19:46:48 +0500
+Subject: [PATCH] Use the native panels for the block-based sheet methods too
+
+WinNSOpenPanel and WinNSSavePanel show Windows' own file dialog from
+-runModalForDirectory:... and -beginSheetForDirectory:..., but
+-beginSheetModalForWindow:completionHandler: and
+-beginWithCompletionHandler: are NSSavePanel's, which run the panel's
+GNUstep window instead.  An application that opens a panel the current
+way therefore got GNUstep's browser, and as the subclasses answer
+-filenames (and so -URLs) and -filename from what the native dialog
+chose, what came back was not the file picked there: choosing a program
+in an open panel gave its folder.
+
+Both methods now run the native dialog, as the older sheet method does,
+and call the handler with its result.
+
+There is no test suite for the theme; openpanel-sheet.m, kept with the
+patch, opens a panel with -beginSheetModalForWindow:completionHandler:,
+fills in the native dialog's file name from a second thread and presses
+OK, and checks -URLs: without the change no native dialog appears (the
+GNUstep panel is cancelled after ten seconds), with it the chosen file
+comes back.
+
+Patch done with help of AI.
+---
+ WinNSOpenPanel.m | 30 ++++++++++++++++++++++++++++++
+ 1 file changed, 30 insertions(+)
+
+diff --git a/WinNSOpenPanel.m b/WinNSOpenPanel.m
+index 150bbfe..7d7eb49 100644
+--- a/WinNSOpenPanel.m
++++ b/WinNSOpenPanel.m
+@@ -502,6 +502,21 @@ - (void)beginSheetForDirectory:(NSString *)path
+     }
+ }
+ 
++- (void) beginSheetModalForWindow: (NSWindow *)window
++                completionHandler: (GSSavePanelCompletionHandler)handler
++{
++  NSInteger result = [self runModalForDirectory: [self directory]
++                                           file: @""
++                                          types: [self allowedFileTypes]
++                               relativeToWindow: window];
++  CALL_BLOCK(handler, result);
++}
++
++- (void) beginWithCompletionHandler: (GSSavePanelCompletionHandler)handler
++{
++  [self beginSheetModalForWindow: nil completionHandler: handler];
++}
++
+ @end
+ 
+ @implementation WinNSSavePanel
+@@ -724,6 +739,21 @@ - (void)beginSheetForDirectory:(NSString *)path
+     }
+ }
+ 
++- (void) beginSheetModalForWindow: (NSWindow *)window
++                completionHandler: (GSSavePanelCompletionHandler)handler
++{
++  NSInteger result = [self runModalForDirectory: [self directory]
++                                           file: [self nameFieldStringValue]
++                                          types: [self allowedFileTypes]
++                               relativeToWindow: window];
++  CALL_BLOCK(handler, result);
++}
++
++- (void) beginWithCompletionHandler: (GSSavePanelCompletionHandler)handler
++{
++  [self beginSheetModalForWindow: nil completionHandler: handler];
++}
++
+ @end
+ 
+ @implementation WinUXTheme (OpenSavePanels)
+-- 
+2.50.1 (Apple Git-155)
+

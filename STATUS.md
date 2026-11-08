@@ -1228,6 +1228,23 @@ lose the target.  `NSPopUpButton/menuItemsAction.m` passes all 21 against
 AppKit, fails 10 without the fix and passes with it.  With every patch here
 the libs-gui suite passes 5805.
 
+Added on 2026-11-08 for UDQuakeTools on Windows, whose script debugger
+ended before the game started and whose Workspace Settings could not choose
+the game's program. `windows-pipe-available-data` (libs-base): -availableData
+puts a pipe in non-blocking mode and took ReadFile's ERROR_NO_DATA, the
+answer for a pipe nothing has been written to yet, as a failure, raising
+"unable to read from descriptor - The pipe is being closed" instead of
+waiting; udscript-dap reads the game's console so on a thread of its own and
+died the first time it looked. `Tests/base/NSFileHandle/pipeAvailableData.m`
+reads a pipe a thread writes to half a second later. `open-panel-sheet`
+(plugins-themes-WinUXTheme): the theme's panels show Windows' own dialog
+from the older modal and sheet methods only, and
+-beginSheetModalForWindow:completionHandler: ran GNUstep's panel, from which
+-URLs gave back not the file chosen (a program's folder in Quarry's case).
+The theme has no suite: `openpanel-sheet.m`, kept with the patch, drives the
+native dialog from a second thread and checks -URLs. Both commits say "Patch
+done with help of AI." and carry no Claude trailer.
+
 Added on 2026-11-06 for UDCode, whose window sends menu commands to the
 front tab's editor wherever the focus is: `supplemental-target` (libs-gui).
 `-supplementalTargetForAction:sender:` was declared and never asked, so an
@@ -1684,6 +1701,8 @@ among it, passes with this gui and fails without it.
 | `supplemental-target` | libs-gui | test | not sent yet | (none: UDCode uses it from here) |
 | `popup-menu-items` | libs-gui | test | not sent yet | (none: every app with a bound pop-up from a nib uses it from here) |
 | `url-path-without-authority` | libs-base | test | not sent yet | (none: UDCode's project systems use it from here) |
+| `windows-pipe-available-data` | libs-base | test | not sent yet | (none: UDQuakeTools' script debugger on Windows uses it from here) |
+| `open-panel-sheet` | plugins-themes-WinUXTheme | none (`openpanel-sheet.m` is the reproduction) | not sent yet | (none: every Windows app on the stack uses it from here) |
 
 Re-run that check before sending anything: `Scripts/apply-patches.sh` on a
 fresh checkout is the quickest form of it.
