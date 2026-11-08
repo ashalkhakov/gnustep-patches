@@ -33,20 +33,22 @@ fi
 
 failed=0
 
+# --binary: byte for byte. MSYS2's patch reads the patch in text mode and
+# drops the CRs of a CRLF source's lines (WinUXTheme's), so no hunk matches.
 for patch_file in "$here/$project"/*/0001-*.patch; do
     [ -e "$patch_file" ] || continue
     name=$(basename "$(dirname "$patch_file")")
 
-    if patch -p1 -F0 -R --dry-run -f -d "$checkout" < "$patch_file" >/dev/null 2>&1; then
+    if patch --binary -p1 -F0 -R --dry-run -f -d "$checkout" < "$patch_file" >/dev/null 2>&1; then
         echo "apply-patches: $project/$name is already in this checkout, skipping"
         continue
     fi
 
-    if patch -p1 -F0 --forward -d "$checkout" < "$patch_file" >/dev/null 2>&1; then
+    if patch --binary -p1 -F0 --forward -d "$checkout" < "$patch_file" >/dev/null 2>&1; then
         echo "apply-patches: $project/$name applied"
     else
         echo "apply-patches: $project/$name FAILED to apply to $checkout" >&2
-        patch -p1 -F0 --forward --dry-run -d "$checkout" < "$patch_file" >&2 || true
+        patch --binary -p1 -F0 --forward --dry-run -d "$checkout" < "$patch_file" >&2 || true
         failed=1
     fi
 done

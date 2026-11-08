@@ -89,8 +89,11 @@ int main(int argc, const char **argv)
     got = [[[panel URLs] firstObject] path];
   }];
 
+  /* the temporary folder may be named in its short (8.3) form here and in
+     its long form by the dialog: compare the names that are ours */
   passed = sawNative && result == NSModalResponseOK
-    && [[got lowercaseString] isEqual: [[file stringByReplacingOccurrencesOfString: @"\\" withString: @"/"] lowercaseString]];
+    && [[got lastPathComponent] isEqual: chosen]
+    && [[[got stringByDeletingLastPathComponent] lastPathComponent] isEqual: @"openpanel-sheet"];
   printf("panel class %s, native dialog shown: %s, result %ld, URL %s (expected %s): %s\n",
     [NSStringFromClass([panel class]) UTF8String], sawNative ? "yes" : "no", (long)result,
     got ? [got UTF8String] : "(none)", [file UTF8String], passed ? "PASS" : "FAIL");

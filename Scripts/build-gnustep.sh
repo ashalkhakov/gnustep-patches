@@ -173,7 +173,7 @@ apply_patches_for() {
                     "$project"/*)
                         patch_file=$PATCHES_ROOT/$topic/0001-*.patch
                         # shellcheck disable=SC2086
-                        patch -p1 -F0 --forward -d "$dir" < $patch_file
+                        patch --binary -p1 -F0 --forward -d "$dir" < $patch_file
                         say "$topic applied"
                         ;;
                 esac
