@@ -1,0 +1,108 @@
+From 48cd177330ad2cc37043d6b1c6158d296e333390 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Sun, 8 Nov 2026 19:46:48 +0500
+Subject: [PATCH] win32: -availableData waits for a pipe that is empty for now
+
+-availableData puts a pipe in non-blocking mode (PIPE_NOWAIT) and reads.
+When nothing has been written yet, ReadFile on such a pipe fails with
+ERROR_NO_DATA, but the code only recognised WSAEWOULDBLOCK (and WSAEINTR)
+as "would block", so instead of waiting for the first byte as it does
+for a socket it raised NSFileHandleOperationException, "unable to read
+from descriptor - The pipe is being closed".  Anything that reads a
+child's output with -availableData on a thread of its own (a debug
+adapter forwarding the program's console, for one) died the first time
+it looked, before the child had printed anything.
+
+ERROR_NO_DATA is now treated as would-block: the read waits for a byte
+in blocking mode and then takes what else is there, and a pipe whose
+writer has gone still ends with empty data (ERROR_BROKEN_PIPE).
+
+Tests/base/NSFileHandle/pipeAvailableData.m reads a pipe that a thread
+writes to half a second later and then closes: on Windows (MSYS2
+CLANG64) the first read raises without the change, and all three checks
+pass with it.
+
+Patch done with help of AI.
+---
+ Source/win32/GSFileHandle.m                 |  3 +-
+ Tests/base/NSFileHandle/pipeAvailableData.m | 54 +++++++++++++++++++++
+ 2 files changed, 56 insertions(+), 1 deletion(-)
+ create mode 100644 Tests/base/NSFileHandle/pipeAvailableData.m
+
+diff --git a/Source/win32/GSFileHandle.m b/Source/win32/GSFileHandle.m
+index 08c914eba..1f224a76b 100644
+--- a/Source/win32/GSFileHandle.m
++++ b/Source/win32/GSFileHandle.m
+@@ -1404,7 +1404,8 @@ - (NSData*) availableData
+       if (len <= 0)
+ 	{
+           if (WSAGetLastError()== WSAEINTR
+-	    || WSAGetLastError()== WSAEWOULDBLOCK)
++	    || WSAGetLastError()== WSAEWOULDBLOCK
++	    || GetLastError() == ERROR_NO_DATA)
+ 	    {
+ 	      /*
+ 	       * Read would have blocked ... so try to get a single character
+diff --git a/Tests/base/NSFileHandle/pipeAvailableData.m b/Tests/base/NSFileHandle/pipeAvailableData.m
+new file mode 100644
+index 000000000..a40606f8a
+--- /dev/null
++++ b/Tests/base/NSFileHandle/pipeAvailableData.m
+@@ -0,0 +1,54 @@
++#import "Testing.h"
++#import <Foundation/Foundation.h>
++
++@interface PipeWriter : NSObject
+++ (void) write: (NSFileHandle*)handle;
++@end
++
++@implementation PipeWriter
+++ (void) write: (NSFileHandle*)handle
++{
++  NSAutoreleasePool *arp = [NSAutoreleasePool new];
++
++  [NSThread sleepForTimeInterval: 0.5];
++  [handle writeData: [@"hello" dataUsingEncoding: NSUTF8StringEncoding]];
++  [NSThread sleepForTimeInterval: 0.5];
++  [handle closeFile];
++  [arp release];
++}
++@end
++
++int main()
++{
++  NSAutoreleasePool *arp = [NSAutoreleasePool new];
++  NSPipe        *pipe = [NSPipe pipe];
++  NSFileHandle  *reading = [pipe fileHandleForReading];
++  NSData        *data = nil;
++  NSString      *raised = nil;
++
++  [NSThread detachNewThreadSelector: @selector(write:)
++                           toTarget: [PipeWriter class]
++                         withObject: [pipe fileHandleForWriting]];
++
++  NS_DURING
++    data = [reading availableData];
++  NS_HANDLER
++    raised = [localException reason];
++  NS_ENDHANDLER
++  PASS(raised == nil, "-availableData on an empty pipe waits rather than raising");
++  PASS_EQUAL(data, [@"hello" dataUsingEncoding: NSUTF8StringEncoding],
++    "-availableData returns what is written to the pipe");
++
++  raised = nil;
++  data = nil;
++  NS_DURING
++    data = [reading availableData];
++  NS_HANDLER
++    raised = [localException reason];
++  NS_ENDHANDLER
++  PASS(raised == nil && data != nil && [data length] == 0,
++    "-availableData returns empty data once the pipe is closed");
++
++  [arp release];
++  return 0;
++}
+-- 
+2.50.1 (Apple Git-155)
+
