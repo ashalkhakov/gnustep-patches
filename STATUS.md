@@ -1227,6 +1227,17 @@ item with an action keeps both; a replaced menu's items keep the action and
 lose the target.  `NSPopUpButton/menuItemsAction.m` passes all 21 against
 AppKit, fails 10 without the fix and passes with it.  With every patch here
 the libs-gui suite passes 5805.
+Amended on 2026-11-09: a pop-up freed after the target of its menu's other
+items crashed (a window freed after the view controller its pop-up's items
+target, in -[NSApplication targetForAction:to:from:]).  The fix took its
+items' targets back with -setTarget:, which here has the menu update and so
+validate every item by its own target, freed or not; it now does so with the
+menu's change messages off, having stopped observing the menu first.  Five
+checks more in `menuItemsAction.m`, all 26 passing against AppKit: with the
+patch as it was, the one that a freed pop-up asks nothing of its items'
+targets fails; with this, all pass.  On libs-gui 8ac9f1db1 with every patch
+here the suite passes 5790, but for `GSXib5KeyedUnarchiver/formatters.m`,
+which wants libs-base's `formatter-keyed-attributes`.
 
 Added on 2026-11-08 for UDQuakeTools on Windows, whose script debugger
 ended before the game started and whose Workspace Settings could not choose
