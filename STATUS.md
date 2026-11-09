@@ -1575,6 +1575,21 @@ with every libs-gui patch here applied, all pass with the fix; the whole
 gui suite passes 5481. Logbook's desktop self-test, its lists window
 among it, passes with this gui and fails without it.
 
+Added on 2026-11-09 for WorkflowKit's BPMN editor, whose undo puts an
+element's namespaces back: `xml-set-namespaces-in-use`, after
+`xml-remove-namespace-in-use`, whose helpers it uses.
+-[NSXMLElement setNamespaces:] freed the element's declarations with
+xmlFreeNsList while the element, its attributes and its descendants still
+pointed at them, even when the new list declared the same ones; the editor
+crashed reading a pasted node's URI after undoing the paste. The patch adds
+the new declarations first and points each old one's users at its equal
+among them, else at what -removeNamespaceForPrefix: would, before freeing
+it. `NSXMLElement/setNamespacesInUse.m` in libs-base's suite, 8 checks: 7
+fail on master 77fd439 with every libs-base patch here applied, all pass
+with the fix, and valgrind reports no errors in it; the whole base suite
+passes 15582, the two files that fail (NSAutoreleasePool/dispatch.m,
+GSMime/encoded-word-stack.m) failing the same without it.
+
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
 | `autoreleased-return-value` | libobjc2 | test | [#426](https://github.com/gnustep/libobjc2/pull/426) closed unmerged | (none: ODataStore works around it) |
@@ -1593,6 +1608,7 @@ among it, passes with this gui and fails without it.
 | `nonretained-value-identity` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
 | `xml-detached-namespaces` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
 | `xml-remove-namespace-in-use` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
+| `xml-set-namespaces-in-use` | libs-base | test | not sent yet (after `xml-remove-namespace-in-use`) | (none: WorkflowKit's BPMN editor uses it from here) |
 | `formatter-keyed-attributes` | libs-base | test | not sent yet | (none: ORMKit's apps use it from here) |
 | `numberformatter-parse-decimal` | libs-base | test | not sent yet | (none: ORMKit's apps use it from here) |
 | `keyed-archive-value-classes` | libs-base | test | not sent yet | (none: ORMKit's apps use it from here) |

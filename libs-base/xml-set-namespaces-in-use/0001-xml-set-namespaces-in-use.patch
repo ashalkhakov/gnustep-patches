@@ -1,0 +1,130 @@
+From cd9e32dbff673d25b82395d390cccc48ab5b6672 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Mon, 9 Nov 2026 09:51:11 +0000
+Subject: [PATCH] NSXMLElement: setting the namespaces leaves no dangling
+ pointers
+
+-setNamespaces: freed the element's whole list of declarations with
+xmlFreeNsList and then added the new ones.  The element itself, its
+attributes and its descendants kept pointing at the freed xmlNs
+structures, so asking for their URI, name or XMLString, or detaching
+them, read freed memory -- even when the new list declared exactly the
+same prefixes and URIs, as it does when a caller saves an element's
+namespaces and sets them back.
+
+Add the new declarations first, then, before freeing each old one,
+point its users in the subtree at a new declaration of the same prefix
+and URI when there is one, and otherwise at the replacement that
+-removeNamespaceForPrefix: uses: a declaration in scope above the
+element, else a placeholder in the document.  This uses the helpers
+added with the fix for -removeNamespaceForPrefix:, and goes after it.
+
+The test sets one of two declarations again and drops the other, then
+adds more so that the allocator hands the freed memory out again:
+without the fix the elements and the attribute report other namespaces
+and prefixes; with it they keep theirs.  Valgrind reports no errors in
+it.
+---
+ Source/NSXMLElement.m                        | 25 +++++++++--
+ Tests/base/NSXMLElement/setNamespacesInUse.m | 46 ++++++++++++++++++++
+ 2 files changed, 68 insertions(+), 3 deletions(-)
+ create mode 100644 Tests/base/NSXMLElement/setNamespacesInUse.m
+
+diff --git a/Source/NSXMLElement.m b/Source/NSXMLElement.m
+index 3e821a0..a34dfad 100644
+--- a/Source/NSXMLElement.m
++++ b/Source/NSXMLElement.m
+@@ -724,16 +724,35 @@ rebind_ns(xmlNodePtr node, xmlNsPtr from, xmlNsPtr to)
+ {
+   NSEnumerator *en = [namespaces objectEnumerator];
+   NSXMLNode *namespace = nil;
++  xmlNodePtr theNode = internal->node.node;
++  xmlNsPtr old = theNode->nsDef;
+ 
+-  // Remove old namespaces
+-  xmlFreeNsList(internal->node.node->nsDef);
+-  internal->node.node->nsDef = NULL;
++  theNode->nsDef = NULL;
+ 
+   // Add new ones
+   while ((namespace = (NSXMLNode *)[en nextObject]) != nil)
+     {
+       [self addNamespace: namespace];
+     }
++
++  // Remove old namespaces, once nothing points at them
++  while (old != NULL)
++    {
++      xmlNsPtr next = old->next;
++      xmlNsPtr to;
++
++      old->next = NULL;
++      for (to = theNode->nsDef; to != NULL; to = to->next)
++        {
++          if (xmlStrEqual(to->prefix, old->prefix) && xmlStrEqual(to->href, old->href))
++            {
++              break;
++            }
++        }
++      rebind_ns(theNode, old, to != NULL ? to : replacement_ns(theNode, old));
++      xmlFreeNs(old);
++      old = next;
++    }
+ }
+ 
+ - (NSArray*) namespaces
+diff --git a/Tests/base/NSXMLElement/setNamespacesInUse.m b/Tests/base/NSXMLElement/setNamespacesInUse.m
+new file mode 100644
+index 0000000..ddc2ed1
+--- /dev/null
++++ b/Tests/base/NSXMLElement/setNamespacesInUse.m
+@@ -0,0 +1,46 @@
++#import <Foundation/Foundation.h>
++#import "Testing.h"
++
++int main()
++{
++  NSAutoreleasePool *arp = [NSAutoreleasePool new];
++  NSString *text = @"<R xmlns:a=\"urn:x\" xmlns:c=\"urn:c\"><a:T a:k=\"v\"><a:N/><c:M/></a:T></R>";
++  NSXMLDocument *doc;
++  NSXMLElement *root;
++  NSXMLElement *t;
++  NSXMLElement *n;
++  NSXMLElement *m;
++  NSUInteger i;
++
++  doc = [[[NSXMLDocument alloc] initWithXMLString: text options: 0 error: NULL] autorelease];
++  root = [doc rootElement];
++  t = (NSXMLElement *)[root childAtIndex: 0];
++  n = (NSXMLElement *)[t childAtIndex: 0];
++  m = (NSXMLElement *)[t childAtIndex: 1];
++
++  [root setNamespaces: [NSArray arrayWithObject:
++    [NSXMLNode namespaceWithName: @"a" stringValue: @"urn:x"]]];
++  /* What the old declarations took is soon taken again. */
++  for (i = 0; i < 8; i++)
++    {
++      [t addNamespace: [NSXMLNode namespaceWithName:
++        [NSString stringWithFormat: @"b%lu", (unsigned long)i]
++        stringValue: [NSString stringWithFormat: @"urn:%lu", (unsigned long)i]]];
++    }
++
++  PASS_EQUAL([t URI], @"urn:x",
++    "an element keeps its namespace when its declaration is set again")
++  PASS_EQUAL([n URI], @"urn:x", "and so does one below it")
++  PASS_EQUAL([[t attributeForName: @"a:k"] URI], @"urn:x", "and so does an attribute")
++  PASS_EQUAL([t name], @"a:T", "and the element keeps its prefix")
++  PASS_EQUAL([m URI], @"urn:c",
++    "an element keeps its namespace when its declaration is set away")
++  PASS_EQUAL([m name], @"c:M", "and its prefix")
++  PASS_EQUAL([[root namespaces] count], (NSUInteger)1, "the element declares what it was set to")
++
++  [m detach];
++  PASS_EQUAL([m URI], @"urn:c", "it keeps its namespace when it is then taken out")
++
++  [arp release];
++  return 0;
++}
+-- 
+2.43.0
+
