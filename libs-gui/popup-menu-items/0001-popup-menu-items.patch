@@ -1,4 +1,4 @@
-From 3e6ec24f6fe25ea061b6dda3001ad4a4f94822a4 Mon Sep 17 00:00:00 2001
+From d6f1626c5fabb8084a44ea062ef64c1cc218864d Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Sat, 7 Nov 2026 05:47:59 +0000
 Subject: [PATCH] NSPopUpButtonCell: the items of a menu it is given choose in
@@ -12,18 +12,32 @@ whatever target it had, as it does an item added to the menu later; an item
 with an action keeps it and its target.  A replaced menu's items keep the
 action and lose the target, and get it back with the menu.
 
-Tests/gui/NSPopUpButton/menuItemsAction.m passes all 21 checks on macOS 15; 10
-fail without the change.
+The targets are taken back with the menu's change messages off.  Here
+-[NSMenuItem setTarget:] has the menu update (-itemChanged: ends in -update),
+which with autoenablesItems validates every item by its own target; AppKit
+validates no menu when an item's target is set.  A pop-up freed lets go of its
+menu, so its other items' targets were asked to validate them, and these are
+not retained: a window freed after the view controller its pop-up's items
+target crashed in -[NSApplication targetForAction:to:from:].  -update returns
+at once while change messages are off, and turning them on again only posts
+the changes held back, which the cell no longer observes: it stops observing
+the menu first, since what changes in a menu it lets go of is no longer its
+concern.
+
+Tests/gui/NSPopUpButton/menuItemsAction.m passes all 26 checks on macOS 15.
+Without the change 11 fail and it aborts, a freed cell being still its items'
+target; with the targets taken back with change messages on, the check that a
+freed pop-up asks nothing of its items' targets fails.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- Source/NSPopUpButtonCell.m                |  43 +++++++
- Tests/gui/NSPopUpButton/menuItemsAction.m | 132 ++++++++++++++++++++++
- 2 files changed, 175 insertions(+)
+ Source/NSPopUpButtonCell.m                |  48 +++++-
+ Tests/gui/NSPopUpButton/menuItemsAction.m | 201 ++++++++++++++++++++++
+ 2 files changed, 248 insertions(+), 1 deletion(-)
  create mode 100644 Tests/gui/NSPopUpButton/menuItemsAction.m
 
 diff --git a/Source/NSPopUpButtonCell.m b/Source/NSPopUpButtonCell.m
-index 63d3cafb2..5f5e84d43 100644
+index 63d3cafb2..61190408a 100644
 --- a/Source/NSPopUpButtonCell.m
 +++ b/Source/NSPopUpButtonCell.m
 @@ -55,6 +55,7 @@ static NSImage *_pbc_image[5];
@@ -34,14 +48,20 @@ index 63d3cafb2..5f5e84d43 100644
  @end
  
  @implementation NSPopUpButtonCell
-@@ -173,6 +174,18 @@ static NSImage *_pbc_image[5];
+@@ -173,10 +174,25 @@ static NSImage *_pbc_image[5];
  
    if (_menu != nil)
      {
+-      [_menu _setOwnedByPopUp: nil];
 +      NSEnumerator *e = [[_menu itemArray] objectEnumerator];
++      BOOL changes = [_menu menuChangedMessagesEnabled];
 +      id<NSMenuItem> item;
 +
+       [nc removeObserver: self
+                     name: nil
+                   object: _menu];
 +      /* As on macOS, its items keep the action and lose the target. */
++      [_menu setMenuChangedMessagesEnabled: NO];
 +      while ((item = [e nextObject]) != nil)
 +        {
 +          if ([item target] == self
@@ -50,10 +70,12 @@ index 63d3cafb2..5f5e84d43 100644
 +              [item setTarget: nil];
 +            }
 +        }
-       [_menu _setOwnedByPopUp: nil];
-       [nc removeObserver: self
-                     name: nil
-@@ -192,6 +205,11 @@ static NSImage *_pbc_image[5];
++      [_menu setMenuChangedMessagesEnabled: changes];
++      [_menu _setOwnedByPopUp: nil];
+     }
+   if (_selectedItem != nil)
+     {
+@@ -192,6 +208,11 @@ static NSImage *_pbc_image[5];
         * popupbutton code in super class NSMenuItemCell
         */
        [self setMenuView: [_menu menuRepresentation]];
@@ -65,7 +87,7 @@ index 63d3cafb2..5f5e84d43 100644
        [nc addObserver: self
               selector: @selector(synchronizeTitleAndSelectedItem)
                   name: NSMenuDidAddItemNotification
-@@ -1404,6 +1422,31 @@ static NSImage *_pbc_image[5];
+@@ -1404,6 +1425,31 @@ static NSImage *_pbc_image[5];
  /*
   * The selector for this method gets used by menu items in Apple NIB files.
   */
@@ -99,19 +121,21 @@ index 63d3cafb2..5f5e84d43 100644
    // first, if sender is one of our items, set it as our selected item
 diff --git a/Tests/gui/NSPopUpButton/menuItemsAction.m b/Tests/gui/NSPopUpButton/menuItemsAction.m
 new file mode 100644
-index 000000000..752d56ba9
+index 000000000..ad5061834
 --- /dev/null
 +++ b/Tests/gui/NSPopUpButton/menuItemsAction.m
-@@ -0,0 +1,132 @@
+@@ -0,0 +1,201 @@
 +/* The items of a menu given to a pop-up choose in the pop-up, as AppKit has
 +   them: one without an action takes the pop-up's item action and its cell as
 +   target, added later too, so that the selection bindings hear of it; one
-+   with an action of its own keeps it; a menu replaced lets go of its items.
-+   A menu from a nib is given this way.  Checked against AppKit on macOS.
++   with an action of its own keeps it; a menu replaced lets go of its items,
++   and a pop-up freed asks nothing of their targets, which may be gone.  A
++   menu from a nib is given this way.  Checked against AppKit on macOS.
 +*/
 +#include "Testing.h"
 +
 +#include <Foundation/NSAutoreleasePool.h>
++#include <Foundation/NSNotification.h>
 +#include <Foundation/NSObject.h>
 +#include <Foundation/NSString.h>
 +
@@ -144,6 +168,38 @@ index 000000000..752d56ba9
 +- (void) own: (id)sender
 +{
 +  hits++;
++}
++@end
++
++/* Stands for a target freed before the pop-up: it counts what it is asked. */
++@interface Watcher : NSObject
++{
++@public
++  int asked;
++  int heard;
++}
++- (void) toggle: (id)sender;
++- (void) heard: (NSNotification *)notification;
++@end
++
++@implementation Watcher
++- (BOOL) respondsToSelector: (SEL)aSelector
++{
++  asked++;
++  return [super respondsToSelector: aSelector];
++}
++- (BOOL) validateMenuItem: (NSMenuItem *)item
++{
++  asked++;
++  return YES;
++}
++- (void) toggle: (id)sender
++{
++  asked++;
++}
++- (void) heard: (NSNotification *)notification
++{
++  heard++;
 +}
 +@end
 +
@@ -230,6 +286,41 @@ index 000000000..752d56ba9
 +    PASS([own target] == o, "an item's own target stays")
 +    [p setMenu: m];
 +    PASS([plain target] == [p cell], "given back, it has the cell again")
++  }
++
++  {
++    Watcher *w = [[Watcher alloc] init];
++    NSAutoreleasePool *arp = [NSAutoreleasePool new];
++    NSPopUpButton *p = [[NSPopUpButton alloc]
++      initWithFrame: NSMakeRect(0, 0, 100, 25) pullsDown: NO];
++    NSMenu *m = RETAIN([p menu]);
++    NSMenuItem *mine;
++    NSMenuItem *its;
++
++    [p addItemWithTitle: @"mine"];
++    [p addItemWithTitle: @"its"];
++    mine = (NSMenuItem *)[p itemAtIndex: 0];
++    its = (NSMenuItem *)[p itemAtIndex: 1];
++    [its setTarget: w];
++    [its setAction: @selector(toggle:)];
++    PASS([m autoenablesItems], "a pop-up's menu enables its items")
++    PASS([mine target] == [p cell], "an item added to the pop-up targets its cell")
++
++    w->asked = 0;
++    DESTROY(p);
++    [arp drain];
++    PASS(w->asked == 0, "a pop-up freed asks nothing of its items' targets")
++    PASS([mine target] == nil, "its own items have no target left")
++
++    [[NSNotificationCenter defaultCenter] addObserver: w
++      selector: @selector(heard:)
++      name: NSMenuDidChangeItemNotification
++      object: m];
++    [mine setTitle: @"changed"];
++    PASS(w->heard > 0, "its menu still tells of a change")
++    [[NSNotificationCenter defaultCenter] removeObserver: w];
++    RELEASE(m);
++    RELEASE(w);
 +  }
 +
 +  END_SET("NSPopUpButton a menu's items")
