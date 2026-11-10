@@ -1,8 +1,11 @@
 /* The stack's Core Data (FreeCoreData), as an application uses it: a model
    made in code, an in-memory store, an object inserted, saved and fetched.
-   Built and run by stack.yml's Check, against the prefix as it is shipped. */
+   Built and run by stack.yml's Check, against the prefix as it is shipped.
+   AppKit comes after Core Data, as in an application that imports Core Data
+   first: both declare NSAttributeType, and each must see the other's. */
 #import <Foundation/Foundation.h>
 #import <CoreData/CoreData.h>
+#import <AppKit/AppKit.h>
 
 int main(void) {
     @autoreleasepool {

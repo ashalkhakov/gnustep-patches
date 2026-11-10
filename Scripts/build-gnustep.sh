@@ -36,13 +36,13 @@
 #                    change on dev cannot stop a build; moved on purpose
 #   CAIRO_REF        default 1.18.6, the release MSYS2 packages: the same
 #                    cairo as theirs, with the patches here
-#   FREECOREDATA_REF default a FreeCoreData release (v0.12.0): Core Data,
+#   FREECOREDATA_REF default a FreeCoreData release (v0.12.2): Core Data,
 #                    moved on purpose
 set -eu
 
 EAU_REF=${EAU_REF:-01be00b5216b0ad508f30d66fa0d6734f44052c2}
 CAIRO_REF=${CAIRO_REF:-1.18.6}
-FREECOREDATA_REF=${FREECOREDATA_REF:-v0.12.0}
+FREECOREDATA_REF=${FREECOREDATA_REF:-v0.12.2}
 
 PATCHES_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 
