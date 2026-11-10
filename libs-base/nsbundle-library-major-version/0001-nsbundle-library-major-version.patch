@@ -1,0 +1,135 @@
+From 1321abc6b242129be47f55b5921e393605ecd19a Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Tue, 10 Nov 2026 11:06:32 +0000
+Subject: [PATCH] NSBundle: a library's resources found under its major version
+
++bundleForClass: finds the resources of a class's library with
++bundleForLibrary:version:, the version taken from the library's file
+name: libFoo.so.0.0.1 gives 0.0. gnustep-make, though, installs a
+library's resources in Libraries/Foo/Versions/<interface version>, and a
+library's interface version is by default its major version alone (its
+soname too: libFoo.so.0). So for any library that does not set
+xxx_INTERFACE_VERSION to major.minor, as gnustep-gui does, the lookup
+asked for Versions/0.0, found nothing, and +bundleForClass: answered the
+main bundle: the library's own resources -- a Core Data model, say --
+were not found once it was installed.
+
+With a version given, +bundleForLibrary:version: now tries
+Versions/<major.minor> and then Versions/<major>; a library whose
+resources are under another major version is still not found.
+
+Tests/base/NSBundle/libraryVersion.m makes a library's resources under
+Versions/3 in the user's Libraries and asks for them by 3, by 3.1 and by
+4.0. The 3.1 case fails without this change and passes with it;
+Tests/base/NSBundle passes (111 tests).
+---
+ Source/NSBundle.m                    | 32 ++++++++++++------
+ Tests/base/NSBundle/libraryVersion.m | 50 ++++++++++++++++++++++++++++
+ 2 files changed, 72 insertions(+), 10 deletions(-)
+ create mode 100644 Tests/base/NSBundle/libraryVersion.m
+
+diff --git a/Source/NSBundle.m b/Source/NSBundle.m
+index ab9c21c..5ed4f9d 100644
+--- a/Source/NSBundle.m
++++ b/Source/NSBundle.m
+@@ -3640,19 +3640,31 @@ IF_NO_ARC(
+ 	  if (interfaceVersion != nil)
+ 	    {
+ 	      /* We're looking for a specific version.  */
+-	      path = [[[[path stringByAppendingPathComponent: libraryName]
+-			 stringByAppendingPathComponent: @"Versions"]
+-			stringByAppendingPathComponent: interfaceVersion]
+-		       stringByAppendingPathComponent: @"Resources"];
+-	      if ([fm fileExistsAtPath: path  isDirectory: &isDir]  &&  isDir)
++	      NSString	*versions;
++	      NSString	*major;
++	      NSString	*v;
++
++	      versions = [[path stringByAppendingPathComponent: libraryName]
++		stringByAppendingPathComponent: @"Versions"];
++	      /* gnustep-make's default interface version is the major one */
++	      major = [[interfaceVersion componentsSeparatedByString: @"."]
++		objectAtIndex: 0];
++	      v = interfaceVersion;
++	      while (v != nil)
+ 		{
+-		  b = [self bundleWithPath: path];
+-
+-		  if (b != nil && b->_bundleType == NSBUNDLE_BUNDLE)
++		  path = [[versions stringByAppendingPathComponent: v]
++		    stringByAppendingPathComponent: @"Resources"];
++		  if ([fm fileExistsAtPath: path  isDirectory: &isDir]  &&  isDir)
+ 		    {
+-		      b->_bundleType = NSBUNDLE_LIBRARY;
++		      b = [self bundleWithPath: path];
++
++		      if (b != nil && b->_bundleType == NSBUNDLE_BUNDLE)
++			{
++			  b->_bundleType = NSBUNDLE_LIBRARY;
++			}
++		      return b;
+ 		    }
+-		  return b;
++		  v = [v isEqualToString: major] ? nil : major;
+ 		}
+ 	    }
+ 	  else
+diff --git a/Tests/base/NSBundle/libraryVersion.m b/Tests/base/NSBundle/libraryVersion.m
+new file mode 100644
+index 0000000..4611530
+--- /dev/null
++++ b/Tests/base/NSBundle/libraryVersion.m
+@@ -0,0 +1,50 @@
++#import "Testing.h"
++#import <Foundation/NSArray.h>
++#import <Foundation/NSAutoreleasePool.h>
++#import <Foundation/NSBundle.h>
++#import <Foundation/NSFileManager.h>
++#import <Foundation/NSPathUtilities.h>
++#import <Foundation/NSString.h>
++
++/* gnustep-make installs a library's resources under its interface
++ * version, by default the major version alone, while the version taken
++ * from the library's file name (libFoo.so.3.1.0) is major.minor.
++ */
++int main()
++{
++  NSAutoreleasePool	*arp = [NSAutoreleasePool new];
++  NSFileManager		*fm = [NSFileManager defaultManager];
++  NSString		*libraries;
++  NSString		*top;
++  NSString		*resources;
++  NSBundle		*bundle;
++
++  libraries = [[NSSearchPathForDirectoriesInDomains(NSLibraryDirectory,
++    NSUserDomainMask, YES) firstObject]
++    stringByAppendingPathComponent: @"Libraries"];
++  top = [libraries stringByAppendingPathComponent: @"GSTestLibraryVersion"];
++  resources = [top stringByAppendingPathComponent: @"Versions/3/Resources"];
++  [fm removeItemAtPath: top error: NULL];
++  PASS([fm createDirectoryAtPath: resources
++     withIntermediateDirectories: YES
++		      attributes: nil
++			   error: NULL],
++    "a library's resources made under its major version");
++
++  bundle = [NSBundle bundleForLibrary: @"GSTestLibraryVersion"
++			      version: @"3"];
++  PASS_EQUAL([bundle bundlePath], resources,
++    "+bundleForLibrary:version: finds them by the major version");
++  bundle = [NSBundle bundleForLibrary: @"GSTestLibraryVersion"
++			      version: @"3.1"];
++  PASS_EQUAL([bundle bundlePath], resources,
++    "+bundleForLibrary:version: finds them by major.minor too");
++  bundle = [NSBundle bundleForLibrary: @"GSTestLibraryVersion"
++			      version: @"4.0"];
++  PASS(bundle == nil,
++    "+bundleForLibrary:version: finds none for another major version");
++
++  [fm removeItemAtPath: top error: NULL];
++  [arp release];
++  return 0;
++}
+-- 
+2.43.0
+

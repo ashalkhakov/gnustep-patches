@@ -1738,6 +1738,7 @@ GSMime/encoded-word-stack.m) failing the same without it.
 | `splitview-adjust-last-subview` | libs-gui | test | not sent yet | (none: FreeCoreData's ModelBuilder uses it from here) |
 | `menu-update-delegate-once` | libs-gui | test | not sent yet | (none: FreeCoreData's ModelBuilder uses it from here) |
 | `predicate-editor-criteria` | libs-gui | test | not sent yet | (none: FreeCoreData's ModelBuilder uses it from here) |
+| `nsbundle-library-major-version` | libs-base | test | not sent yet | (none: WorkflowKit's installed library finds its model with it; Logbook's server first) |
 | `predicate-string-constant-format` | libs-base | test | not sent yet | (none: FreeCoreData's ModelBuilder uses it from here) |
 | `compound-predicate-empty-format` | libs-base | test | not sent yet | (none: FreeCoreData's ModelBuilder and ODataKit's Workbench use it from here) |
 | `popup-button-state-image` | libs-gui | test | not sent yet | (none: every app with a pop-up from a nib uses it from here) |
