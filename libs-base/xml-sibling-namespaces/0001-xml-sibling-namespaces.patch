@@ -1,0 +1,111 @@
+From 563b243ae7a865aac0b27ba8ef55d90ab49b48db Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Tue, 10 Nov 2026 13:04:20 +0000
+Subject: [PATCH] NSXMLNode: each sibling of an inserted tree bound to the
+ namespace it joins
+
+When a tree is inserted, cleanup_namespaces() binds each of its nodes
+using one of its own document's placeholder namespaces to the namespace
+declared where it now is. It went on to a node's next sibling only from
+an element or an attribute, so the walk stopped at the first comment,
+text or processing instruction, and the siblings after it kept their
+placeholders. The placeholders are freed with that document right
+after, leaving those elements bound to freed memory: asking such an
+element its URI reads it, and freeing the document crashes in
+keep_outside_ns().
+
+With libxml2 before 2.12, xmlDOMWrapAdoptNode() then rebinds what the
+walk missed, which hid this. With 2.12 and later the nodes are not
+adopted, and nothing did: an XForms document whose head holds a title,
+a comment and an xf:model crashed when it was freed (Windows, MSYS2's
+libxml2 2.15).
+
+The walk now goes on to the next sibling whatever the node is.
+
+Tests/base/NSXMLElement/prefixedAfterComment.m inserts a head with a
+title, a comment and an a:model into a root declaring a, asks the
+model's URI and frees the document. On Windows (MSYS2 CLANG64, libxml2
+2.15) it fails without this change (the URI is wrong, then the program
+dies freeing the document) and passes with it. With libxml2 2.9 it
+passes either way. Tests/base/NSXMLElement, NSXMLNode and NSXMLDocument
+pass on Linux (150, 274 and 45 tests).
+---
+ Source/NSXMLNode.m                            |  2 +-
+ .../base/NSXMLElement/prefixedAfterComment.m  | 45 +++++++++++++++++++
+ 2 files changed, 46 insertions(+), 1 deletion(-)
+ create mode 100644 Tests/base/NSXMLElement/prefixedAfterComment.m
+
+diff --git a/Source/NSXMLNode.m b/Source/NSXMLNode.m
+index de95ac3..d53f24c 100644
+--- a/Source/NSXMLNode.m
++++ b/Source/NSXMLNode.m
+@@ -95,7 +95,6 @@ cleanup_namespaces(xmlNodePtr node, xmlNsPtr ns)
+ 	}
+  
+       cleanup_namespaces(node->children, ns);
+-      cleanup_namespaces(node->next, ns);
+       if (node->type == XML_ELEMENT_NODE)
+         {
+           cleanup_namespaces((xmlNodePtr)node->properties, ns);
+@@ -105,6 +104,7 @@ cleanup_namespaces(xmlNodePtr node, xmlNsPtr ns)
+           xmlFreeNsList(placeholders);
+         }
+     }
++  cleanup_namespaces(node->next, ns);
+ }
+ 
+ /* Move one string of a node to the document the node is joining.
+diff --git a/Tests/base/NSXMLElement/prefixedAfterComment.m b/Tests/base/NSXMLElement/prefixedAfterComment.m
+new file mode 100644
+index 0000000..e9ac0ee
+--- /dev/null
++++ b/Tests/base/NSXMLElement/prefixedAfterComment.m
+@@ -0,0 +1,45 @@
++#import "Testing.h"
++#import <Foundation/NSAutoreleasePool.h>
++#import <Foundation/NSXMLNode.h>
++#import <Foundation/NSXMLDocument.h>
++#import <Foundation/NSXMLElement.h>
++#import "GNUstepBase/GSConfig.h"
++
++int main()
++{
++  START_SET("NSXMLElement prefixed sibling after a comment")
++#if !GS_USE_LIBXML
++    SKIP("library built without libxml2")
++#else
++  NSXMLElement          *r;
++  NSXMLElement          *head;
++  NSXMLElement          *title;
++  NSXMLElement          *model;
++  NSXMLDocument         *doc;
++
++  /* A prefixed element after a comment and an element, in a tree that
++   * joins the one declaring its prefix: each sibling is bound, not only
++   * those before the first node that is no element. */
++  r = [NSXMLNode elementWithName: @"root"];
++  [r addNamespace: [NSXMLNode namespaceWithName: @"a" stringValue: @"urn:a"]];
++  head = [NSXMLNode elementWithName: @"head"];
++  title = [NSXMLNode elementWithName: @"title"];
++  [title setStringValue: @"T"];
++  [head addChild: title];
++  [head addChild: [NSXMLNode commentWithStringValue: @" c "]];
++  model = [NSXMLNode elementWithName: @"a:model"];
++  [head addChild: model];
++  [r addChild: head];
++  PASS_EQUAL([model URI], @"urn:a",
++    "the element after the comment is in the root's namespace")
++  doc = [[NSXMLDocument alloc] initWithRootElement: r];
++  PASS_EQUAL([r XMLString],
++    @"<root xmlns:a=\"urn:a\"><head><title>T</title><!-- c -->"
++    @"<a:model></a:model></head></root>",
++    "it uses the root's declaration")
++  [doc release];
++  PASS(YES, "the document is freed")
++#endif
++  END_SET("NSXMLElement prefixed sibling after a comment")
++  return 0;
++}
+-- 
+2.43.0
+
