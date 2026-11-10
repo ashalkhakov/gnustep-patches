@@ -1256,6 +1256,22 @@ The theme has no suite: `openpanel-sheet.m`, kept with the patch, drives the
 native dialog from a second thread and checks -URLs. Both commits say "Patch
 done with help of AI." and carry no Claude trailer.
 
+Added on 2026-11-10 for Logbook, whose generated fill-up form is shown by
+XFormsKit and saved through Core Data: `attribute-type-declared` (libs-gui).
+`NSPredicateEditorRowTemplate.h` declares Core Data's `NSAttributeType` and
+its constants unconditionally, so a file that includes Core Data before AppKit
+(Logbook's form host) does not compile: every constant is redefined.
+FreeCoreData copes with the other order by testing the header's include
+guard, but nothing could cope with this one.  The declaration is now made
+only when `GS_NSATTRIBUTETYPE_DECLARED` is not defined, and defines it; a
+Core Data that declares the type defines it too.  FreeCoreData has to do so
+for Logbook to build: until it does, the patch changes nothing for it.
+`NSPredicateEditorRowTemplate/attributeTypeDeclared.m` declares the type as a
+Core Data header does, then includes AppKit; without the fix it does not
+compile.  On macOS the question does not arise, AppKit's header importing
+Core Data's.  On libs-gui 8ac9f1db1 with every patch here the suite passes
+5812.
+
 Added on 2026-11-06 for UDCode, whose window sends menu commands to the
 front tab's editor wherever the focus is: `supplemental-target` (libs-gui).
 `-supplementalTargetForAction:sender:` was declared and never asked, so an
@@ -1727,6 +1743,7 @@ GSMime/encoded-word-stack.m) failing the same without it.
 | `popup-button-state-image` | libs-gui | test | not sent yet | (none: every app with a pop-up from a nib uses it from here) |
 | `supplemental-target` | libs-gui | test | not sent yet | (none: UDCode uses it from here) |
 | `popup-menu-items` | libs-gui | test | not sent yet | (none: every app with a bound pop-up from a nib uses it from here) |
+| `attribute-type-declared` | libs-gui | test | not sent yet | (none: Logbook's form host, with FreeCoreData, uses it from here) |
 | `url-path-without-authority` | libs-base | test | not sent yet | (none: UDCode's project systems use it from here) |
 | `windows-pipe-available-data` | libs-base | test | not sent yet | (none: UDQuakeTools' script debugger on Windows uses it from here) |
 | `open-panel-sheet` | plugins-themes-WinUXTheme | none (`openpanel-sheet.m` is the reproduction) | not sent yet | (none: every Windows app on the stack uses it from here) |

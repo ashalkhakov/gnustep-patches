@@ -1,0 +1,133 @@
+From 5c856a4353569a9718b6309ac80207ef5e27f40a Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Mon, 9 Nov 2026 22:01:19 +0000
+Subject: [PATCH] NSPredicateEditorRowTemplate.h: NSAttributeType not declared
+ again after Core Data
+
+The header declares Core Data's NSAttributeType and its constants, since
+GNUstep has no Core Data and the template's API needs the type.  A Core Data
+implementation declares them too, so a program that includes Core Data before
+AppKit does not compile: every constant is redefined.  The other order can be
+handled on Core Data's side, by testing this header's include guard, but this
+one cannot be handled on either side as things are, since the header declares
+the type unconditionally.
+
+The declaration is now made only when GS_NSATTRIBUTETYPE_DECLARED is not
+defined, and defines it.  A Core Data implementation that declares the type
+itself defines it as well, and tests it, so either order compiles and the type
+is declared once.  On macOS the question does not arise: AppKit's header
+imports Core Data's.
+
+Tests/gui/NSPredicateEditorRowTemplate/attributeTypeDeclared.m declares the
+type as a Core Data header does before including AppKit; without the change
+it does not compile.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Headers/AppKit/NSPredicateEditorRowTemplate.h |  3 +
+ .../attributeTypeDeclared.m                   | 72 +++++++++++++++++++
+ 2 files changed, 75 insertions(+)
+ create mode 100644 Tests/gui/NSPredicateEditorRowTemplate/attributeTypeDeclared.m
+
+diff --git a/Headers/AppKit/NSPredicateEditorRowTemplate.h b/Headers/AppKit/NSPredicateEditorRowTemplate.h
+index ec5c89e36..2b158cd17 100644
+--- a/Headers/AppKit/NSPredicateEditorRowTemplate.h
++++ b/Headers/AppKit/NSPredicateEditorRowTemplate.h
+@@ -37,6 +37,8 @@
+ #if OS_API_VERSION(MAC_OS_X_VERSION_10_5, GS_API_LATEST)
+ 
+ /* CoreData Framework */
++#ifndef GS_NSATTRIBUTETYPE_DECLARED
++#define GS_NSATTRIBUTETYPE_DECLARED
+ enum {
+       NSUndefinedAttributeType     = 0,
+       NSInteger16AttributeType     = 100,
+@@ -53,6 +55,7 @@ enum {
+       NSObjectIDAttributeType      = 2000
+ };
+ typedef NSUInteger NSAttributeType;
++#endif
+ 
+ APPKIT_EXPORT_CLASS
+ @interface NSPredicateEditorRowTemplate : NSObject <NSCoding, NSCopying> {
+diff --git a/Tests/gui/NSPredicateEditorRowTemplate/attributeTypeDeclared.m b/Tests/gui/NSPredicateEditorRowTemplate/attributeTypeDeclared.m
+new file mode 100644
+index 000000000..3e214ae09
+--- /dev/null
++++ b/Tests/gui/NSPredicateEditorRowTemplate/attributeTypeDeclared.m
+@@ -0,0 +1,72 @@
++/* A Core Data header included before AppKit declares NSAttributeType and its
++   constants itself, and says so with GS_NSATTRIBUTETYPE_DECLARED: AppKit then
++   uses that declaration instead of repeating it, which would not compile.
++*/
++#include <Foundation/Foundation.h>
++
++/* As a Core Data implementation's NSAttributeDescription.h declares it. */
++#define GS_NSATTRIBUTETYPE_DECLARED
++typedef NSUInteger NSAttributeType;
++enum {
++    NSUndefinedAttributeType = 0,
++    NSInteger16AttributeType = 100,
++    NSInteger32AttributeType = 200,
++    NSInteger64AttributeType = 300,
++    NSDecimalAttributeType = 400,
++    NSDoubleAttributeType = 500,
++    NSFloatAttributeType = 600,
++    NSStringAttributeType = 700,
++    NSBooleanAttributeType = 800,
++    NSDateAttributeType = 900,
++    NSBinaryDataAttributeType = 1000,
++    NSUUIDAttributeType = 1100,
++    NSURIAttributeType = 1200,
++    NSTransformableAttributeType = 1800,
++    NSObjectIDAttributeType = 2000
++};
++
++#include "Testing.h"
++
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSPredicateEditorRowTemplate.h>
++
++int
++main(int argc, char **argv)
++{
++  START_SET("NSPredicateEditorRowTemplate attribute type declared first")
++
++  NSPredicateEditorRowTemplate *template;
++  NSArray *left;
++  NSArray *operators;
++
++  NS_DURING
++    {
++      [NSApplication sharedApplication];
++    }
++  NS_HANDLER
++    {
++      NSLog(@"guard caught %@: %@", [localException name],
++            [localException reason]);
++      SKIP("no GUI backend available")
++    }
++  NS_ENDHANDLER
++
++  left = [NSArray arrayWithObject:
++    [NSExpression expressionForKeyPath: @"name"]];
++  operators = [NSArray arrayWithObject:
++    [NSNumber numberWithUnsignedInteger: NSEqualToPredicateOperatorType]];
++  template = AUTORELEASE([[NSPredicateEditorRowTemplate alloc]
++    initWithLeftExpressions: left
++    rightExpressionAttributeType: NSStringAttributeType
++                        modifier: NSDirectPredicateModifier
++                       operators: operators
++                         options: 0]);
++  PASS([template rightExpressionAttributeType] == NSStringAttributeType,
++       "a template takes the attribute type Core Data declared");
++  PASS([template rightExpressionAttributeType] == 700,
++       "the type keeps Core Data's value");
++
++  END_SET("NSPredicateEditorRowTemplate attribute type declared first")
++
++  return 0;
++}
+-- 
+2.43.0
+
