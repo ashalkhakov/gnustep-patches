@@ -1,4 +1,4 @@
-From 28022213bdc8e3ee14a3c7d15f6cff5006ce41db Mon Sep 17 00:00:00 2001
+From 4308aea775154730939bb2161ae8a06af5585a08 Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Tue, 27 Oct 2026 19:33:10 +0500
 Subject: [PATCH] win32: a standard stream is a console's only when it is a
@@ -46,10 +46,10 @@ Patch done with help of AI.
  create mode 100644 Tests/base/NSFileHandle/stdinPipe.m
 
 diff --git a/Source/win32/GSFileHandle.m b/Source/win32/GSFileHandle.m
-index 08c914e..6285c67 100644
+index e252bdd51..c20014dd7 100644
 --- a/Source/win32/GSFileHandle.m
 +++ b/Source/win32/GSFileHandle.m
-@@ -1070,6 +1070,27 @@ - (id) initForUpdatingAtPath: (NSString*)path
+@@ -1075,6 +1075,27 @@ - (id) initForUpdatingAtPath: (NSString*)path
      }
  }
  
@@ -76,35 +76,35 @@ index 08c914e..6285c67 100644
 +
  - (id) initWithStandardError
  {
-   if (fh_stderr != nil)
-@@ -1083,7 +1104,7 @@ - (id) initWithStandardError
+   GSFileHandle	*unused = nil;
+@@ -1091,7 +1112,7 @@ - (id) initWithStandardError
        if (self)
          {
            readOK = NO;
 -          isStandardStream = YES;
 +          isStandardStream = isConsole(2);
+           fh_stderr = RETAIN(self);
          }
      }
-   return self;
-@@ -1102,7 +1123,7 @@ - (id) initWithStandardInput
+@@ -1116,7 +1137,7 @@ - (id) initWithStandardInput
        if (self)
          {
            writeOK = NO;
 -          isStandardStream = YES;
 +          isStandardStream = isConsole(0);
            isStandardInput = YES;
+           fh_stdin = RETAIN(self);
          }
-     }
-@@ -1122,7 +1143,7 @@ - (id) initWithStandardOutput
+@@ -1142,7 +1163,7 @@ - (id) initWithStandardOutput
        if (self)
          {
            readOK = NO;
 -          isStandardStream = YES;
 +          isStandardStream = isConsole(1);
+           fh_stdout = RETAIN(self);
          }
      }
-   return self;
-@@ -2243,6 +2264,7 @@ - (void) receivedEventRead
+@@ -2266,6 +2287,7 @@ - (void) receivedEventRead
                [readInfo setObject: s forKey: GSFileHandleNotificationError];
  
                NSLog(@"%@", s);
@@ -114,7 +114,7 @@ index 08c914e..6285c67 100644
            else if (bytes == 0)
 diff --git a/Tests/base/NSFileHandle/GNUmakefile.preamble b/Tests/base/NSFileHandle/GNUmakefile.preamble
 new file mode 100644
-index 0000000..da4ae67
+index 000000000..da4ae67b8
 --- /dev/null
 +++ b/Tests/base/NSFileHandle/GNUmakefile.preamble
 @@ -0,0 +1,4 @@
@@ -124,7 +124,7 @@ index 0000000..da4ae67
 +include $(GNUSTEP_MAKEFILES)/aggregate.make
 diff --git a/Tests/base/NSFileHandle/Helpers/GNUmakefile b/Tests/base/NSFileHandle/Helpers/GNUmakefile
 new file mode 100644
-index 0000000..97555df
+index 000000000..97555dfb1
 --- /dev/null
 +++ b/Tests/base/NSFileHandle/Helpers/GNUmakefile
 @@ -0,0 +1,12 @@
@@ -142,7 +142,7 @@ index 0000000..97555df
 +-include GNUmakefile.postamble
 diff --git a/Tests/base/NSFileHandle/Helpers/stdinread.m b/Tests/base/NSFileHandle/Helpers/stdinread.m
 new file mode 100644
-index 0000000..30497c6
+index 000000000..30497c616
 --- /dev/null
 +++ b/Tests/base/NSFileHandle/Helpers/stdinread.m
 @@ -0,0 +1,49 @@
@@ -197,7 +197,7 @@ index 0000000..30497c6
 +}
 diff --git a/Tests/base/NSFileHandle/stdinPipe.m b/Tests/base/NSFileHandle/stdinPipe.m
 new file mode 100644
-index 0000000..121ce6d
+index 000000000..121ce6da9
 --- /dev/null
 +++ b/Tests/base/NSFileHandle/stdinPipe.m
 @@ -0,0 +1,57 @@
