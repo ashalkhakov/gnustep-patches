@@ -94,6 +94,19 @@ jobs:
           cp Scripts/packages-ubuntu.txt Scripts/build-gnustep.sh "$d/"
           cat "$d/MANIFEST"
 
+      # libs-base's own XML tests, run on the stack as it is shipped: the
+      # libxml2 here decides which of NSXMLNode's code is built (2.9 on
+      # Ubuntu 22.04, 2.12 or newer on MSYS2), and each is checked where
+      # it runs. Failed or skipped is red.
+      - name: libs-base's XML tests
+        run: |
+          . "$PREFIX/System/Library/Makefiles/GNUstep.sh"
+          cd "$RUNNER_TEMP/gnustep-sources/libs-base/Tests"
+          gnustep-tests base/NSXMLNode base/NSXMLElement base/NSXMLDocument || true
+          if grep -q 'Failed\|Skipped\|aborted' tests.sum || ! grep -q 'Passed tests' tests.sum; then
+            cat tests.log; exit 1
+          fi
+
       # Checked as it is shipped: libdispatch's main-queue hooks in
       # gnustep-base, ICU, the backend bundle; and a Foundation program built
       # with gnustep-make's own rules, as an application's GNUmakefile does.
@@ -194,6 +207,20 @@ jobs:
           } > "$d/MANIFEST"
           cp Scripts/packages-msys2.txt Scripts/build-gnustep.sh "$d/"
           cat "$d/MANIFEST"
+
+      # libs-base's own XML tests, run on the stack as it is shipped: the
+      # libxml2 here decides which of NSXMLNode's code is built (2.9 on
+      # Ubuntu 22.04, 2.12 or newer on MSYS2), and each is checked where
+      # it runs. Failed or skipped is red.
+      - name: libs-base's XML tests
+        run: |
+          . "$PREFIX/System/Library/Makefiles/GNUstep.sh"
+          export PATH="$PREFIX/bin:$PATH"
+          cd "$(cygpath -u "$RUNNER_TEMP")/gnustep-sources/libs-base/Tests"
+          gnustep-tests base/NSXMLNode base/NSXMLElement base/NSXMLDocument || true
+          if grep -q 'Failed\|Skipped\|aborted' tests.sum || ! grep -q 'Passed tests' tests.sum; then
+            cat tests.log; exit 1
+          fi
 
       - name: Check
         run: |
