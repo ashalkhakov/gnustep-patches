@@ -1617,6 +1617,33 @@ with the fix, and valgrind reports no errors in it; the whole base suite
 passes 15582, the two files that fail (NSAutoreleasePool/dispatch.m,
 GSMime/encoded-word-stack.m) failing the same without it.
 
+Added on 2026-11-11 for ORMKit's Play window, a view-based table whose
+rows are edited, which kept nothing typed on Linux and Windows:
+`tableview-row-for-subview` and `tableview-view-at-column-placed`, and a
+revision of `tableview-prototype-copy`.
+- `tableview-prototype-copy` archived a prototype's controls' targets with
+  it (a keyed archive encodes a cell's target outright), so each row's
+  controls sent their actions to a copy of the File's Owner that nothing
+  retained. Targets outside the prototype are now archived as stand-ins
+  that the unarchiver's delegate swaps back for the targets themselves.
+  `NSTableView/makeViewWithIdentifier.m` gains a target check, which
+  fails with the archiving alone and passes with the revision.
+- `tableview-row-for-subview`: -rowForView: and -columnForView: looked up
+  only a cell view itself and said 0 for anything else, so a control
+  passing itself to its action (-rowForView: sender) was in row 0. They
+  now take any view inside a cell view or row view, as AppKit does, and
+  say -1 for a view not in the table. `NSTableView/rowForView.m`, 3
+  checks: 2 fail on master 662f89071 without the fix, all pass with it.
+- `tableview-view-at-column-placed`: -viewAtColumn:row:makeIfNecessary:
+  made a view but put it in the table only when its row was drawn, so a
+  view asked for first was in no window and could not be edited. It is
+  now placed in its row view, as drawing does. `NSTableView/viewAtColumn.m`,
+  4 checks: 3 fail on master 662f89071 without the fix, all pass with it.
+With all three on libs-gui 9c94a8bb (the 2026.10.20.52 stack's), ORMKit's
+testAFlowIsPlayedOverTheSample passes on Linux; it failed without them.
+The NSTableView suite passes 98 checks with every libs-gui patch here on
+master 662f89071.
+
 | Fix | Upstream | Test | PR | Carried by |
 | --- | --- | --- | --- | --- |
 | `autoreleased-return-value` | libobjc2 | test | [#426](https://github.com/gnustep/libobjc2/pull/426) closed unmerged | (none: ODataStore works around it) |
@@ -1649,6 +1676,8 @@ GSMime/encoded-word-stack.m) failing the same without it.
 | `popover-placement` | libs-gui | test | not sent yet | (none: UDCodeKit places its own child windows meanwhile) |
 | `arraycontroller-arrange-eagerly` | libs-gui | test | not sent yet | (none: Logbook's LBEntityController will drop its workaround) |
 | `tableview-prototype-copy` | libs-gui | test | not sent yet | (none: UDCodeKit's issues navigator is cell-based meanwhile) |
+| `tableview-row-for-subview` | libs-gui | test | not sent yet | (none: ORMKit's Play window uses it from here) |
+| `tableview-view-at-column-placed` | libs-gui | test | not sent yet | (none: ORMKit's Play window uses it from here) |
 | `arraycontroller-selection-kvo` | libs-gui | test | not sent yet | (none: Logbook's LBEntityController will drop its workaround) |
 | `tooltip-mouse-moved` | libs-gui | test | not sent yet | (none: UDCodeKit resets the flag itself) |
 | `arraycontroller-remove-action` | libs-gui | test | not sent yet | (none: Logbook's Remove buttons use it from here) |

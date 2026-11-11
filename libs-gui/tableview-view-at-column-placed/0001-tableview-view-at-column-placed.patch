@@ -1,0 +1,138 @@
+From 958a356fc0c1c252aac4ac0203bf170190d5e014 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Wed, 11 Nov 2026 05:04:17 +0000
+Subject: [PATCH] NSTableView: put a view -viewAtColumn:row:makeIfNecessary:
+ makes in the table
+
+A view-based table only added a cell view to its row view, and the row
+view to itself, when it drew the row.  A view asked for before that, as
+AppKit's documentation has it with makeIfNecessary: YES, came back in no
+view and no window: it could not be made first responder, its field
+editor never appeared, and its controls could not be edited.
+
+Place the view as drawing the row does, in its row view, which is added
+to the table first if it is not there yet.
+
+Tests/gui/NSTableView/viewAtColumn.m asks a table in a window for a
+view before it is drawn.  Without the change it is in no row view, no
+table and no window (three checks fail); with it all four pass.
+---
+ Source/NSTableView.m                 | 18 +++++++
+ Tests/gui/NSTableView/viewAtColumn.m | 76 ++++++++++++++++++++++++++++
+ 2 files changed, 94 insertions(+)
+ create mode 100644 Tests/gui/NSTableView/viewAtColumn.m
+
+diff --git a/Source/NSTableView.m b/Source/NSTableView.m
+index f1c47dfde..67dd5400b 100644
+--- a/Source/NSTableView.m
++++ b/Source/NSTableView.m
+@@ -7476,6 +7476,24 @@ For a more detailed explanation, -setSortDescriptors:. */
+ 	}
+ 
+       [self _setRenderedView: view forPath: path];
++      if (view != nil)
++	{
++	  NSTableRowView *rowView = [self rowViewAtRow: row
++				       makeIfNecessary: YES];
++
++	  if (rowView != nil)
++	    {
++	      if ([rowView superview] != self)
++		{
++		  [self addSubview: rowView];
++		  [rowView setAutoresizingMask: NSViewWidthSizable
++		    | NSViewMaxYMargin];
++		  [rowView setFrame: NSMakeRect(0, NSMinY(drawingRect),
++		    NSWidth([self frame]), [self _rowHeightForRow: row])];
++		}
++	      [rowView addSubview: view];
++	    }
++	}
+     }
+ 
+   if ([[view superview] isKindOfClass: [NSTableRowView class]])
+diff --git a/Tests/gui/NSTableView/viewAtColumn.m b/Tests/gui/NSTableView/viewAtColumn.m
+new file mode 100644
+index 000000000..184ea9a08
+--- /dev/null
++++ b/Tests/gui/NSTableView/viewAtColumn.m
+@@ -0,0 +1,76 @@
++/* -viewAtColumn:row:makeIfNecessary: puts a view it makes in the table, in
++   its row's view, as drawing the row does: a view asked for before the
++   table is drawn is one that can be shown, edited and found again. */
++#import "Testing.h"
++#import <Foundation/Foundation.h>
++#import <AppKit/AppKit.h>
++
++@interface Cells : NSObject
++@end
++
++@implementation Cells
++- (NSInteger) numberOfRowsInTableView: (NSTableView *)tableView
++{
++  return 3;
++}
++
++- (NSView *) tableView: (NSTableView *)tableView
++    viewForTableColumn: (NSTableColumn *)column
++                   row: (NSInteger)row
++{
++  return AUTORELEASE([[NSTableCellView alloc]
++    initWithFrame: NSMakeRect(0, 0, 100, 17)]);
++}
++@end
++
++int main()
++{
++  START_SET("NSTableView viewAtColumn:row:makeIfNecessary:")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name]
++      isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  NSWindow              *window;
++  NSTableView           *table;
++  NSTableColumn         *column;
++  NSTableCellView       *prototype;
++  Cells                 *cells = AUTORELEASE([Cells new]);
++  NSView                *view;
++  NSTableRowView        *rowView;
++
++  window = AUTORELEASE([[NSWindow alloc]
++    initWithContentRect: NSMakeRect(0, 0, 200, 100)
++              styleMask: NSTitledWindowMask
++                backing: NSBackingStoreBuffered
++                  defer: YES]);
++  table = AUTORELEASE([[NSTableView alloc]
++    initWithFrame: NSMakeRect(0, 0, 200, 100)]);
++  column = AUTORELEASE([[NSTableColumn alloc] initWithIdentifier: @"Column"]);
++  prototype = AUTORELEASE([[NSTableCellView alloc]
++    initWithFrame: NSMakeRect(0, 0, 100, 17)]);
++  [prototype setIdentifier: @"Cell"];
++  [column setValue: [NSArray arrayWithObject: prototype]
++            forKey: @"prototypeCellViews"];
++  [table addTableColumn: column];
++  [table setDelegate: (id)cells];
++  [table setDataSource: (id)cells];
++  [[window contentView] addSubview: table];
++
++  view = [table viewAtColumn: 0 row: 1 makeIfNecessary: YES];
++  rowView = [table rowViewAtRow: 1 makeIfNecessary: NO];
++
++  PASS(view != nil && rowView != nil && [view superview] == rowView,
++    "a view made is in its row's view")
++  PASS([rowView superview] == table, "which is in the table")
++  PASS([view window] == window, "and so in its window")
++  PASS([table viewAtColumn: 0 row: 1 makeIfNecessary: NO] == view,
++    "and it is the view found again")
++
++  END_SET("NSTableView viewAtColumn:row:makeIfNecessary:")
++  return 0;
++}
+-- 
+2.43.0
+
