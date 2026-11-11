@@ -1,0 +1,171 @@
+From 62e2d1f2e1fc376385275821eafe316821aee60e Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Wed, 11 Nov 2026 05:04:17 +0000
+Subject: [PATCH] NSTableView: -rowForView: and -columnForView: take a view
+ inside a row
+
+They looked up only the cell view itself, and messaged nil for anything
+else, so a control inside a cell view, which is what passes itself to
+its action (-rowForView: sender), was taken to be in row 0 and column
+0, and so was a view not in the table at all.
+
+AppKit takes a row view, a cell view or any view inside either, and
+answers -1 for a view not in the table.  Walk up from the view to the
+cell view that holds it, and from a row view to its row; answer -1 when
+neither is found.
+
+Tests/gui/NSTableView/rowForView.m asks for the row and column of a
+cell view, of the text field inside it, and of a view elsewhere.
+Without the change the last two checks fail; with it all three pass.
+---
+ Source/NSTableView.m               | 38 ++++++++++++--
+ Tests/gui/NSTableView/rowForView.m | 79 ++++++++++++++++++++++++++++++
+ 2 files changed, 113 insertions(+), 4 deletions(-)
+ create mode 100644 Tests/gui/NSTableView/rowForView.m
+
+diff --git a/Source/NSTableView.m b/Source/NSTableView.m
+index f1c47dfde..9818d0b8f 100644
+--- a/Source/NSTableView.m
++++ b/Source/NSTableView.m
+@@ -7273,10 +7273,25 @@ For a more detailed explanation, -setSortDescriptors:. */
+     }
+ }
+ 
++- (NSIndexPath *) _pathForView: (NSView *)view
++{
++  for (; view != nil && view != self; view = [view superview])
++    {
++      NSIndexPath *path = [_pathsToViews objectForKey: view];
++
++      if (path != nil)
++	{
++	  return path;
++	}
++    }
++  return nil;
++}
++
+ - (NSInteger) columnForView: (NSView*)view
+ {
+-  NSIndexPath *path = [_pathsToViews objectForKey: view];
+-  return [path item];
++  NSIndexPath *path = [self _pathForView: view];
++
++  return path == nil ? -1 : (NSInteger)[path item];
+ }
+ 
+ - (void) insertRowsAtIndexes: (NSIndexSet*)indexes
+@@ -7291,8 +7306,23 @@ For a more detailed explanation, -setSortDescriptors:. */
+ 
+ - (NSInteger) rowForView: (NSView*)view
+ {
+-  NSIndexPath *path = [_pathsToViews objectForKey: view];
+-  return [path section];
++  NSIndexPath *path = [self _pathForView: view];
++  NSView *v;
++
++  if (path != nil)
++    {
++      return [path section];
++    }
++  for (v = view; v != nil && v != self; v = [v superview])
++    {
++      if ([v isKindOfClass: [NSTableRowView class]])
++	{
++	  NSNumber *row = [[_rowViews allKeysForObject: v] lastObject];
++
++	  return row == nil ? -1 : [row integerValue];
++	}
++    }
++  return -1;
+ }
+ 
+ - (NSView *) makeViewWithIdentifier: (NSUserInterfaceItemIdentifier)identifier owner: (id)owner
+diff --git a/Tests/gui/NSTableView/rowForView.m b/Tests/gui/NSTableView/rowForView.m
+new file mode 100644
+index 000000000..03cf896c2
+--- /dev/null
++++ b/Tests/gui/NSTableView/rowForView.m
+@@ -0,0 +1,79 @@
++/* -rowForView: and -columnForView: take a cell view or any view inside
++   one, as a control in a cell view sends its action from, and say -1 for
++   a view that is not in the table. */
++#import "Testing.h"
++#import <Foundation/Foundation.h>
++#import <AppKit/AppKit.h>
++
++@interface Cells : NSObject
++@end
++
++@implementation Cells
++- (NSInteger) numberOfRowsInTableView: (NSTableView *)tableView
++{
++  return 3;
++}
++
++- (NSView *) tableView: (NSTableView *)tableView
++    viewForTableColumn: (NSTableColumn *)column
++                   row: (NSInteger)row
++{
++  NSTableCellView *view = AUTORELEASE([[NSTableCellView alloc]
++    initWithFrame: NSMakeRect(0, 0, 100, 17)]);
++  NSTextField     *field = AUTORELEASE([[NSTextField alloc]
++    initWithFrame: NSMakeRect(0, 0, 100, 17)]);
++
++  [view addSubview: field];
++  [view setTextField: field];
++  return view;
++}
++@end
++
++int main()
++{
++  START_SET("NSTableView rowForView:")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name]
++      isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  NSTableView           *table;
++  NSTableColumn         *column;
++  NSTableCellView       *prototype;
++  Cells                 *cells = AUTORELEASE([Cells new]);
++  NSTableCellView       *view;
++  NSView                *elsewhere;
++
++  table = AUTORELEASE([[NSTableView alloc]
++    initWithFrame: NSMakeRect(0, 0, 200, 100)]);
++  column = AUTORELEASE([[NSTableColumn alloc] initWithIdentifier: @"First"]);
++  prototype = AUTORELEASE([[NSTableCellView alloc]
++    initWithFrame: NSMakeRect(0, 0, 100, 17)]);
++  [prototype setIdentifier: @"Cell"];
++  [column setValue: [NSArray arrayWithObject: prototype]
++            forKey: @"prototypeCellViews"];
++  [table addTableColumn: column];
++  [table addTableColumn:
++    AUTORELEASE([[NSTableColumn alloc] initWithIdentifier: @"Second"])];
++  [table setDelegate: (id)cells];
++  [table setDataSource: (id)cells];
++
++  view = (NSTableCellView *)[table viewAtColumn: 1 row: 2 makeIfNecessary: YES];
++  elsewhere = AUTORELEASE([[NSView alloc] initWithFrame: NSZeroRect]);
++
++  PASS([table rowForView: view] == 2 && [table columnForView: view] == 1,
++    "a cell view is in its row and column")
++  PASS([table rowForView: [view textField]] == 2
++    && [table columnForView: [view textField]] == 1,
++    "and so is a view inside it")
++  PASS([table rowForView: elsewhere] == -1
++    && [table columnForView: elsewhere] == -1,
++    "a view not in the table is in none")
++
++  END_SET("NSTableView rowForView:")
++  return 0;
++}
+-- 
+2.43.0
+
