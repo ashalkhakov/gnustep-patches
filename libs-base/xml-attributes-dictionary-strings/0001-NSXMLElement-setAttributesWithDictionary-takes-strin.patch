@@ -1,0 +1,83 @@
+From 706435a34269ad059cf6c0da1b8396290ae3ce73 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Wed, 11 Nov 2026 22:03:54 +0000
+Subject: [PATCH] NSXMLElement: -setAttributesWithDictionary: takes strings as
+ values
+
+Apple documents the dictionary as attribute names to their string
+values, and that is how code written against Foundation calls it. The
+implementation sent -stringValue to each value, as if it were an
+NSXMLNode, so a dictionary of strings raised "does not recognize
+stringValue". A string is now the attribute value as it is; any other
+value is still asked for its -stringValue, so a caller passing nodes
+keeps working. -setAttributesAsDictionary: calls this one and is
+covered by the same change.
+---
+ Source/NSXMLElement.m                         |  4 +-
+ .../base/NSXMLElement/attributesDictionary.m  | 39 +++++++++++++++++++
+ 2 files changed, 42 insertions(+), 1 deletion(-)
+ create mode 100644 Tests/base/NSXMLElement/attributesDictionary.m
+
+diff --git a/Source/NSXMLElement.m b/Source/NSXMLElement.m
+index a34dfad..8ed40af 100644
+--- a/Source/NSXMLElement.m
++++ b/Source/NSXMLElement.m
+@@ -485,7 +485,9 @@ searchPlaceholderNs(xmlNodePtr node, const xmlChar *prefix)
+ 
+   while ((key = [en nextObject]) != nil)
+     {
+-      NSString	*val = [[attributes objectForKey: key] stringValue];
++      id	value = [attributes objectForKey: key];
++      NSString	*val = [value isKindOfClass: [NSString class]]
++	? (NSString*)value : [value stringValue];
+       NSXMLNode	*attribute = [NSXMLNode attributeWithName: key
+ 					      stringValue: val];
+       [self addAttribute: attribute];
+diff --git a/Tests/base/NSXMLElement/attributesDictionary.m b/Tests/base/NSXMLElement/attributesDictionary.m
+new file mode 100644
+index 0000000..a26c2a2
+--- /dev/null
++++ b/Tests/base/NSXMLElement/attributesDictionary.m
+@@ -0,0 +1,39 @@
++#import "ObjectTesting.h"
++#import <Foundation/NSAutoreleasePool.h>
++#import <Foundation/NSDictionary.h>
++#import <Foundation/NSXMLElement.h>
++#import "GNUstepBase/GSConfig.h"
++
++int main()
++{
++  START_SET("NSXMLElement setAttributesWithDictionary:")
++#if !GS_USE_LIBXML
++    SKIP("library built without libxml2")
++#else
++  NSAutoreleasePool *arp = [NSAutoreleasePool new];
++  NSXMLElement      *element;
++
++  element = [[NSXMLElement alloc] initWithName: @"bind"];
++  [element addAttribute: [NSXMLNode attributeWithName: @"old"
++                                          stringValue: @"gone"]];
++  PASS_RUNS(([element setAttributesWithDictionary:
++    [NSDictionary dictionaryWithObjectsAndKeys:
++      @"colour", @"ref", @"true()", @"required", nil]]),
++    "attributes are set from a dictionary of strings");
++  PASS_EQUAL([[element attributeForName: @"ref"] stringValue], @"colour",
++    "an attribute has the dictionary's string as its value");
++  PASS_EQUAL([[element attributeForName: @"required"] stringValue], @"true()",
++    "each of the dictionary's attributes is set");
++  PASS([element attributeForName: @"old"] == nil,
++    "the attributes the element had are removed");
++  PASS_RUNS(([element setAttributesAsDictionary:
++    [NSDictionary dictionaryWithObject: @"seats" forKey: @"ref"]]),
++    "setAttributesAsDictionary: takes strings too");
++  PASS_EQUAL([[element attributeForName: @"ref"] stringValue], @"seats",
++    "its string is the attribute's value");
++  RELEASE(element);
++  [arp release];
++#endif
++  END_SET("NSXMLElement setAttributesWithDictionary:")
++  return 0;
++}
+-- 
+2.43.0
+

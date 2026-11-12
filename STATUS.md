@@ -1602,6 +1602,16 @@ with every libs-gui patch here applied, all pass with the fix; the whole
 gui suite passes 5481. Logbook's desktop self-test, its lists window
 among it, passes with this gui and fails without it.
 
+Added on 2026-11-12 for ORMKit, whose tests build XForms binds from a
+dictionary: `xml-attributes-dictionary-strings`.
+-[NSXMLElement setAttributesWithDictionary:] sent -stringValue to each of
+the dictionary's values, as if it were a node, where Apple documents them
+as strings; a dictionary of strings raised "does not recognize
+stringValue". A string is now the value as it is, anything else still
+asked for its -stringValue. `NSXMLElement/attributesDictionary.m` in
+libs-base's suite, 6 checks: 5 fail on master c970491 with every libs-base
+patch here applied, all pass with the fix; the NSXMLElement tests pass 170.
+
 Added on 2026-11-09 for WorkflowKit's BPMN editor, whose undo puts an
 element's namespaces back: `xml-set-namespaces-in-use`, after
 `xml-remove-namespace-in-use`, whose helpers it uses.
@@ -1663,6 +1673,7 @@ master 662f89071.
 | `xml-detached-namespaces` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
 | `xml-remove-namespace-in-use` | libs-base | test | not sent yet | (none: ORMKit uses it from here) |
 | `xml-set-namespaces-in-use` | libs-base | test | not sent yet (after `xml-remove-namespace-in-use`) | (none: WorkflowKit's BPMN editor uses it from here) |
+| `xml-attributes-dictionary-strings` | libs-base | test | not sent yet | (none: ORMKit's tests use it from here) |
 | `formatter-keyed-attributes` | libs-base | test | not sent yet | (none: ORMKit's apps use it from here) |
 | `numberformatter-parse-decimal` | libs-base | test | not sent yet | (none: ORMKit's apps use it from here) |
 | `keyed-archive-value-classes` | libs-base | test | not sent yet | (none: ORMKit's apps use it from here) |
