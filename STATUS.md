@@ -922,6 +922,16 @@ as nil does. The third set of `NSPopUpButton/contentValuesKeyPath.m`
 passes its 6 checks on macOS 15 and with the change; without it the set
 stops at the binding. The NSPopUpButton tests pass 92 checks on libs-gui
 662f89071 (the 2026.10.20.54 stack's) with every patch here.
+Rebased on 2026-11-22, as upstream moved under them:
+`windows-listening-socket-read` onto libdispatch 20b4c8b, whose eb4e423
+("Deliver EOF on pipes and sockets as a 0 byte event") rewrote the socket
+callback: a pending connection is now posted as readable beside the new
+read-or-close case, the rest of the patch as it was; and
+`nsdate-tagged-roundtrip` onto libs-base c1dbf57, whose c75898d re-wrapped
+a line of the comment it edits. Every patch here applies, in order, to
+those masters and to libs-gui 732c2d8. On libs-base c1dbf57 with every
+libs-base patch, NSDate (101), NSDateFormatter (418), NSNumberFormatter
+(153), NSCalendar (587) and NSCalendarDate (187) pass.
 Added on 2026-10-20 for Logbook's pick lists, checked against macOS 15
 first: `controller-value-bindings`, `controller-fetch-sort-keys` and
 `objectcontroller-deferred-add`.  An array controller exposed no
