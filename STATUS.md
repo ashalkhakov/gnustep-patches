@@ -932,6 +932,22 @@ a line of the comment it edits. Every patch here applies, in order, to
 those masters and to libs-gui 732c2d8. On libs-base c1dbf57 with every
 libs-base patch, NSDate (101), NSDateFormatter (418), NSNumberFormatter
 (153), NSCalendar (587) and NSCalendarDate (187) pass.
+Added on 2026-11-22 for Logbook's sheets (its self-test hung at the
+first, the Transfer sheet of an item's window): `window-sheet-async`.
+-beginSheet:completionHandler: ran the sheet as a modal session and
+returned when it ended; it now returns at once with the sheet up, as on
+macOS 15, and the sheet's handler is called when -endSheet:returnCode:,
+-endSheet: or NSApp's end it, while it is still up, then it is ordered out
+and detached. Its window takes no clicks or keys while it is up. NSApp's
+-beginSheet:modalForWindow:... and NSAlert's sheets are modal still
+(NSAlert's completion-handler sheet now goes through NSApp's). This
+undoes what `window-sheet-api` left: "sheets stay modal". A second sheet
+begun on a window that has one is not queued. `NSWindow/sheetAPI.m`
+checks it as macOS has it (and a click, and an alert's sheet); without the
+change 6 of its 14 checks fail, a watchdog aborting the old modal loop.
+The NSWindow (51), NSAlert (19), NSPanel (27) and NSApplication (56)
+tests pass on libs-gui 662f89071 with every patch here, and every patch
+applies, in order, to libs-gui 732c2d8.
 Added on 2026-10-20 for Logbook's pick lists, checked against macOS 15
 first: `controller-value-bindings`, `controller-fetch-sort-keys` and
 `objectcontroller-deferred-add`.  An array controller exposed no
@@ -1771,6 +1787,7 @@ master 662f89071.
 | `cairo-window-surface-termination` | libs-back | test | not sent yet | (none: RDLKit will use it from here) |
 | `pasteboard-clear-contents` | libs-gui | test | not sent yet | (none: RDLKit will use it from here) |
 | `window-sheet-api` | libs-gui | test | not sent yet | (none: RDLKit will use it from here) |
+| `window-sheet-async` | libs-gui | test | not sent yet (after `window-sheet-api`) | (none: Logbook's sheets go on from here) |
 | `colorspace-srgb` | libs-gui | test | not sent yet | (none: RDLKit will use it from here) |
 | `cgrectunion-size` | libs-opal | none | [#71](https://github.com/gnustep/libs-opal/pull/71) | GSXFormsKit |
 | `freetype-advance-without-size` | libs-opal | test | [#72](https://github.com/gnustep/libs-opal/pull/72) | (none: XFormsKit uses it from here) |

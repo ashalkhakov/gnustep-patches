@@ -1,0 +1,503 @@
+From c3c6e4413a330d093b68812ca881b15dfeaf577c Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Sun, 22 Nov 2026 15:54:50 +0000
+Subject: [PATCH] NSWindow: -beginSheet:completionHandler: returns at once, as
+ on macOS
+
+GNUstep ran a sheet begun with -beginSheet:completionHandler: as a modal
+session, and the method returned only once the sheet had ended. On macOS
+it returns at once with the sheet up: the window's -attachedSheet and
+-sheets have it, its -sheetParent is the window, the handler not yet
+called; -endSheet:returnCode: (or NSApp's) calls the handler with the code
+while the sheet is still up and attached, then orders it out and detaches
+it (checked on macOS 15). Code written for that, which goes on after
+beginning a sheet (fills its fields, or begins a step that ends it), stopped
+there: an application's self-test that opens a sheet and then fills it
+never got past the click that opened it.
+
+The sheet is now shown over its window, made key, and the method returns;
+its handler is kept until -endSheet:returnCode:, -endSheet: or NSApp's
+-endSheet: and -endSheet:returnCode: end it. While a sheet is up, its
+window takes no clicks or keys: they bring the sheet forward, as a
+document-modal sheet does on macOS. A second sheet begun on a window with
+one up is not queued behind it as macOS queues it.
+
+NSApp's -beginSheet:modalForWindow:modalDelegate:didEndSelector:contextInfo:
+is unchanged, and so are NSAlert's sheets: -beginSheetModalForWindow:
+completionHandler: now goes through it, so its buttons, which end a modal
+session, still end it, and the handler is called with their code.
+
+Tests/gui/NSWindow/sheetAPI.m now checks the sheet as macOS has it (its
+checks but the click and the alert pass on macOS 15 too), that a window
+with a sheet up takes no click, and that an alert's sheet still ends with
+its handler told. Without the change 6 of its 14 checks fail: a
+watchdog aborts each modal session the old method runs, after 4 seconds,
+so that the test fails rather than hangs.
+
+Patch done with help of AI.
+---
+ Source/NSAlert.m              |  19 ++-
+ Source/NSApplication.m        |  12 ++
+ Source/NSWindow.m             |  83 ++++++++++---
+ Tests/gui/NSWindow/sheetAPI.m | 218 ++++++++++++++++++++++------------
+ 4 files changed, 240 insertions(+), 92 deletions(-)
+
+diff --git a/Source/NSAlert.m b/Source/NSAlert.m
+index 70f8cf9..a493846 100644
+--- a/Source/NSAlert.m
++++ b/Source/NSAlert.m
+@@ -2200,11 +2200,26 @@ NSRunAlertPanelRelativeToWindow(NSString *title,
+     {
+       [self _setupPanel];
+     }
+-  [sheet beginSheet: _window
+-  completionHandler: handler];
++  /* As the other sheet of an alert, in a modal session its buttons end. */
++  [NSApp beginSheet: _window
++     modalForWindow: sheet
++      modalDelegate: self
++     didEndSelector: @selector(_alertDidEnd:handlerCode:handler:)
++        contextInfo: (handler != NULL) ? (void *)[(id)handler copy] : NULL];
+   DESTROY(_window);
+ }
+ 
++- (void) _alertDidEnd: (NSWindow *)sheet
++          handlerCode: (NSInteger)returnCode
++              handler: (void *)handler
++{
++  if (handler != NULL)
++    {
++      CALL_BLOCK(((GSNSWindowDidEndSheetCallbackBlock)handler), returnCode);
++      RELEASE((id)handler);
++    }
++}
++
+ - (void) _alertDidEnd: (NSWindow *)sheet
+            returnCode: (NSInteger)returnCode
+ 	  contextInfo: (void *)contextInfo
+diff --git a/Source/NSApplication.m b/Source/NSApplication.m
+index 0ae4fcf..0b898d3 100644
+--- a/Source/NSApplication.m
++++ b/Source/NSApplication.m
+@@ -397,6 +397,8 @@ struct _NSModalSession {
+ 
+ @interface NSWindow (ApplicationPrivate)
+ - (void) setAttachedSheet: (id) sheet;
++- (BOOL) _endAsynchronousSheet: (NSWindow *)sheet
++                    returnCode: (NSModalResponse)returnCode;
+ @end
+ 
+ @implementation NSWindow (ApplicationPrivate)
+@@ -2137,6 +2139,11 @@ See -runModalForWindow:
+  */
+ - (void) endSheet: (NSWindow *)sheet
+ {
++  if ([[sheet sheetParent] _endAsynchronousSheet: sheet
++                                      returnCode: NSModalResponseStop])
++    {
++      return;
++    }
+   // FIXME
+   [self stopModal];
+ }
+@@ -2147,6 +2154,11 @@ See -runModalForWindow:
+ - (void) endSheet: (NSWindow *)sheet
+        returnCode: (NSInteger)returnCode
+ {
++  if ([[sheet sheetParent] _endAsynchronousSheet: sheet
++                                      returnCode: returnCode])
++    {
++      return;
++    }
+   // FIXME
+   [self stopModalWithCode: returnCode];
+ }
+diff --git a/Source/NSWindow.m b/Source/NSWindow.m
+index 9ee4ae7..a7fa724 100644
+--- a/Source/NSWindow.m
++++ b/Source/NSWindow.m
+@@ -4190,6 +4190,16 @@ checkCursorRectanglesExited(NSView *theView,  NSEvent *theEvent, NSPoint lastPoi
+       return;
+     }
+ 
++  /* A window with a sheet up takes no clicks or keys: the sheet does. */
++  if (_attachedSheet != nil && [_attachedSheet isVisible]
++    && (type == NSLeftMouseDown || type == NSRightMouseDown
++      || type == NSOtherMouseDown || type == NSKeyDown))
++    {
++      [_attachedSheet orderWindow: NSWindowAbove relativeTo: [self windowNumber]];
++      [_attachedSheet makeKeyWindow];
++      return;
++    }
++
+   switch (type)
+     {
+       case NSLeftMouseDown:
+@@ -6124,34 +6134,79 @@ current key view.<br />
+ 
+ - (void) endSheet: (NSWindow *)sheet returnCode: (NSModalResponse)returnCode
+ {
+-  if (sheet != nil && sheet == _attachedSheet)
++  if (sheet != nil && sheet == _attachedSheet
++    && ![self _endAsynchronousSheet: sheet returnCode: returnCode])
+     {
+       [NSApp endSheet: sheet returnCode: returnCode];
+     }
+ }
+ 
+-- (void)beginSheet:(NSWindow *)sheet
+- completionHandler:(GSNSWindowDidEndSheetCallbackBlock)handler {
+-  // FIXME
+-  NSInteger ret;
++/* The completion handlers of the sheets begun with
++ * -beginSheet:completionHandler: and not ended yet, by sheet.
++ */
++static NSMapTable *sheetHandlers = NULL;
+ 
+-  [sheet setParentWindow: self];
+-  self->_attachedSheet = sheet;
++- (void) beginSheet: (NSWindow *)sheet
++  completionHandler: (GSNSWindowDidEndSheetCallbackBlock)handler
++{
++  NSRect  frame = [self frame];
++  NSSize  size = [sheet frame].size;
++  NSPoint point = frame.origin;
++  id      kept;
++
++  if (sheet == nil)
++    {
++      return;
++    }
++  if (sheetHandlers == NULL)
++    {
++      sheetHandlers = NSCreateMapTable(NSNonOwnedPointerMapKeyCallBacks,
++        NSObjectMapValueCallBacks, 0);
++    }
++  kept = (handler != NULL) ? [(id)handler copy] : RETAIN([NSNull null]);
++  NSMapInsert(sheetHandlers, sheet, kept);
++  RELEASE(kept);
+ 
+-  [[NSNotificationCenter defaultCenter] 
++  [sheet setParentWindow: self];
++  _attachedSheet = sheet;
++  [[NSNotificationCenter defaultCenter]
+           postNotificationName: NSWindowWillBeginSheetNotification
+                         object: self];
+-  ret = [NSApp runModalForWindow: sheet 
+-	      relativeToWindow: self];
++  point.x += (frame.size.width - size.width) / 2;
++  point.y += (frame.size.height - size.height) / 2;
++  [sheet setFrameOrigin: point];
++  [sheet orderWindow: NSWindowAbove relativeTo: [self windowNumber]];
++  [sheet makeKeyWindow];
++}
++
++- (BOOL) _endAsynchronousSheet: (NSWindow *)sheet
++                    returnCode: (NSModalResponse)returnCode
++{
++  id handler = (sheetHandlers != NULL) ? NSMapGet(sheetHandlers, sheet) : nil;
+ 
+-  CALL_BLOCK(handler, ret);
++  if (handler == nil || sheet != _attachedSheet)
++    {
++      return NO;
++    }
++  RETAIN(handler);
++  NSMapRemove(sheetHandlers, sheet);
++  if (handler != [NSNull null])
++    {
++      CALL_BLOCK(((GSNSWindowDidEndSheetCallbackBlock)handler), returnCode);
++    }
++  RELEASE(handler);
+ 
+-  [sheet close];
+-  self->_attachedSheet = nil;
++  [sheet orderOut: self];
++  _attachedSheet = nil;
+   [sheet setParentWindow: nil];
+-  [[NSNotificationCenter defaultCenter] 
++  [[NSNotificationCenter defaultCenter]
+           postNotificationName: NSWindowDidEndSheetNotification
+                         object: self];
++  if ([self isVisible])
++    {
++      [self makeKeyWindow];
++    }
++  return YES;
+ }
+ 
+ - (CGFloat) backingScaleFactor
+diff --git a/Tests/gui/NSWindow/sheetAPI.m b/Tests/gui/NSWindow/sheetAPI.m
+index 6aa5faf..c9d5cb1 100644
+--- a/Tests/gui/NSWindow/sheetAPI.m
++++ b/Tests/gui/NSWindow/sheetAPI.m
+@@ -1,15 +1,14 @@
+-/* The window sheet methods as macOS 15 has them.  While a sheet is up its
+- * window's -attachedSheet and -sheets have it, its -sheetParent is the
+- * window and it -isSheet.  -endSheet:returnCode: ends it with that code and
+- * -endSheet: with NSModalResponseStop; the completion handler is called
+- * with the code while the sheet is still up and attached, and the sheet is
+- * then ordered out and detached.  -[NSApplication endSheet:returnCode:] ends
+- * a sheet begun with -beginSheet:completionHandler: too.
+- *
+- * GNUstep runs a sheet as a modal loop, so -beginSheet:completionHandler:
+- * returns once the sheet has ended (macOS returns at once): the sheet is
+- * ended from a timer, and another thread ends the loop after a few seconds
+- * so that a sheet nothing ends fails the test rather than hanging it.
++/* The window sheet methods as macOS 15 has them.  -beginSheet:
++ * completionHandler: returns at once, the sheet up: its window's
++ * -attachedSheet and -sheets have it, its -sheetParent is the window and it
++ * -isSheet, and the handler has not been called.  -endSheet:returnCode:
++ * ends it with that code and -endSheet: with NSModalResponseStop; the
++ * completion handler is called with the code while the sheet is still up
++ * and attached, and the sheet is then ordered out and detached.
++ * -[NSApplication endSheet:returnCode:] ends a sheet begun with
++ * -beginSheet:completionHandler: too.  While a sheet is up, its window
++ * takes no clicks.  An alert's sheet with a completion handler is still a
++ * modal session its buttons end, as before.
+  */
+ #import "Testing.h"
+ #import <Foundation/Foundation.h>
+@@ -17,87 +16,100 @@
+ 
+ static NSWindow *window;
+ static NSWindow *sheet;
+-static int how;
+-static BOOL during;
++static int calls;
+ static BOOL inHandler;
+ static NSModalResponse code;
+ 
+-@interface SheetEnder : NSObject
++@interface Clicked : NSView
++{
++@public
++  BOOL clicked;
++}
++@end
++
++@implementation Clicked
++- (void) mouseDown: (NSEvent *)e
++{
++  clicked = YES;
++}
++@end
++
++@interface AlertEnder : NSObject
+ @end
+ 
+-@implementation SheetEnder
++@implementation AlertEnder
+ - (void) end: (NSTimer *)t
+ {
+-  if (![window respondsToSelector: @selector(endSheet:returnCode:)])
+-    {
+-      [NSApp abortModal];
+-      return;
+-    }
+-  during = [window attachedSheet] == sheet
+-    && [[window sheets] count] == 1
+-    && [[window sheets] objectAtIndex: 0] == sheet
+-    && [sheet sheetParent] == window
+-    && [sheet isSheet] && ![window isSheet] && [window sheetParent] == nil;
+-  if (how == 2)
+-    [NSApp endSheet: sheet returnCode: 7];
+-  else if (how == 0)
+-    [window endSheet: sheet returnCode: 42];
+-  else
+-    [window endSheet: sheet];
++  [NSApp stopModalWithCode: NSAlertSecondButtonReturn];
+ }
+ 
++/* A sheet run as a modal loop (as before) would hang the test: after a few
++   seconds the loop is aborted, and the checks fail instead. */
+ - (void) watch: (id)unused
+ {
+-  CREATE_AUTORELEASE_POOL(pool);
+-  [NSThread sleepForTimeInterval: 4.0];
+-  [self performSelectorOnMainThread: @selector(wake:)
+-                         withObject: nil
+-                      waitUntilDone: NO
+-                              modes: [NSArray arrayWithObject:
+-                                NSModalPanelRunLoopMode]];
+-  DESTROY(pool);
++  for (;;)
++    {
++      CREATE_AUTORELEASE_POOL(pool);
++      [NSThread sleepForTimeInterval: 4.0];
++      [self performSelectorOnMainThread: @selector(wake:)
++                             withObject: nil
++                          waitUntilDone: NO
++                                  modes: [NSArray arrayWithObject:
++                                    NSModalPanelRunLoopMode]];
++      DESTROY(pool);
++    }
+ }
+ 
+ - (void) wake: (id)unused
+ {
+-  [NSApp abortModal];
+-  [NSApp postEvent: [NSEvent otherEventWithType: NSApplicationDefined
+-                                       location: NSZeroPoint
+-                                  modifierFlags: 0
+-                                      timestamp: 0
+-                                   windowNumber: [sheet windowNumber]
+-                                        context: nil
+-                                        subtype: 0
+-                                          data1: 0
+-                                          data2: 0]
+-           atStart: NO];
++  if ([NSApp modalWindow] == sheet)
++    {
++      [NSApp abortModal];
++      [NSApp postEvent: [NSEvent otherEventWithType: NSApplicationDefined
++                                           location: NSZeroPoint
++                                      modifierFlags: 0
++                                          timestamp: 0
++                                       windowNumber: [sheet windowNumber]
++                                            context: nil
++                                            subtype: 0
++                                              data1: 0
++                                              data2: 0]
++               atStart: NO];
++    }
+ }
+ @end
+ 
+ static void
+-runSheet(int h)
++begin(void)
+ {
+-  SheetEnder *ender = AUTORELEASE([SheetEnder new]);
+-
+-  how = h;
+-  during = inHandler = NO;
++  calls = 0;
++  inHandler = NO;
+   code = 0;
+-  [[NSRunLoop currentRunLoop] addTimer:
+-    [NSTimer timerWithTimeInterval: 0.2
+-                            target: ender
+-                          selector: @selector(end:)
+-                          userInfo: nil
+-                           repeats: NO]
+-                               forMode: NSModalPanelRunLoopMode];
+-  [NSThread detachNewThreadSelector: @selector(watch:)
+-                           toTarget: ender
+-                         withObject: nil];
+   [window beginSheet: sheet completionHandler: ^(NSModalResponse r) {
++    calls++;
+     code = r;
+     inHandler = [sheet isVisible] && [window attachedSheet] == sheet;
+   }];
+ }
+ 
++static BOOL
++up(void)
++{
++  return [window attachedSheet] == sheet
++    && [[window sheets] count] == 1
++    && [[window sheets] objectAtIndex: 0] == sheet
++    && [sheet sheetParent] == window
++    && [sheet isSheet] && ![window isSheet] && [window sheetParent] == nil
++    && [sheet isVisible];
++}
++
++static BOOL
++gone(void)
++{
++  return ![sheet isVisible] && [window attachedSheet] == nil
++    && [[window sheets] count] == 0 && [sheet sheetParent] == nil;
++}
++
+ int
+ main(int argc, char **argv)
+ {
+@@ -130,20 +142,74 @@ main(int argc, char **argv)
+   PASS([window respondsToSelector: @selector(sheets)]
+     && [[window sheets] count] == 0 && [window attachedSheet] == nil,
+     "a window has no sheets at first");
++  [NSThread detachNewThreadSelector: @selector(watch:)
++                           toTarget: AUTORELEASE([AlertEnder new])
++                         withObject: nil];
+ 
+-  runSheet(0);
+-  PASS(during, "while a sheet is up, its window has it and it has its window");
+-  PASS(code == 42, "-endSheet:returnCode: ends it with the code");
++  begin();
++  PASS(up(), "-beginSheet:completionHandler: returns with the sheet up, its window's");
++  PASS(calls == 0, "and its handler not called yet");
++  [window endSheet: sheet returnCode: 42];
++  PASS(calls == 1 && code == 42, "-endSheet:returnCode: ends it with the code");
+   PASS(inHandler, "the handler is called while the sheet is up");
+-  PASS(![sheet isVisible] && [window attachedSheet] == nil
+-    && [[window sheets] count] == 0 && [sheet sheetParent] == nil,
+-    "then the sheet is ordered out and detached");
++  PASS(gone(), "then the sheet is ordered out and detached");
++
++  begin();
++  [window endSheet: sheet];
++  PASS(calls == 1 && code == NSModalResponseStop, "-endSheet: ends it with the stop code");
++  PASS(gone(), "and it is gone");
++
++  begin();
++  [NSApp endSheet: sheet returnCode: 7];
++  PASS(calls == 1 && code == 7, "NSApp's -endSheet:returnCode: ends a window's sheet");
++  PASS(gone(), "and it is gone");
++
++  begin();
++  [NSApp endSheet: sheet];
++  PASS(calls == 1 && code == NSModalResponseStop, "NSApp's -endSheet: ends it with the stop code");
++
++  {
++    Clicked *view = AUTORELEASE([[Clicked alloc] initWithFrame: NSMakeRect(0, 0, 400, 300)]);
++    NSEvent *click;
++
++    [window setContentView: view];
++    click = [NSEvent mouseEventWithType: NSLeftMouseDown
++                               location: NSMakePoint(10, 10)
++                          modifierFlags: 0
++                              timestamp: 0
++                           windowNumber: [window windowNumber]
++                                context: nil
++                            eventNumber: 0
++                             clickCount: 1
++                               pressure: 1.0];
++    begin();
++    [window sendEvent: click];
++    PASS(!view->clicked, "while a sheet is up, its window takes no click");
++    [window endSheet: sheet];
++    [window sendEvent: click];
++    PASS(view->clicked, "once it is gone, it does");
++  }
+ 
+-  runSheet(1);
+-  PASS(code == NSModalResponseStop, "-endSheet: ends it with the stop code");
++  {
++    NSAlert *alert = AUTORELEASE([[NSAlert alloc] init]);
++    __block NSModalResponse answered = 0;
+ 
+-  runSheet(2);
+-  PASS(code == 7, "NSApp's -endSheet:returnCode: ends a window's sheet");
++    [alert setMessageText: @"Sure?"];
++    [alert addButtonWithTitle: @"Yes"];
++    [alert addButtonWithTitle: @"No"];
++    [[NSRunLoop currentRunLoop] addTimer:
++      [NSTimer timerWithTimeInterval: 0.2
++                              target: AUTORELEASE([AlertEnder new])
++                            selector: @selector(end:)
++                            userInfo: nil
++                             repeats: NO]
++                                 forMode: NSModalPanelRunLoopMode];
++    [alert beginSheetModalForWindow: window completionHandler: ^(NSModalResponse r) {
++      answered = r;
++    }];
++    PASS(answered == NSAlertSecondButtonReturn,
++      "an alert's sheet ends in its modal session, its handler told");
++  }
+ 
+   END_SET("window sheets")
+   DESTROY(arp);
+-- 
+2.43.0
+
