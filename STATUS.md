@@ -911,6 +911,27 @@ exception.  With both, Logbook's `make clean; make -k check` passes
 (self-test done: 0 failed, 269 checks) on the 2026.10.20.4 image with
 every patch here, and the gui suite passes 5368 checks with none failing,
 on libs-gui cacd5cb08.
+Changed on 2026-11-22 for Logbook's record tabs, whose MainWindow.nib
+no longer loaded: their pop-ups bind contentValues through an object
+controller's selection (selection.choices.driver.lbTitle), and with no
+record chosen the controller has no content. Finding the to-many, the
+binding read the key path a key at a time and asked the next key of the
+NSNoSelectionMarker the selection gave ("Unable to find value for key
+driver of object <NO SELECTION MARKER>"). A marker now stops the reading
+as nil does. The third set of `NSPopUpButton/contentValuesKeyPath.m`
+passes its 6 checks on macOS 15 and with the change; without it the set
+stops at the binding. The NSPopUpButton tests pass 92 checks on libs-gui
+662f89071 (the 2026.10.20.54 stack's) with every patch here.
+Rebased on 2026-11-22, as upstream moved under them:
+`windows-listening-socket-read` onto libdispatch 20b4c8b, whose eb4e423
+("Deliver EOF on pipes and sockets as a 0 byte event") rewrote the socket
+callback: a pending connection is now posted as readable beside the new
+read-or-close case, the rest of the patch as it was; and
+`nsdate-tagged-roundtrip` onto libs-base c1dbf57, whose c75898d re-wrapped
+a line of the comment it edits. Every patch here applies, in order, to
+those masters and to libs-gui 732c2d8. On libs-base c1dbf57 with every
+libs-base patch, NSDate (101), NSDateFormatter (418), NSNumberFormatter
+(153), NSCalendar (587) and NSCalendarDate (187) pass.
 Added on 2026-10-20 for Logbook's pick lists, checked against macOS 15
 first: `controller-value-bindings`, `controller-fetch-sort-keys` and
 `objectcontroller-deferred-add`.  An array controller exposed no
