@@ -911,6 +911,17 @@ exception.  With both, Logbook's `make clean; make -k check` passes
 (self-test done: 0 failed, 269 checks) on the 2026.10.20.4 image with
 every patch here, and the gui suite passes 5368 checks with none failing,
 on libs-gui cacd5cb08.
+Changed on 2026-11-22 for Logbook's record tabs, whose MainWindow.nib
+no longer loaded: their pop-ups bind contentValues through an object
+controller's selection (selection.choices.driver.lbTitle), and with no
+record chosen the controller has no content. Finding the to-many, the
+binding read the key path a key at a time and asked the next key of the
+NSNoSelectionMarker the selection gave ("Unable to find value for key
+driver of object <NO SELECTION MARKER>"). A marker now stops the reading
+as nil does. The third set of `NSPopUpButton/contentValuesKeyPath.m`
+passes its 6 checks on macOS 15 and with the change; without it the set
+stops at the binding. The NSPopUpButton tests pass 92 checks on libs-gui
+662f89071 (the 2026.10.20.54 stack's) with every patch here.
 Added on 2026-10-20 for Logbook's pick lists, checked against macOS 15
 first: `controller-value-bindings`, `controller-fetch-sort-keys` and
 `objectcontroller-deferred-add`.  An array controller exposed no

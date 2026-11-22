@@ -1,4 +1,4 @@
-From bcf8806be609d3e56a0c8da7582af5381711bb05 Mon Sep 17 00:00:00 2001
+From 4338ebb953b03713170b257a8aaa34c1738b35ad Mon Sep 17 00:00:00 2001
 From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
 Date: Mon, 19 Oct 2026 16:27:19 +0000
 Subject: [PATCH] NSPopUpButton: content, contentObjects and contentValues
@@ -64,6 +64,18 @@ another array, nil and an array again; it passes its 7 checks on AppKit,
 and with the choice made only when binding, 2 fail and the set stops at
 the exception libs-base's key-value observing raises for the array.
 
+The to-many is found by reading the key path a key at a time, stopping at
+a nil that may become one. Through a controller's selection with nothing
+selected, a key reads NSNoSelectionMarker, and the next was asked of the
+marker: contentValues bound to selection.choices.driver.lbTitle of an
+object controller with no content raised "Unable to find value for key
+driver of object <NO SELECTION MARKER>", and a nib with such a pop-up
+failed to load. A marker now stops the reading as nil does. The test's
+third set binds content and contentValues through an object controller's
+selection with no content, then gives it content, changes a member, and
+takes the content away; its 6 checks pass on AppKit (macOS 15) and with
+this, and without it the set stops at the binding, raising.
+
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  Headers/AppKit/NSKeyValueBinding.h            |   1 +
@@ -73,13 +85,13 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  Source/NSPopUpButtonCell.m                    |   9 +
  Source/externs.m                              |   1 +
  Tests/gui/NSPopUpButton/contentBindings.m     | 250 ++++++++++
- .../gui/NSPopUpButton/contentValuesKeyPath.m  | 155 ++++++
- 8 files changed, 890 insertions(+), 15 deletions(-)
+ .../gui/NSPopUpButton/contentValuesKeyPath.m  | 204 ++++++++
+ 8 files changed, 939 insertions(+), 15 deletions(-)
  create mode 100644 Tests/gui/NSPopUpButton/contentBindings.m
  create mode 100644 Tests/gui/NSPopUpButton/contentValuesKeyPath.m
 
 diff --git a/Headers/AppKit/NSKeyValueBinding.h b/Headers/AppKit/NSKeyValueBinding.h
-index fb3eb9e16..413df8ad9 100644
+index 7a6ab89..bfa3874 100644
 --- a/Headers/AppKit/NSKeyValueBinding.h
 +++ b/Headers/AppKit/NSKeyValueBinding.h
 @@ -109,6 +109,7 @@ APPKIT_EXPORT NSString *NSContentArrayBinding;
@@ -91,10 +103,10 @@ index fb3eb9e16..413df8ad9 100644
  APPKIT_EXPORT NSString *NSContentValuesBinding;
  APPKIT_EXPORT NSString *NSEditableBinding;
 diff --git a/Source/GSBindingHelpers.h b/Source/GSBindingHelpers.h
-index 1731f25b2..fe7058790 100644
+index 7d74001..b504032 100644
 --- a/Source/GSBindingHelpers.h
 +++ b/Source/GSBindingHelpers.h
-@@ -60,6 +60,8 @@
+@@ -59,6 +59,8 @@
             withKeyPath: (NSString *)keyPath
                 options: (NSDictionary *)options
              fromObject: (id)source;
@@ -104,10 +116,10 @@ index 1731f25b2..fe7058790 100644
  - (void) reverseSetValue: (id)value;
  - (void) reverseSetValueFor: (NSString *)binding;
 diff --git a/Source/NSKeyValueBinding.m b/Source/NSKeyValueBinding.m
-index 92c5c763a..073ce1291 100644
+index 12ba766..80432e8 100644
 --- a/Source/NSKeyValueBinding.m
 +++ b/Source/NSKeyValueBinding.m
-@@ -291,8 +291,6 @@ void GSBindingInvokeAction(NSString *targetKey, NSString *argumentKey,
+@@ -234,8 +234,6 @@ void GSBindingInvokeAction(NSString *targetKey, NSString *argumentKey,
        forObject: (id)anObject
  {
    NSMutableDictionary *bindings;
@@ -116,7 +128,7 @@ index 92c5c763a..073ce1291 100644
    GSKeyValueBinding *theBinding;
  
    if (!objectTable)
-@@ -305,9 +303,7 @@ void GSBindingInvokeAction(NSString *targetKey, NSString *argumentKey,
+@@ -248,9 +246,7 @@ void GSBindingInvokeAction(NSString *targetKey, NSString *argumentKey,
        theBinding = (GSKeyValueBinding*)[bindings objectForKey: binding];
        if (theBinding != nil)
          {
@@ -127,7 +139,7 @@ index 92c5c763a..073ce1291 100644
            [bindings setValue: nil forKey: binding];
          }
      }
-@@ -366,10 +362,7 @@ void GSBindingInvokeAction(NSString *targetKey, NSString *argumentKey,
+@@ -308,10 +304,7 @@ void GSBindingInvokeAction(NSString *targetKey, NSString *argumentKey,
          nil];
      }
      
@@ -139,7 +151,7 @@ index 92c5c763a..073ce1291 100644
  
    [bindingLock lock];
    bindings = (NSMutableDictionary *)NSMapGet(objectTable, (void *)source);
-@@ -387,6 +380,22 @@ void GSBindingInvokeAction(NSString *targetKey, NSString *argumentKey,
+@@ -329,6 +322,22 @@ void GSBindingInvokeAction(NSString *targetKey, NSString *argumentKey,
    return self;
  }
  
@@ -163,7 +175,7 @@ index 92c5c763a..073ce1291 100644
  {
    DESTROY(info);
 diff --git a/Source/NSPopUpButton.m b/Source/NSPopUpButton.m
-index f364952e8..6583e338d 100644
+index f364952..69e535a 100644
 --- a/Source/NSPopUpButton.m
 +++ b/Source/NSPopUpButton.m
 @@ -30,6 +30,7 @@
@@ -239,9 +251,9 @@ index f364952e8..6583e338d 100644
 +    }
 +}
 +
-+/* The number of keys in the key path up to a to-many, or up to a nil
-+ * that may become one; NSNotFound when key-value observing can take the
-+ * key path whole.
++/* The number of keys in the key path up to a to-many, or up to a nil or
++ * a controller's marker that may become one; NSNotFound when key-value
++ * observing can take the key path whole.
 + */
 +- (NSUInteger) headLength
 +{
@@ -253,7 +265,7 @@ index f364952e8..6583e338d 100644
 +  for (i = 0; i + 1 < [keys count]; i++)
 +    {
 +      value = [value valueForKey: [keys objectAtIndex: i]];
-+      if (value == nil
++      if (value == nil || NSIsControllerMarker(value)
 +        || (([value isKindOfClass: [NSArray class]]
 +          || [value isKindOfClass: [NSSet class]])
 +          && ![value isKindOfClass: [GSObservableArray class]]))
@@ -691,7 +703,7 @@ index f364952e8..6583e338d 100644
    else if ([aKey isEqual: NSSelectedValueBinding])
      {
 diff --git a/Source/NSPopUpButtonCell.m b/Source/NSPopUpButtonCell.m
-index 63d3cafb2..a8481e4b4 100644
+index 63d3caf..a8481e4 100644
 --- a/Source/NSPopUpButtonCell.m
 +++ b/Source/NSPopUpButtonCell.m
 @@ -1399,6 +1399,10 @@ static NSImage *_pbc_image[5];
@@ -718,7 +730,7 @@ index 63d3cafb2..a8481e4b4 100644
      {
        NSString *bindings[] = {NSSelectedIndexBinding, NSSelectedTagBinding,
 diff --git a/Source/externs.m b/Source/externs.m
-index 2bea06600..eedb3e010 100644
+index dd85deb..1156571 100644
 --- a/Source/externs.m
 +++ b/Source/externs.m
 @@ -695,6 +695,7 @@ APPKIT_DECLARE NSString *NSContentArrayBinding = @"contentArray";
@@ -731,7 +743,7 @@ index 2bea06600..eedb3e010 100644
  APPKIT_DECLARE NSString *NSEditableBinding = @"editable";
 diff --git a/Tests/gui/NSPopUpButton/contentBindings.m b/Tests/gui/NSPopUpButton/contentBindings.m
 new file mode 100644
-index 000000000..f1b5a721e
+index 0000000..f1b5a72
 --- /dev/null
 +++ b/Tests/gui/NSPopUpButton/contentBindings.m
 @@ -0,0 +1,250 @@
@@ -987,10 +999,10 @@ index 000000000..f1b5a721e
 +}
 diff --git a/Tests/gui/NSPopUpButton/contentValuesKeyPath.m b/Tests/gui/NSPopUpButton/contentValuesKeyPath.m
 new file mode 100644
-index 000000000..d48c0f7dc
+index 0000000..7fd51b1
 --- /dev/null
 +++ b/Tests/gui/NSPopUpButton/contentValuesKeyPath.m
-@@ -0,0 +1,155 @@
+@@ -0,0 +1,204 @@
 +/* contentValues bound through a to-many of the object content is bound to
 +   (content to drivers, contentValues to drivers.name) titles the items by
 +   each member's value, and follows the to-many and its members, as on
@@ -1007,6 +1019,7 @@ index 000000000..d48c0f7dc
 +
 +#include <AppKit/NSApplication.h>
 +#include <AppKit/NSKeyValueBinding.h>
++#include <AppKit/NSObjectController.h>
 +#include <AppKit/NSPopUpButton.h>
 +
 +@interface Vehicle : NSObject
@@ -1144,6 +1157,54 @@ index 000000000..d48c0f7dc
 +  NS_ENDHANDLER
 +
 +  END_SET("NSPopUpButton contentValues through a to-many nil when bound")
++
++  START_SET("NSPopUpButton contentValues through a controller's selection")
++
++  NS_DURING
++    [NSApplication sharedApplication];
++  NS_HANDLER
++    if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++      SKIP("It looks like GNUstep backend is not yet installed")
++  NS_ENDHANDLER
++
++  {
++    NSObjectController	*controller;
++
++    ada = [NSMutableDictionary dictionaryWithObject: @"Ada" forKey: @"name"];
++    bob = [NSMutableDictionary dictionaryWithObject: @"Bob" forKey: @"name"];
++    vehicle = AUTORELEASE([[Vehicle alloc] init]);
++    [vehicle setDrivers: [NSArray arrayWithObjects: ada, bob, nil]];
++    controller = AUTORELEASE([[NSObjectController alloc] initWithContent: nil]);
++    popup = AUTORELEASE([[NSPopUpButton alloc]
++      initWithFrame: NSMakeRect(0, 0, 100, 20) pullsDown: NO]);
++
++    NS_DURING
++      {
++	[popup bind: NSContentBinding toObject: controller
++	withKeyPath: @"selection.drivers" options: nil];
++	[popup bind: NSContentValuesBinding toObject: controller
++	withKeyPath: @"selection.drivers.name" options: nil];
++	PASS(YES, "contentValues binds through no selection")
++      }
++    NS_HANDLER
++      PASS(NO, "contentValues binds through no selection")
++    NS_ENDHANDLER
++    PASS([popup numberOfItems] == 0, "no selection gives no items")
++
++    [controller setContent: vehicle];
++    PASS_EQUAL(titles(popup), @"Ada,Bob", "a selection titles the items by name")
++
++    [ada setObject: @"Cid" forKey: @"name"];
++    PASS_EQUAL(titles(popup), @"Cid,Bob", "a member's new name shows")
++
++    [controller setContent: nil];
++    PASS([popup numberOfItems] == 0, "no selection again gives no items")
++
++    [popup unbind: NSContentValuesBinding];
++    [popup unbind: NSContentBinding];
++  }
++
++  END_SET("NSPopUpButton contentValues through a controller's selection")
 +  return 0;
 +}
 -- 
