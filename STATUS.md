@@ -932,6 +932,17 @@ a line of the comment it edits. Every patch here applies, in order, to
 those masters and to libs-gui 732c2d8. On libs-base c1dbf57 with every
 libs-base patch, NSDate (101), NSDateFormatter (418), NSNumberFormatter
 (153), NSCalendar (587) and NSCalendarDate (187) pass.
+Added on 2026-11-26 for Logbook's currency fields (a catalog's currency,
+typed into a combo box, saved as none on Linux): `combobox-typed-value`.
+NSComboBoxCell's -objectValue was the item chosen in its list, nil when
+none was, so what was typed never reached a value binding (it set the
+property to nil) and a text typed after an item was chosen read as that
+item. On macOS its object value is its text; the override is removed,
+NSCell's own giving the text (choosing an item sets it). Its test,
+`NSComboBox/typedValue.m`, passes on macOS 15.8.3 (24H241), and 4 of its 5
+checks fail without the change; libs-gui's suite passes with it (4945
+passed, on libs-gui af9ee9812).
+
 Added on 2026-11-22 for Logbook's sheets (its self-test hung at the
 first, the Transfer sheet of an item's window): `window-sheet-async`.
 -beginSheet:completionHandler: ran the sheet as a modal session and
@@ -1788,6 +1799,7 @@ master 662f89071.
 | `pasteboard-clear-contents` | libs-gui | test | not sent yet | (none: RDLKit will use it from here) |
 | `window-sheet-api` | libs-gui | test | not sent yet | (none: RDLKit will use it from here) |
 | `window-sheet-async` | libs-gui | test | not sent yet (after `window-sheet-api`) | (none: Logbook's sheets go on from here) |
+| `combobox-typed-value` | libs-gui | test | not sent yet | (none: Logbook's currency fields use it from here) |
 | `colorspace-srgb` | libs-gui | test | not sent yet | (none: RDLKit will use it from here) |
 | `cgrectunion-size` | libs-opal | none | [#71](https://github.com/gnustep/libs-opal/pull/71) | GSXFormsKit |
 | `freetype-advance-without-size` | libs-opal | test | [#72](https://github.com/gnustep/libs-opal/pull/72) | (none: XFormsKit uses it from here) |

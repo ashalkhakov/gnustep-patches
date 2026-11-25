@@ -1,0 +1,203 @@
+From 2950a7053b9a6f7e4eb89d7adac7bf5d0be0b139 Mon Sep 17 00:00:00 2001
+From: Artyom Shalkhakov <artyom.shalkhakov@gmail.com>
+Date: Wed, 25 Nov 2026 19:07:49 +0000
+Subject: [PATCH] NSComboBoxCell: its object value is its text
+
+-objectValue returned the object value of the item chosen in the list,
+and nil when none was. A text typed, or set with -setStringValue:, was
+lost: a combo box bound by its value binding set the bound property to
+nil at the end of editing, and one whose item was chosen before kept
+returning that item after its text was changed.
+
+On macOS the object value of a combo box cell is its contents, as any
+text field cell's: what is typed, whether or not it is one of its items.
+Choosing an item already sets the cell's string value (the list's
+selection does), so NSCell's own -objectValue gives that item's text.
+The override is removed.
+
+Tests/gui/NSComboBox/typedValue.m checks the object value of a text that
+is none of its items, of an item's text not chosen, of a text set after
+an item was chosen, and the value binding set from what is typed in the
+field editor. Its five checks pass on macOS 15 (24H241); four of them
+fail without the change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/NSComboBoxCell.m           |  43 ------------
+ Tests/gui/NSComboBox/typedValue.m | 110 ++++++++++++++++++++++++++++++
+ 2 files changed, 110 insertions(+), 43 deletions(-)
+ create mode 100644 Tests/gui/NSComboBox/typedValue.m
+
+diff --git a/Source/NSComboBoxCell.m b/Source/NSComboBoxCell.m
+index 5bdc701e3..7a208e6fd 100644
+--- a/Source/NSComboBoxCell.m
++++ b/Source/NSComboBoxCell.m
+@@ -1164,49 +1164,6 @@ GSDetachComboPopupParentWindow(NSWindow *popupWindow)
+     }
+ }
+ 
+-/* FIXME: Not sure, if this is the best way to implement objectValue,
+- * perhaps it would be better to store the current value with setObjectValue: 
+- * whenever it changes.
+- */
+-- (id) objectValue
+-{
+-  NSInteger index = [self indexOfSelectedItem];
+-
+-  if (index == -1)
+-    {
+-      return nil;
+-    }
+-  else
+-    {
+-      if (_usesDataSource)
+-        {
+-	  if (_dataSource == nil)
+-	    {
+-	      NSLog(@"%@: No data source currently specified", self);
+-	      return nil;
+-	    }
+-	  if ([_dataSource respondsToSelector: 
+-			       @selector(comboBox:objectValueForItemAtIndex:)])
+-	    {
+-	      return [_dataSource comboBox: (NSComboBox *)[self controlView] 
+-				  objectValueForItemAtIndex: index];
+-	    }
+-	  else if ([_dataSource respondsToSelector: 
+-				    @selector(comboBoxCell:objectValueForItemAtIndex:)])
+-	    {
+-	      return [_dataSource comboBoxCell: self
+-				  objectValueForItemAtIndex: index];
+-	    }
+-	}
+-      else
+-        {
+-	  return [self itemObjectValueAtIndex: index];
+-	}
+-    }
+-    
+-  return nil;
+-}
+-
+ /**
+  * Returns the object value of the selected item in the combo box cell default
+  * items list or nil when there is no selection. In the case
+diff --git a/Tests/gui/NSComboBox/typedValue.m b/Tests/gui/NSComboBox/typedValue.m
+new file mode 100644
+index 000000000..3ce8c6176
+--- /dev/null
++++ b/Tests/gui/NSComboBox/typedValue.m
+@@ -0,0 +1,110 @@
++/* NSComboBox's object value is its text, whether or not it is one of its
++   items: what was typed (setStringValue:, or the field editor) is what
++   -objectValue returns and what its value binding is set to, also after an
++   item was chosen before.  Checked against AppKit on macOS 15.  The combo
++   box uses the theme and font backend, so the set is skipped when the
++   backend or a display is unavailable.
++*/
++#include "Testing.h"
++
++#include <Foundation/NSAutoreleasePool.h>
++#include <Foundation/NSGeometry.h>
++#include <Foundation/NSString.h>
++
++#include <AppKit/NSApplication.h>
++#include <AppKit/NSComboBox.h>
++#include <AppKit/NSKeyValueBinding.h>
++#include <AppKit/NSTextView.h>
++#include <AppKit/NSWindow.h>
++
++@interface Holder : NSObject
++{
++  NSString *currency;
++}
++- (NSString *) currency;
++- (void) setCurrency: (NSString *)c;
++@end
++
++@implementation Holder
++- (NSString *) currency
++{
++  return currency;
++}
++- (void) setCurrency: (NSString *)c
++{
++  ASSIGN(currency, c);
++}
++@end
++
++int
++main(int argc, char **argv)
++{
++  START_SET("NSComboBox typed value")
++
++  NS_DURING
++    {
++      [NSApplication sharedApplication];
++    }
++  NS_HANDLER
++    {
++      if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++        SKIP("It looks like GNUstep backend is not yet installed")
++    }
++  NS_ENDHANDLER
++
++  NS_DURING
++    {
++      NSComboBox *cb = AUTORELEASE([[NSComboBox alloc]
++        initWithFrame: NSMakeRect(10, 10, 120, 26)]);
++      NSWindow *window;
++      NSTextView *editor;
++      Holder *holder = AUTORELEASE([[Holder alloc] init]);
++
++      [cb addItemWithObjectValue: @"EUR"];
++      [cb addItemWithObjectValue: @"USD"];
++
++      [cb setStringValue: @"UAH"];
++      PASS_EQUAL([cb objectValue], @"UAH",
++        "a text that is none of its items is its object value");
++      [cb setStringValue: @"USD"];
++      PASS_EQUAL([cb objectValue], @"USD",
++        "a text that is one of its items, not chosen, is its object value");
++
++      [cb selectItemAtIndex: 0];
++      [cb setStringValue: @"KZT"];
++      PASS_EQUAL([cb objectValue], @"KZT",
++        "a text set after an item was chosen is its object value");
++
++      window = AUTORELEASE([[NSWindow alloc]
++        initWithContentRect: NSMakeRect(0, 0, 200, 60)
++                  styleMask: NSTitledWindowMask
++                    backing: NSBackingStoreBuffered
++                      defer: NO]);
++      [[window contentView] addSubview: cb];
++      /* As a nib's combo box is (Interface Builder's default). */
++      [[cb cell] setSendsActionOnEndEditing: YES];
++      [holder setCurrency: @"EUR"];
++      [cb bind: NSValueBinding toObject: holder withKeyPath: @"currency" options: nil];
++      PASS_EQUAL([cb stringValue], @"EUR", "the bound value is shown");
++
++      [window makeFirstResponder: cb];
++      editor = (NSTextView *)[window fieldEditor: NO forObject: cb];
++      [editor selectAll: nil];
++      [editor insertText: @"UAH"];
++      [window makeFirstResponder: nil];
++      PASS_EQUAL([holder currency], @"UAH",
++        "what is typed is set to the value binding at the end of editing");
++      [cb unbind: NSValueBinding];
++    }
++  NS_HANDLER
++    {
++      if ([[localException name] isEqualToString: NSInternalInconsistencyException])
++        SKIP("No display available")
++      else
++        [localException raise];
++    }
++  NS_ENDHANDLER
++
++  END_SET("NSComboBox typed value")
++  return 0;
++}
+-- 
+2.43.0
+
